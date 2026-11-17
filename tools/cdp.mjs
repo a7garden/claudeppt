@@ -7,7 +7,9 @@ import fs from "node:fs";
 const [cmd, raw] = process.argv.slice(2);
 const arg = raw?.startsWith("@") ? fs.readFileSync(raw.slice(1), "utf8") : raw;
 const list = await (await fetch("http://127.0.0.1:9333/json")).json();
-const page = list.find((p) => p.type === "page" && /localhost:1424|tauri\.localhost/.test(p.url)) || list.find((p) => p.type === "page");
+// CDP_TARGET=<주소 조각> 이면 그 주소의 대상(슬라이드 iframe 등)에 붙는다
+const want = process.env.CDP_TARGET;
+const page = want ? list.find((p) => p.url.includes(want)) : list.find((p) => p.type === "page" && /localhost:1424|tauri\.localhost/.test(p.url)) || list.find((p) => p.type === "page");
 const ws = new WebSocket(page.webSocketDebuggerUrl);
 await new Promise((r) => ws.addEventListener("open", r));
 let id = 0;

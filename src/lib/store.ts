@@ -7,12 +7,14 @@
 //   대화                 send → claude 한 턴 → 그림 채우기 → 한 판으로 남김 → .claudeppt/talk.json
 //   직접 편집            applyDirect → 원본 HTML 에 되쓰고 잠시 뒤 한 판으로 남김
 //   판 · 릴리즈          refreshVersions · preview · restore · release
+//   비교 검사            check — 내보낸 PPTX 를 PowerPoint 가 그린 모양과 웹을 픽셀로 견준다 (check.ts) · fixDiff
 import { listen } from "@tauri-apps/api/event";
 import { create } from "zustand";
 import { api, type Commit } from "./api";
 import { type Deck, readDeck, writeDeck } from "./deck";
 import { applyOp, type Op } from "./edits";
 import { buildPptx } from "./exportPptx";
+import { type Report, SAME, readReport, runCheck } from "./check";
 import { tell } from "./frames";
 import { tNow } from "./i18n";
 import { fillGenerated } from "./imagegen";
@@ -54,6 +56,9 @@ interface S {
 	busy: string | null;
 	toast: { text: string; kind: "ok" | "err" } | null;
 	frames: Set<Window>;
+	report: Report | null;
+	compare: boolean;
+	compareMask: boolean;
 
 	openProject: (dir: string) => Promise<void>;
 	closeProject: () => Promise<void>;
@@ -68,10 +73,13 @@ interface S {
 	refreshVersions: () => Promise<void>;
 	setPreview: (c: Commit | null) => void;
 	restore: (c: Commit) => Promise<void>;
-	exportTo: (path: string) => Promise<void>;
+	exportTo: (path: string, exact?: boolean) => Promise<void>;
 	release: (name: string, notes: string) => Promise<void>;
 	notify: (text: string, kind?: "ok" | "err") => void;
 	saveDeck: (deck: Deck) => Promise<void>;
+	check: () => Promise<void>;
+	setCompare: (on: boolean) => void;
+	fixDiff: () => void;
 }
 
 let unlisten: (() => void)[] = [];
@@ -108,6 +116,9 @@ export const useDeck = create<S>()((set, get) => ({
 	busy: null,
 	toast: null,
 	frames: new Set(),
+	report: null,
+	compare: false,
+	compareMask: true,
 
 	openProject: async (dir) => {
 		await get().closeProject();
@@ -117,7 +128,7 @@ export const useDeck = create<S>()((set, get) => ({
 		const pins = await readJson<Pin[]>(dir, ".claudeppt/pins.json", []);
 		const talk = await readJson<{ sessionId: string | null; turns: Turn[] }>(dir, ".claudeppt/talk.json", { sessionId: null, turns: [] });
 		const releases = await readJson<Release[]>(dir, "releases/releases.json", []);
-		set({ dir, id, deck, rev: {}, current: 0, mode: "view", pins, turns: talk.turns, sessionId: talk.sessionId, versions: [], releases, preview: null });
+		set({ dir, id, deck, rev: {}, current: 0, mode: "view", pins, turns: talk.turns, sessionId: talk.sessionId, versions: [], releases, preview: null, report: await readReport(dir), compare: false });
 		useSettings.getState().remember(dir);
 		// 처음 여는 프로젝트(가져오기 직후)면 첫 판을 남긴다
 		const log = await api.log(dir, 1);
@@ -182,7 +193,7 @@ export const useDeck = create<S>()((set, get) => ({
 		unlisten = [];
 		const { id } = get();
 		if (id) await api.close(id).catch(() => {});
-		set({ dir: "", id: "", deck: null, turns: [], pins: [], versions: [], preview: null, running: null });
+		set({ dir: "", id: "", deck: null, turns: [], pins: [], versions: [], preview: null, running: null, report: null, compare: false });
 	},
 
 	setCurrent: (i) => set({ current: Math.max(0, Math.min(i, (get().deck?.slides.length || 1) - 1)) }),
@@ -305,14 +316,15 @@ export const useDeck = create<S>()((set, get) => ({
 		}
 	},
 
-	exportTo: async (path) => {
+	exportTo: async (path, exact = false) => {
 		const { deck, id } = get();
 		if (!deck) return;
 		set({ busy: tNow("exporting") });
 		try {
-			const b64 = await buildPptx(deck, id, (i, n) => set({ busy: `${tNow("exporting")} ${i}/${n}` }));
-			await api.absWrite(path, b64);
-			get().notify(path.split(/[\\/]/).pop()!, "ok");
+			const b = await buildPptx(deck, id, (i, n) => set({ busy: `${tNow("exporting")} ${i}/${n}` }), exact);
+			await api.absWrite(path, b.data);
+			// 깔리지 않은 글꼴은 PowerPoint 에서 다른 글꼴로 보인다 — 알린다
+			get().notify(path.split(/[\\/]/).pop()! + (b.missingFonts.length ? ` · ${tNow("missingFont")}: ${b.missingFonts.join(", ")}` : ""), b.missingFonts.length ? "err" : "ok");
 		} catch (e) {
 			get().notify(String(e), "err");
 		} finally {
@@ -334,8 +346,8 @@ export const useDeck = create<S>()((set, get) => ({
 			const tag = `r${k}`;
 			// 릴리즈가 가리키는 것은 내용 판(head)이다. 릴리즈 판은 PPTX 와 기록만 더한다
 			const file = `releases/${tag}-v${head.n}.pptx`;
-			const b64 = await buildPptx(deck, id, (i, n) => set({ busy: `${tNow("release")} ${i}/${n}` }));
-			await api.writeB64(dir, file, b64);
+			const b = await buildPptx(deck, id, (i, n) => set({ busy: `${tNow("release")} ${i}/${n}` }));
+			await api.writeB64(dir, file, b.data);
 			const rel: Release = { name: name.trim() || tag, tag, n: head.n, hash: head.hash, file, notes: notes.trim(), at: new Date().toISOString() };
 			const releases = [...get().releases, rel];
 			await api.writeText(dir, "releases/releases.json", JSON.stringify(releases, null, 2) + "\n");
@@ -354,6 +366,41 @@ export const useDeck = create<S>()((set, get) => ({
 	notify: (text, kind = "ok") => {
 		set({ toast: { text, kind } });
 		setTimeout(() => { if (get().toast?.text === text) set({ toast: null }); }, kind === "err" ? 7000 : 3500);
+	},
+
+	check: async () => {
+		const { dir, id, deck, versions } = get();
+		if (!deck || get().busy) return;
+		set({ busy: tNow("checking") });
+		try {
+			const report = await runCheck(dir, id, deck, versions[0]?.n ?? 0, (m) => set({ busy: `${tNow("checking")} · ${m}` }));
+			set({ report, compare: true });
+			const worst = Math.max(0, ...report.slides.map((x) => x.score));
+			const fonts = report.missingFonts.length ? ` · ${tNow("missingFont")}: ${report.missingFonts.join(", ")}` : "";
+			get().notify(`${tNow("diff")} ${worst <= SAME ? "0" : worst.toFixed(2)}%${fonts}`, worst <= SAME && !fonts ? "ok" : "err");
+		} catch (e) {
+			get().notify(String(e), "err");
+		} finally {
+			set({ busy: null });
+		}
+	},
+
+	setCompare: (compare) => set({ compare }),
+
+	// 차이가 남은 쪽의 웹 · PPT · 차이 그림을 붙여 Claude 에게 고치게 한다.
+	// 고칠 곳은 HTML 쪽이다 — PowerPoint 가 같게 그릴 수 있는 꼴(프롬프트 「PPTX export」 절)로 바꾸게 한다
+	fixDiff: () => {
+		const { report, deck } = get();
+		if (!report || !deck) return;
+		const bad = report.slides.filter((x) => x.score > SAME);
+		if (!bad.length) return;
+		const lines = bad.map((x) => `- slide ${x.no} (slides/${x.id}.html): ${x.score}% of pixels differ — web ${x.web}, PowerPoint ${x.ppt}, red mask ${x.diff}`);
+		const text = [
+			"The exported PPTX does not look identical to the web slides. For each slide below, Read the web picture, the PowerPoint picture and the red difference mask, find what renders differently in PowerPoint, and change the slide HTML/CSS so the export matches the web exactly while keeping the same look.",
+			"Typical causes: text that wraps or sits at a different height (give text boxes enough width, use explicit line-height, avoid mixing block children with bare text), CSS the exporter cannot draw natively (it is baked as a picture, which is fine), fonts not installed on this PC" + (report.missingFonts.length ? ` (missing: ${report.missingFonts.join(", ")})` : "") + ".",
+			...lines,
+		].join("\n");
+		get().send(text);
 	},
 
 	saveDeck: async (deck) => {

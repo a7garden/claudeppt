@@ -25,13 +25,25 @@ pub async fn ppt_snapshot(pptx: String, out_dir: String, width: u32, height: u32
 			src = q(&pptx),
 			out = q(&out_dir),
 		);
-		let mut c = std::process::Command::new("powershell");
-		crate::hidden(&mut c);
-		let o = c.args(["-NoProfile", "-NonInteractive", "-Command", &script]).output().map_err(err)?;
-		if !o.status.success() {
-			return Err(String::from_utf8_lossy(&o.stderr).lines().next().unwrap_or("PowerPoint 로 그림을 뽑지 못했다").to_string());
+		// PowerPoint 가 앞선 일을 닫는 중이면 COM 호출을 거절한다(RPC_E_CALL_REJECTED · 0x8001…) — 잠시 뒤 다시 부른다
+		let mut last = String::new();
+		for attempt in 0..4 {
+			if attempt > 0 {
+				std::thread::sleep(std::time::Duration::from_millis(1500 * attempt));
+			}
+			let mut c = std::process::Command::new("powershell");
+			crate::hidden(&mut c);
+			let o = c.args(["-NoProfile", "-NonInteractive", "-Command", &script]).output().map_err(err)?;
+			if o.status.success() {
+				return Ok(String::from_utf8_lossy(&o.stdout).trim().parse().unwrap_or(0));
+			}
+			// PowerShell 은 콘솔 코드 페이지(CP949)로 오류를 쓴다
+			last = crate::fonts::decode(&o.stderr).lines().find(|l| !l.trim().is_empty()).unwrap_or("PowerPoint 로 그림을 뽑지 못했다").to_string();
+			if !last.contains("0x8001") {
+				break;
+			}
 		}
-		Ok(String::from_utf8_lossy(&o.stdout).trim().parse().unwrap_or(0))
+		Err(last)
 	})
 	.await
 	.map_err(err)?

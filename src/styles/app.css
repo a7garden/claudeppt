@@ -98,6 +98,8 @@ input, textarea, select { font: inherit; color: inherit; }
 .rail-item .no .pins { width: 6px; height: 6px; border-radius: 50%; background: var(--accent); }
 .rail-item .no .fresh { width: 2px; height: 14px; background: var(--text); opacity: 0.55; }
 .rail-item.on .no { color: var(--text); }
+.rail-item .no .drift { font: 600 9px var(--mono); color: var(--accent); letter-spacing: -0.04em; }
+.rail-item .no .same { font: 9px var(--mono); color: var(--ok); }
 .thumb { position: relative; width: 100%; aspect-ratio: 16 / 9; border-radius: 3px; overflow: hidden; background: var(--well); outline: 1px solid var(--hair); display: block; }
 .rail-item.on .thumb { outline: 1.5px solid var(--text); }
 .rail-item.drop-before .thumb { box-shadow: 0 -3px 0 var(--accent); }
@@ -129,11 +131,23 @@ input, textarea, select { font: inherit; color: inherit; }
 .pin-note .row button { color: var(--dim); }
 .pin-note .row button:hover { color: var(--text); }
 
+/* 비교 렌즈 — 아래가 웹(iframe), 위가 PowerPoint 쪽 그림. 가름선 오른쪽만 보인다 */
+.lens { position: absolute; left: 0; top: 0; cursor: ew-resize; touch-action: none; }
+.lens img { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; user-select: none; }
+.lens-mask { mix-blend-mode: normal; opacity: 0.9; }
+.lens-line { position: absolute; top: -8px; bottom: -8px; width: 2px; margin-left: -1px; background: var(--accent); box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.25); }
+.lens-line::after { content: ""; position: absolute; top: 50%; left: -6px; width: 14px; height: 28px; margin-top: -14px; border-radius: 7px; background: var(--accent); }
+.lens-tag { position: absolute; top: -22px; font: 10px var(--mono); color: var(--dim); }
+.lens-tag.l { left: 0; }
+.lens-tag.r { right: 0; }
+.lens:focus-visible { outline: 1.5px solid var(--accent); outline-offset: 4px; }
+
 /* 지난 판 보기 띠 */
 .past { position: absolute; left: 50%; top: 12px; transform: translateX(-50%); display: flex; align-items: center; gap: 14px; padding: 6px 6px 6px 14px; border-radius: 999px; background: var(--raise-2); box-shadow: var(--shadow); white-space: nowrap; }
 .past .mono { color: var(--accent); }
 .past button { padding: 4px 12px; border-radius: 999px; }
 .past button.primary { background: var(--text); color: var(--bg); }
+.past button[disabled] { opacity: 0.4; pointer-events: none; }
 .past button:not(.primary):hover { background: var(--hair); }
 
 /* 판 줄기 — 판마다 눈금 하나, 릴리즈는 긴 눈금과 이름 */

@@ -30,7 +30,8 @@ The exporter measures the rendered DOM and rebuilds it in PowerPoint:
 - Text becomes text boxes: put text in block elements whose children are only inline (span, b, strong, em, br). Do not mix bare text with block children.
 - <table> becomes a native PowerPoint table — use it for tabular data.
 - <img> and inline <svg> become pictures. Use SVG for illustrations, icons, charts and complex shapes.
-- Not exported: ::before/::after content, box-shadow, text-shadow, CSS transforms/rotation, filters, blend modes, animations. Gradients flatten to their first color.
+- Anything PowerPoint cannot draw natively is baked into a picture that looks identical but is no longer editable: gradients, background images, box-shadow, ::before/::after, uneven corners or borders, list markers, and — together with all their children — transforms/rotation, filters, blend modes, clip-path, text-shadow. Prefer flat colors, solid borders and explicit bullet spans so text stays editable.
+- PowerPoint only has fonts installed on this PC. Use the theme font (var(--font)); do not introduce other web fonts.
 - Lay out with flex/grid or absolute positioning inside .slide; nothing may overflow 1280×720 or scroll.
 
 # Writing on slides

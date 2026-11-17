@@ -43,7 +43,10 @@ function ExportPop({ onDone }: { onDone: () => void }) {
 		<div className="pop" style={{ right: 210 }}>
 			<div className="menu">
 				<button onClick={async () => { onDone(); const p = await save({ defaultPath: base + ".pptx", filters: [{ name: "PowerPoint", extensions: ["pptx"] }] }); if (p) exportTo(p); }}>
-					{t("pptx")}<span>.pptx</span>
+					{t("pptx")}<span>{t("editable")}</span>
+				</button>
+				<button onClick={async () => { onDone(); const p = await save({ defaultPath: base + "_exact.pptx", filters: [{ name: "PowerPoint", extensions: ["pptx"] }] }); if (p) exportTo(p, true); }}>
+					{t("pptx")}<span>{t("exact")}</span>
 				</button>
 				<button onClick={async () => {
 					onDone();
@@ -51,6 +54,9 @@ function ExportPop({ onDone }: { onDone: () => void }) {
 					if (p) { await api.commit(dir, t("direct")).catch(() => {}); await api.pack(dir, p).then(() => notify(p.split(/[\\/]/).pop()!), (e) => notify(String(e), "err")); }
 				}}>
 					{t("cppt")}<span>.cppt</span>
+				</button>
+				<button onClick={() => { onDone(); useDeck.getState().check(); }}>
+					{t("compare")}<span>{t("web")} ↔ PPT · C</span>
 				</button>
 				<button onClick={() => { onDone(); api.reveal(join(dir, "deck.json")); }}>
 					{t("folder")}<span>↗</span>

@@ -6,6 +6,7 @@
 //   명령                 fs · project · vcs · claude · image · ppt 모듈에 있다
 
 mod claude;
+mod fonts;
 mod fsx;
 mod imagegen;
 mod project;
@@ -69,6 +70,7 @@ pub fn run() {
 			imagegen::tools_detect,
 			imagegen::image_generate,
 			pptsnap::ppt_snapshot,
+			fonts::fonts_list,
 		])
 		.run(tauri::generate_context!())
 		.expect("앱을 띄우지 못했다");

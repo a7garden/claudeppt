@@ -14,6 +14,7 @@ import { useT } from "../lib/i18n";
 import { useSettings } from "../lib/settings";
 import { type Pin, useDeck } from "../lib/store";
 import { useFileDrop } from "./Home";
+import { CompareBar, CompareLens } from "./CompareLens";
 import Talk from "./Talk";
 
 export function SlideFrame({ file, rev, width, height, w, h, onWin, revHash }: { file: string; rev: number; width: number; height?: number; w: number; h: number; onWin?: (win: Window | null) => void; revHash?: string }) {
@@ -58,9 +59,10 @@ export default function Workspace() {
 			if (key === "v") setMode("view");
 			else if (key === "p") setMode("pin");
 			else if (key === "e") setMode("edit");
+			else if (key === "c") { const st = useDeck.getState(); if (st.report) st.setCompare(!st.compare); else st.check(); }
 			else if (e.key === "ArrowDown" || e.key === "PageDown" || (e.key === "ArrowRight" && useDeck.getState().mode !== "edit")) setCurrent(useDeck.getState().current + 1);
 			else if (e.key === "ArrowUp" || e.key === "PageUp" || (e.key === "ArrowLeft" && useDeck.getState().mode !== "edit")) setCurrent(useDeck.getState().current - 1);
-			else if (e.key === "Escape") setMode("view");
+			else if (e.key === "Escape") { if (useDeck.getState().compare) useDeck.getState().setCompare(false); else setMode("view"); }
 			else return;
 			e.preventDefault();
 		};
@@ -101,6 +103,7 @@ function Rail() {
 	const pins = useDeck((s) => s.pins);
 	const turns = useDeck((s) => s.turns);
 	const saveDeck = useDeck((s) => s.saveDeck);
+	const report = useDeck((s) => s.report);
 	const dir = useDeck((s) => s.dir);
 	const [drag, setDrag] = useState<number | null>(null);
 	const [dropAt, setDropAt] = useState<number | null>(null);
@@ -143,6 +146,11 @@ function Rail() {
 							<span>{i + 1}</span>
 							{n > 0 && <span className="pins" title={`${t("pins")} ${n}`} />}
 							{lastFiles.has(sl.file) && !preview && <span className="fresh" title={t("changed")} />}
+							{(() => {
+								const c = report?.slides.find((x) => x.id === sl.id);
+								if (!c) return null;
+								return c.score > 0.05 ? <span className="drift" title={`${t("diff")} ${c.score}%`}>≠{c.score < 10 ? c.score.toFixed(1) : Math.round(c.score)}</span> : <span className="same" title={`${t("diff")} 0%`}>=</span>;
+							})()}
 						</div>
 						<button className="thumb" draggable={!preview} onDragStart={() => setDrag(i)} onDragEnd={() => { setDrag(null); setDropAt(null); }}
 							onClick={() => setCurrent(i)} title={sl.title || `${i + 1}`} aria-current={i === current}>
@@ -188,6 +196,8 @@ function Stage() {
 	const applyDirect = useDeck((s) => s.applyDirect);
 	const restore = useDeck((s) => s.restore);
 	const setPreview = useDeck((s) => s.setPreview);
+	const compare = useDeck((s) => s.compare && !!s.report && !s.preview);
+	const report = useDeck((s) => s.report);
 	const canvas = useRef<HTMLDivElement>(null);
 	const [box, setBox] = useState({ w: 0, h: 0 });
 	const [active, setActive] = useState<string | null>(null);
@@ -233,6 +243,7 @@ function Stage() {
 	return (
 		<section className="stage" data-mode={preview ? "view" : mode} aria-label={t("slides")}>
 			<div className="stage-banner">
+				{compare && <CompareBar slide={report?.slides.find((x) => x.id === slide.id)} />}
 				{preview && (
 					<div className="past" role="status">
 						<span className="mono">v{preview.n}</span>
@@ -251,7 +262,10 @@ function Stage() {
 								<SlideFrame key={slide.id + (preview?.hash || "")} file={slide.file} rev={rev[slide.id] || 0} w={deck.size.w} h={deck.size.h} width={deck.size.w * scale} revHash={preview?.hash} onWin={(w) => { win.current = w; }} />
 							</div>
 						</div>
-						{!preview && (
+						{compare && report?.slides.find((x) => x.id === slide.id) && (
+							<CompareLens slide={report.slides.find((x) => x.id === slide.id)!} w={deck.size.w} h={deck.size.h} scale={scale} />
+						)}
+						{!preview && !compare && (
 							<div className="overlay" onClick={onPin}>
 								{mine.map((p) => (
 									<PinMark key={p.id} pin={p} n={order.indexOf(p.id) + 1} scale={scale} flip={p.x * scale > deck.size.w * scale - 290} open={active === p.id} onOpen={() => setActive(active === p.id ? null : p.id)} onClose={() => setActive(null)} />

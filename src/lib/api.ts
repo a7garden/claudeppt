@@ -35,6 +35,7 @@ export const api = {
 
 	toolsDetect: () => invoke<Tool[]>("tools_detect"),
 	imageGenerate: (spec: { provider: string; prompt: string; out: string; apiKey?: string; model?: string; size?: string }) => invoke<string>("image_generate", { spec }),
+	fonts: () => invoke<string[]>("fonts_list"),
 	pptSnapshot: (pptx: string, outDir: string, width = 1280, height = 720) => invoke<number>("ppt_snapshot", { pptx, outDir, width, height }),
 };
 
