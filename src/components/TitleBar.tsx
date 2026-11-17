@@ -60,7 +60,7 @@ export default function TitleBar({ onSettings, settingsOpen }: { onSettings: () 
 							{head && (
 								<span className="stamp">
 									<b>v{head.n}</b>
-									{lastRel && <> · <i>{lastRel.tag}</i>{lastRel.n < head.n ? `+${head.n - lastRel.n}` : ""}</>}
+									{lastRel && <> · <i>{lastRel.tag}</i>{head.n - lastRel.n > 1 ? `+${head.n - lastRel.n - 1}` : ""}</>}
 								</span>
 							)}
 						</>

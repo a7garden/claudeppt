@@ -151,6 +151,8 @@ export const useDeck = create<S>()((set, get) => ({
 				const { turn, line } = e.payload;
 				let m: any;
 				try { m = JSON.parse(line); } catch { return; }
+				// 지금 이 프로젝트에서 돌고 있는 턴의 사건만 받는다 — 다른 턴의 세션 id 가 섞이면 다음 턴이 엉뚱한 대화를 잇는다
+				if (turn !== get().running) return;
 				const patch = (fn: (t: Turn) => Turn) => set({ turns: get().turns.map((t) => (t.id === turn ? fn(t) : t)) });
 				if (m.type === "system" && m.subtype === "init" && m.session_id) set({ sessionId: m.session_id });
 				else if (m.type === "stream_event" && m.event?.type === "content_block_delta" && m.event.delta?.type === "text_delta") {
@@ -163,13 +165,19 @@ export const useDeck = create<S>()((set, get) => ({
 					if (uses.length) patch((t) => ({ ...t, tools: [...t.tools, ...uses.map((u: any) => ({ name: u.name, file: relOf(get().dir, u.input?.file_path || u.input?.path || u.input?.pattern) }))] }));
 				} else if (m.type === "result") {
 					if (m.session_id) set({ sessionId: m.session_id });
-					patch((t) => ({ ...t, cost: m.total_cost_usd, reply: (m.result || t.reply || "").trim(), error: m.is_error ? m.result || "error" : t.error }));
+					patch((t) => ({ ...t, cost: m.total_cost_usd, reply: (t.reply.trim() || m.result || "").trim(), error: m.is_error ? m.result || "error" : t.error }));
 				}
 			}),
 		);
 	},
 
 	closeProject: async () => {
+		// 턴이 도는 중에 닫으면 끝난 턴이 다음에 연 프로젝트의 덱 · 대화를 덮어쓴다 — 먼저 멈추고 끝나기를 기다린다
+		if (get().running) {
+			get().stop();
+			while (get().running) await new Promise((r) => setTimeout(r, 200));
+		}
+		clearTimeout(directTimer);
 		unlisten.forEach((f) => f());
 		unlisten = [];
 		const { id } = get();
@@ -261,13 +269,18 @@ export const useDeck = create<S>()((set, get) => ({
 		const { dir, deck } = get();
 		const ref = deck?.slides.find((s) => s.id === slideId);
 		if (!ref) return;
+		// Claude 가 파일을 고치는 중에는 화면의 요소 번호 길이 원본과 어긋날 수 있다 — 받지 않는다
+		if (get().running) return get().notify(tNow("working"), "err");
 		await applyOp(dir, ref.file, path, op);
 		clearTimeout(directTimer);
-		// 손으로 고친 것은 몇 번이고 이어서 하므로 잠잠해지면 한 판으로 묶는다
-		directTimer = setTimeout(async () => {
+		// 손으로 고친 것은 몇 번이고 이어서 하므로 잠잠해지면 한 판으로 묶는다. 그새 턴이 돌면 끝난 뒤로 미룬다
+		const flush = async () => {
+			if (get().dir !== dir) return;
+			if (get().running) { directTimer = setTimeout(flush, 2000); return; }
 			await api.commit(dir, tNow("direct")).catch(() => null);
 			get().refreshVersions();
-		}, 4000);
+		};
+		directTimer = setTimeout(flush, 4000);
 	},
 
 	refreshVersions: async () => {
@@ -313,21 +326,21 @@ export const useDeck = create<S>()((set, get) => ({
 		set({ busy: tNow("release") });
 		try {
 			await api.commit(dir, tNow("direct")).catch(() => null);
-			const head = (await api.log(dir, 1))[0];
-			const k = get().releases.length + 1;
+			const log = await api.log(dir);
+			const head = log[0];
+			// 번호는 git 태그에서 — releases.json 이 지워지거나 어긋나도 같은 r<k> 를 두 번 달지 않는다
+			const used = log.flatMap((c) => c.tags).map((t) => Number(/^r(\d+)$/.exec(t)?.[1] || 0));
+			const k = Math.max(0, ...used, ...get().releases.map((r) => +r.tag.slice(1) || 0)) + 1;
 			const tag = `r${k}`;
-			const file = `releases/${tag}-v${head.n + 1}.pptx`;
+			// 릴리즈가 가리키는 것은 내용 판(head)이다. 릴리즈 판은 PPTX 와 기록만 더한다
+			const file = `releases/${tag}-v${head.n}.pptx`;
 			const b64 = await buildPptx(deck, id, (i, n) => set({ busy: `${tNow("release")} ${i}/${n}` }));
 			await api.writeB64(dir, file, b64);
-			const rel: Release = { name: name.trim() || tag, tag, n: head.n + 1, hash: "", file, notes: notes.trim(), at: new Date().toISOString() };
+			const rel: Release = { name: name.trim() || tag, tag, n: head.n, hash: head.hash, file, notes: notes.trim(), at: new Date().toISOString() };
 			const releases = [...get().releases, rel];
 			await api.writeText(dir, "releases/releases.json", JSON.stringify(releases, null, 2) + "\n");
-			const c = await api.commit(dir, `릴리즈 ${tag} — ${rel.name}`);
-			if (c) {
-				await api.tag(dir, tag);
-				rel.hash = c.hash;
-				rel.n = c.n;
-			}
+			await api.commit(dir, `릴리즈 ${tag} — ${rel.name}`);
+			await api.tag(dir, tag);
 			set({ releases });
 			await get().refreshVersions();
 			get().notify(`${tag} · ${rel.name}`, "ok");

@@ -45,6 +45,8 @@ export async function importFile(path: string) {
 		// 원본 쪽 그림 — PowerPoint 가 있으면 뒤에서 뽑는다. 없으면 조용히 넘어간다
 		api.pptSnapshot(join(dir, "source", "original.pptx"), join(dir, "source", "pages"), imported.size.w, imported.size.h).then(async (pages) => {
 			if (!pages) return;
+			// Claude 턴이 도는 중이면 끝나기를 기다린다 — 반쯤 고친 파일이 「원본 쪽 그림」 판에 섞이고 deck.json 을 덮어쓰지 않게
+			while (useDeck.getState().running) await new Promise((r) => setTimeout(r, 1000));
 			const deck = await readDeck(dir);
 			deck.source = { ...(deck.source || { kind: "pptx" }), pages };
 			await writeDeck(dir, deck);

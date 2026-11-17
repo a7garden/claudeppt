@@ -126,13 +126,6 @@ pub fn vcs_log(dir: String, limit: Option<u32>) -> Res<Vec<Commit>> {
 		.collect())
 }
 
-/// 그 판에서 바뀐 파일 — 「A path」 「M path」 「D path」 줄.
-#[tauri::command]
-pub fn vcs_files(dir: String, hash: String) -> Res<Vec<String>> {
-	let out = run(Path::new(&dir), &["show", "--name-status", "--format=", &hash])?;
-	Ok(out.lines().filter(|l| !l.is_empty()).map(|l| l.replacen('\t', " ", 1)).collect())
-}
-
 #[tauri::command]
 pub fn vcs_tag(dir: String, name: String) -> Res<()> {
 	run(Path::new(&dir), &["tag", &name]).map(|_| ())
@@ -140,19 +133,17 @@ pub fn vcs_tag(dir: String, name: String) -> Res<()> {
 
 /// 지난 판으로 되돌린다 — 지금 남지 않은 변경을 먼저 한 판으로 남기고, 그 판 뒤에 생긴 파일은 지운 뒤
 /// 그 판의 파일을 덮어 새 판으로 남긴다.
+/// releases/ · source/ 는 덱 내용이 아니라 기록이다 — 되돌려도 지우거나 옛것으로 바꾸지 않는다.
+/// (지우면 릴리즈 PPTX · 원본 쪽 그림이 사라지고, 다음 릴리즈가 같은 r<k> 를 다시 단다)
 #[tauri::command]
 pub fn vcs_restore(dir: String, hash: String, message: String) -> Res<Option<Commit>> {
 	let d = Path::new(&dir);
 	vcs_commit(dir.clone(), "되돌리기 전 변경을 남긴다".into())?;
+	let keep = |p: &str| p.starts_with("releases/") || p.starts_with("source/");
 	let added = run(d, &["diff", "--name-only", "--diff-filter=A", &hash, "HEAD"])?;
-	for rel in added.lines().filter(|l| !l.is_empty()) {
+	for rel in added.lines().filter(|l| !l.is_empty() && !keep(l)) {
 		let _ = std::fs::remove_file(d.join(rel));
 	}
-	run(d, &["checkout", &hash, "--", "."])?;
+	run(d, &["checkout", &hash, "--", ".", ":(exclude)releases", ":(exclude)source"])?;
 	vcs_commit(dir, message)
-}
-
-#[tauri::command]
-pub fn vcs_dirty(dir: String) -> Res<bool> {
-	Ok(!run(Path::new(&dir), &["status", "--porcelain"])?.is_empty())
 }

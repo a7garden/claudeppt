@@ -1,6 +1,12 @@
 // 슬라이드 런타임 — deck:// 이 슬라이드 HTML 을 내줄 때 </body> 앞에 끼워 넣는다 (원본 파일에는 없다).
 // 앱 화면(부모 창)과 postMessage 로만 말한다. 슬라이드 좌표는 늘 1:1 픽셀(보통 1280×720)이다 — 확대 · 축소는 부모가 한다.
 //
+// 목차
+//   pathOf · label        요소 ↔ 자식 번호 길 (원본 HTML 에 되쓸 때 같은 요소를 찾는다)
+//   편집                  두 번 눌러 글자 고치기 · 끌어 옮기기 · 방향키 · Delete
+//   message               부모 창이 보낸 말 처리
+//   PPTX 좌표 뽑기        color · raster(그림 · SVG) · runsOf(글자 조각과 줄 바꿈 자리) · extract
+//
 // 받는 말                         보내는 말
 //   css                 CSS 만 다시 읽기       ready {w,h}
 //   mode {mode}         view · pin · edit      hit {req, path, tag, text}

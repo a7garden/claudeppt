@@ -45,10 +45,7 @@ pub fn run() {
 		.invoke_handler(tauri::generate_handler![
 			fsx::fs_read_text,
 			fsx::fs_write_text,
-			fsx::fs_read_base64,
 			fsx::fs_write_base64,
-			fsx::fs_list,
-			fsx::fs_remove,
 			fsx::fs_exists,
 			fsx::abs_read_base64,
 			fsx::abs_write_base64,
@@ -64,10 +61,8 @@ pub fn run() {
 			vcs::vcs_init,
 			vcs::vcs_commit,
 			vcs::vcs_log,
-			vcs::vcs_files,
 			vcs::vcs_tag,
 			vcs::vcs_restore,
-			vcs::vcs_dirty,
 			claude::claude_detect,
 			claude::claude_run,
 			claude::claude_stop,
@@ -94,12 +89,11 @@ fn serve(app: &tauri::AppHandle, raw: &str) -> Response<Vec<u8>> {
 	let Some(root) = app.state::<AppState>().projects.lock().unwrap().get(id).cloned() else {
 		return status(StatusCode::NOT_FOUND);
 	};
-	if rel.split('/').any(|s| s == "..") {
-		return status(StatusCode::FORBIDDEN);
-	}
+	// 슬라이드 안 스크립트가 ..\ · %5C · 절대 경로로 프로젝트 밖 파일을 읽지 못하게 — fs 명령과 같은 검사를 쓴다
+	let Ok(full) = fsx::inside(&root.to_string_lossy(), rel) else { return status(StatusCode::FORBIDDEN) };
 	let bytes = match rev {
-		Some(r) => vcs::show_file(&root, r, rel),
-		None => std::fs::read(root.join(rel)).ok(),
+		Some(r) => vcs::show_file(&root, r, &rel.replace('\\', "/")),
+		None => std::fs::read(full).ok(),
 	};
 	let Some(mut bytes) = bytes else { return status(StatusCode::NOT_FOUND) };
 	let mime = mime_of(rel);

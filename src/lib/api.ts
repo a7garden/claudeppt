@@ -3,16 +3,12 @@ import { invoke } from "@tauri-apps/api/core";
 
 export interface Commit { n: number; hash: string; short: string; date: string; subject: string; tags: string[] }
 export interface LibItem { dir: string; deck: any; modified: number }
-export interface Entry { name: string; dir: boolean; size: number; modified: number }
 export interface Tool { name: string; path: string | null; version: string }
 
 export const api = {
 	readText: (root: string, rel: string) => invoke<string>("fs_read_text", { root, rel }),
 	writeText: (root: string, rel: string, text: string) => invoke<void>("fs_write_text", { root, rel, text }),
-	readB64: (root: string, rel: string) => invoke<string>("fs_read_base64", { root, rel }),
 	writeB64: (root: string, rel: string, data: string) => invoke<void>("fs_write_base64", { root, rel, data }),
-	list: (root: string, rel: string) => invoke<Entry[]>("fs_list", { root, rel }),
-	remove: (root: string, rel: string) => invoke<void>("fs_remove", { root, rel }),
 	exists: (root: string, rel: string) => invoke<boolean>("fs_exists", { root, rel }),
 	absRead: (path: string) => invoke<string>("abs_read_base64", { path }),
 	absWrite: (path: string, data: string) => invoke<void>("abs_write_base64", { path, data }),
@@ -30,10 +26,8 @@ export const api = {
 	vcsInit: (dir: string) => invoke<void>("vcs_init", { dir }),
 	commit: (dir: string, message: string) => invoke<Commit | null>("vcs_commit", { dir, message }),
 	log: (dir: string, limit?: number) => invoke<Commit[]>("vcs_log", { dir, limit }),
-	files: (dir: string, hash: string) => invoke<string[]>("vcs_files", { dir, hash }),
 	tag: (dir: string, name: string) => invoke<void>("vcs_tag", { dir, name }),
 	restore: (dir: string, hash: string, message: string) => invoke<Commit | null>("vcs_restore", { dir, hash, message }),
-	dirty: (dir: string) => invoke<boolean>("vcs_dirty", { dir }),
 
 	claudeDetect: (path: string) => invoke<{ path: string; version: string } | null>("claude_detect", { path }),
 	claudeRun: (spec: { turn: string; dir: string; prompt: string; system: string; claudePath: string; model: string; effort: string; resume?: string | null }) => invoke<{ code: number; stderr: string }>("claude_run", { spec }),

@@ -178,7 +178,7 @@ const posCss = (b: Box) => `position:absolute;left:${r1(b.x)}px;top:${r1(b.y)}px
 const r1 = (v: number) => Math.round(v * 10) / 10;
 
 // ── 글자 ──
-interface PhInfo { box: Box | null; body: El | null; lst: El | null; type: string }
+interface PhInfo { box: Box | null; body: El | null; type: string }
 function phKey(sp: El) {
 	const ph = path(sp, "p:nvSpPr", "p:nvPr", "p:ph") || path(sp, "p:nvPicPr", "p:nvPr", "p:ph");
 	if (!ph) return null;
@@ -217,7 +217,7 @@ function fontName(f: string | undefined | null, ctx: Ctx) {
 	return f;
 }
 
-function textHtml(txBody: El, ctx: Ctx, inh: TextDefaults[], styleFont: string | null, kind: "title" | "body" | "other"): { html: string; anchor: string; ins: number[] } {
+function textHtml(txBody: El, ctx: Ctx, inh: TextDefaults[]): { html: string; anchor: string; ins: number[] } {
 	const bodyPr = kid(txBody, "a:bodyPr");
 	const anchor = bodyPr?.getAttribute("anchor") || "t";
 	const ins = ["lIns", "tIns", "rIns", "bIns"].map((a, i) => num(bodyPr?.getAttribute(a), i % 2 ? 45720 : 91440) * ctx.k);
@@ -255,7 +255,7 @@ function textHtml(txBody: El, ctx: Ctx, inh: TextDefaults[], styleFont: string |
 			const color = colorOf(kid(rPr, "a:solidFill"), ctx) || base.color;
 			const latin = fontName(path(rPr, "a:latin")?.getAttribute("typeface"), ctx);
 			const ea = fontName(path(rPr, "a:ea")?.getAttribute("typeface"), ctx);
-			const fam = [latin, ea, fontName(base.font, ctx), styleFont].filter(Boolean).map((f) => `'${f}'`);
+			const fam = [latin, ea, fontName(base.font, ctx)].filter(Boolean).map((f) => `'${f}'`);
 			const st = [`font-size:${r1(size * PT * ctx.k)}px`];
 			if (bold) st.push("font-weight:700");
 			if (italic) st.push("font-style:italic");
@@ -284,7 +284,6 @@ function textHtml(txBody: El, ctx: Ctx, inh: TextDefaults[], styleFont: string |
 		if (!runs.length) { ps.push(`<p style="${pst.join(";")};font-size:${r1(pxSize)}px;min-height:1em"></p>`); continue; }
 		ps.push(`<p style="${pst.join(";")}">${bullet ? `<span style="display:inline-block;min-width:${r1(Math.max(0, -indent))}px;font-size:${r1(pxSize)}px">${escapeHtml(bullet)}</span>` : ""}${runs.join("")}</p>`);
 	}
-	void kind;
 	return { html: ps.join(""), anchor, ins };
 }
 
@@ -387,7 +386,7 @@ async function shapeHtml(el: El, ctx: Ctx, rel: Record<string, string>, tx: Tx, 
 			const fontRef = path(style, "a:fontRef");
 			const refColor = fontRef ? colorOf(fontRef, ctx) : null;
 			const defs = info.defaults.map((d) => ({ ...d, color: d.color || refColor || undefined }));
-			const t = textHtml(txBody, ctx, defs.length ? defs : [{ color: refColor || undefined }], null, info.kind);
+			const t = textHtml(txBody, ctx, defs.length ? defs : [{ color: refColor || undefined }]);
 			const phBody = info.ph?.body ? kid(info.ph.body, "a:bodyPr") : null;
 			const anchor = kid(txBody, "a:bodyPr")?.getAttribute("anchor") || phBody?.getAttribute("anchor") || (info.kind === "title" ? "ctr" : t.anchor);
 			const jc = ({ t: "flex-start", ctr: "center", b: "flex-end" } as Record<string, string>)[anchor] || "flex-start";
@@ -436,7 +435,7 @@ async function shapeHtml(el: El, ctx: Ctx, rel: Record<string, string>, tx: Tx, 
 					const tcPr = kid(tc, "a:tcPr");
 					const f = fillOf(tcPr, ctx, null);
 					const tb = kid(tc, "a:txBody");
-					const t = tb ? textHtml(tb, ctx, [{ size: 14, color: "#000000" }], null, "other").html : "";
+					const t = tb ? textHtml(tb, ctx, [{ size: 14, color: "#000000" }]).html : "";
 					const span = [tc.getAttribute("gridSpan") ? ` colspan="${tc.getAttribute("gridSpan")}"` : "", tc.getAttribute("rowSpan") ? ` rowspan="${tc.getAttribute("rowSpan")}"` : ""].join("");
 					return `<td${span} style="border:1px solid #c8c8c8;padding:4px 8px;vertical-align:middle${f && f !== "none" ? `;background:${f}` : ""}">${t}</td>`;
 				});
@@ -534,7 +533,6 @@ export async function importPptx(bytes: Uint8Array, dir: string, title: string, 
 
 		const tree = (d: Document | null) => d?.getElementsByTagName("p:spTree")[0] || null;
 		const layoutTree = tree(layout), masterTree = tree(master);
-		const id = (k: (b: Box) => Box) => k;
 		const inh = (key: { type: string; idx: string } | null) => {
 			if (!key) return { ph: null, defaults: otherDefs, kind: "other" as const };
 			const kind = key.type === "title" || key.type === "ctrTitle" ? "title" : key.type === "body" || key.type === "subTitle" || key.type === "obj" ? "body" : "other";
@@ -547,10 +545,9 @@ export async function importPptx(bytes: Uint8Array, dir: string, title: string, 
 				const m = textDefaultsOf(kid(lst(mp), `a:lvl${n + 1}pPr`), ctx), l = textDefaultsOf(kid(lst(lp), `a:lvl${n + 1}pPr`), ctx);
 				return { ...d, ...strip(m), ...strip(l) };
 			});
-			return { ph: { box, body: lp ? kid(lp, "p:spPr") : null, lst: lst(lp), type: key.type } as PhInfo, defaults: merged, kind: kind as "title" | "body" | "other" };
+			return { ph: { box, body: lp ? kid(lp, "p:spPr") : null, type: key.type } as PhInfo, defaults: merged, kind: kind as "title" | "body" | "other" };
 		};
 		const layer = { layoutTree, masterTree, inh };
-		void id;
 
 		const parts: string[] = [];
 		const cSld = kid(slide.documentElement, "p:cSld");

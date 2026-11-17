@@ -67,7 +67,12 @@ function Claude() {
 	const c = s.claude;
 	const put = (p: Partial<S["claude"]>) => set((x) => ({ ...x, claude: { ...x.claude, ...p } }));
 	const [found, setFound] = useState<{ path: string; version: string } | null | undefined>(undefined);
-	useEffect(() => { setFound(undefined); api.claudeDetect(c.path).then(setFound, () => setFound(null)); }, [c.path]);
+	// 경로 칸을 칠 때마다 찾지 않는다 — 멈춘 뒤에 한 번
+	useEffect(() => {
+		setFound(undefined);
+		const t = setTimeout(() => api.claudeDetect(c.path).then(setFound, () => setFound(null)), 400);
+		return () => clearTimeout(t);
+	}, [c.path]);
 	return (
 		<>
 			<Row k={t("path")}>

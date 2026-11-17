@@ -10,12 +10,18 @@ pub async fn ppt_snapshot(pptx: String, out_dir: String, width: u32, height: u32
 		std::fs::create_dir_all(&out_dir).map_err(err)?;
 		let q = |s: &str| s.replace('\'', "''");
 		// 이미 켜 둔 PowerPoint 를 끄지 않는다 — 우리가 연 파일만 닫고, 열린 프레젠테이션이 없을 때만 끈다.
+		// 실패해도 finally 에서 닫는다 — 안 그러면 숨은 POWERPNT.EXE 가 파일을 잡은 채 남는다.
 		let script = format!(
 			"$ErrorActionPreference='Stop';\
 			 $pp = New-Object -ComObject PowerPoint.Application;\
-			 $p = $pp.Presentations.Open('{src}', $true, $false, $false);\
-			 $i = 1; foreach ($s in $p.Slides) {{ $s.Export((Join-Path '{out}' ($i.ToString() + '.png')), 'PNG', {width}, {height}); $i++ }};\
-			 $p.Close(); if ($pp.Presentations.Count -eq 0) {{ $pp.Quit() }}; Write-Output ($i - 1)",
+			 $p = $null; $i = 1;\
+			 try {{\
+			   $p = $pp.Presentations.Open('{src}', $true, $false, $false);\
+			   foreach ($s in $p.Slides) {{ $s.Export((Join-Path '{out}' ($i.ToString() + '.png')), 'PNG', {width}, {height}); $i++ }}\
+			 }} finally {{\
+			   if ($p) {{ $p.Close() }}; if ($pp.Presentations.Count -eq 0) {{ $pp.Quit() }}\
+			 }};\
+			 Write-Output ($i - 1)",
 			src = q(&pptx),
 			out = q(&out_dir),
 		);
