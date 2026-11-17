@@ -1,0 +1,60 @@
+// 백엔드(src-tauri) 명령을 부르는 얇은 층. 이름은 Rust 명령과 같다.
+import { invoke } from "@tauri-apps/api/core";
+
+export interface Commit { n: number; hash: string; short: string; date: string; subject: string; tags: string[] }
+export interface LibItem { dir: string; deck: any; modified: number }
+export interface Entry { name: string; dir: boolean; size: number; modified: number }
+export interface Tool { name: string; path: string | null; version: string }
+
+export const api = {
+	readText: (root: string, rel: string) => invoke<string>("fs_read_text", { root, rel }),
+	writeText: (root: string, rel: string, text: string) => invoke<void>("fs_write_text", { root, rel, text }),
+	readB64: (root: string, rel: string) => invoke<string>("fs_read_base64", { root, rel }),
+	writeB64: (root: string, rel: string, data: string) => invoke<void>("fs_write_base64", { root, rel, data }),
+	list: (root: string, rel: string) => invoke<Entry[]>("fs_list", { root, rel }),
+	remove: (root: string, rel: string) => invoke<void>("fs_remove", { root, rel }),
+	exists: (root: string, rel: string) => invoke<boolean>("fs_exists", { root, rel }),
+	absRead: (path: string) => invoke<string>("abs_read_base64", { path }),
+	absWrite: (path: string, data: string) => invoke<void>("abs_write_base64", { path, data }),
+
+	paths: () => invoke<{ data: string; library: string }>("app_paths"),
+	settingsLoad: () => invoke<any>("settings_load"),
+	settingsSave: (value: unknown) => invoke<void>("settings_save", { value }),
+	open: (dir: string) => invoke<string>("project_open", { dir }),
+	close: (id: string) => invoke<void>("project_close", { id }),
+	library: (dir: string) => invoke<LibItem[]>("library_list", { dir }),
+	pack: (dir: string, out: string) => invoke<void>("pack_deck", { dir, out }),
+	unpack: (file: string, dest: string) => invoke<string>("unpack_deck", { file, dest }),
+	reveal: (path: string) => invoke<void>("reveal", { path }),
+
+	vcsInit: (dir: string) => invoke<void>("vcs_init", { dir }),
+	commit: (dir: string, message: string) => invoke<Commit | null>("vcs_commit", { dir, message }),
+	log: (dir: string, limit?: number) => invoke<Commit[]>("vcs_log", { dir, limit }),
+	files: (dir: string, hash: string) => invoke<string[]>("vcs_files", { dir, hash }),
+	tag: (dir: string, name: string) => invoke<void>("vcs_tag", { dir, name }),
+	restore: (dir: string, hash: string, message: string) => invoke<Commit | null>("vcs_restore", { dir, hash, message }),
+	dirty: (dir: string) => invoke<boolean>("vcs_dirty", { dir }),
+
+	claudeDetect: (path: string) => invoke<{ path: string; version: string } | null>("claude_detect", { path }),
+	claudeRun: (spec: { turn: string; dir: string; prompt: string; system: string; claudePath: string; model: string; effort: string; resume?: string | null }) => invoke<{ code: number; stderr: string }>("claude_run", { spec }),
+	claudeStop: (turn: string) => invoke<void>("claude_stop", { turn }),
+
+	toolsDetect: () => invoke<Tool[]>("tools_detect"),
+	imageGenerate: (spec: { provider: string; prompt: string; out: string; apiKey?: string; model?: string; size?: string }) => invoke<string>("image_generate", { spec }),
+	pptSnapshot: (pptx: string, outDir: string, width = 1280, height = 720) => invoke<number>("ppt_snapshot", { pptx, outDir, width, height }),
+};
+
+/** 슬라이드 주소. Windows WebView2 는 사용자 프로토콜을 http://<이름>.localhost 로 연다. */
+export const deckUrl = (id: string, rel: string, rev?: string) => {
+	const base = navigator.userAgent.includes("Windows") ? "http://deck.localhost" : "deck://localhost";
+	return `${base}/${id}${rev ? "@" + rev : ""}/${rel.split("/").map(encodeURIComponent).join("/")}`;
+};
+
+export const join = (...p: string[]) => p.filter(Boolean).join("\\").replace(/[\\/]+/g, "\\");
+
+export const b64FromBytes = (u8: Uint8Array) => {
+	let s = "";
+	for (let i = 0; i < u8.length; i += 0x8000) s += String.fromCharCode(...u8.subarray(i, i + 0x8000));
+	return btoa(s);
+};
+export const bytesFromB64 = (b: string) => Uint8Array.from(atob(b), (c) => c.charCodeAt(0));

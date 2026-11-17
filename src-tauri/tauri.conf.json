@@ -1,0 +1,43 @@
+{
+	"$schema": "https://schema.tauri.app/config/2",
+	"productName": "ClaudePPT",
+	"version": "0.1.0",
+	"identifier": "com.seesun.claudeppt",
+	"build": {
+		"beforeDevCommand": "npm run dev",
+		"devUrl": "http://localhost:1424",
+		"beforeBuildCommand": "npm run build",
+		"frontendDist": "../dist"
+	},
+	"app": {
+		"windows": [
+			{
+				"label": "main",
+				"title": "ClaudePPT",
+				"width": 1440,
+				"height": 900,
+				"minWidth": 1080,
+				"minHeight": 660,
+				"decorations": false,
+				"center": true,
+				"backgroundColor": "#121212",
+				"dragDropEnabled": true
+			}
+		],
+		"security": { "csp": null }
+	},
+	"bundle": {
+		"active": true,
+		"targets": ["nsis"],
+		"createUpdaterArtifacts": true,
+		"windows": { "nsis": { "installMode": "currentUser" } },
+		"icon": ["icons/32x32.png", "icons/128x128.png", "icons/128x128@2x.png", "icons/icon.ico"]
+	},
+	"plugins": {
+		"updater": {
+			"pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDBGOUQxQjk4QUVFMUZFQjUKUldTMS91R3VtQnVkRDVVNXdWUnpVV3JaSE1rU0hkQ0dpTGp1TzYvM2NvdHh2SElCNmc3SVdWNFoK",
+			"endpoints": ["https://github.com/a7garden/claudeppt/releases/latest/download/latest.json"],
+			"windows": { "installMode": "quiet" }
+		}
+	}
+}
