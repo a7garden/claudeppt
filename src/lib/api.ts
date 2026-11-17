@@ -10,7 +10,10 @@ export const api = {
 	writeText: (root: string, rel: string, text: string) => invoke<void>("fs_write_text", { root, rel, text }),
 	writeB64: (root: string, rel: string, data: string) => invoke<void>("fs_write_base64", { root, rel, data }),
 	exists: (root: string, rel: string) => invoke<boolean>("fs_exists", { root, rel }),
-	absRead: (path: string) => invoke<string>("abs_read_base64", { path }),
+	/** 큰 파일은 base64 를 거치지 않고 날바이트로 — 그림 · 동영상 · 원본 PPTX */
+	writeBytes: (root: string, rel: string, data: Uint8Array) => invoke<void>("fs_write_bytes", data, { headers: { "x-root": encodeURIComponent(root), "x-rel": encodeURIComponent(rel) } }),
+	absReadBytes: (path: string) => invoke<ArrayBuffer>("abs_read_bytes", { path }),
+	absCopyIn: (src: string, root: string, rel: string) => invoke<void>("abs_copy_in", { src, root, rel }),
 	absWrite: (path: string, data: string) => invoke<void>("abs_write_base64", { path, data }),
 
 	paths: () => invoke<{ data: string; library: string }>("app_paths"),

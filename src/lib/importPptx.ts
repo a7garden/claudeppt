@@ -10,7 +10,7 @@
 // Claude 에게 「원본과 같게」 다듬기를 맡긴다. 좌표는 EMU → px 로, 가로를 1280px 에 맞춰 늘이거나 줄인다.
 
 import JSZip from "jszip";
-import { api, b64FromBytes } from "./api";
+import { api } from "./api";
 import { type Deck, FORMAT, embedFont, escapeHtml, newId, slideHtml, themeCss, writeDeck } from "./deck";
 import type { Settings } from "./settings";
 
@@ -40,10 +40,20 @@ interface Ctx {
 }
 interface TextDefaults { size?: number; color?: string; bold?: boolean; font?: string; align?: string }
 
+// 레이아웃 · 마스터 · 테마는 쪽마다 같은 것을 다시 읽는다 — 한 번 푼 것을 가져오기가 끝날 때까지 둔다.
+// 쪽 XML 은 담지 않는다 (수백 쪽이면 메모리만 먹는다). 읽기만 하는 DOM 이라 나눠 써도 된다.
+const shared = new WeakMap<JSZip, Map<string, Promise<Document | null>>>();
+const SHARED = /\/(slideLayouts|slideMasters|theme)\//;
 async function xml(zip: JSZip, p: string): Promise<Document | null> {
-	const f = zip.file(p);
-	if (!f) return null;
-	return new DOMParser().parseFromString(await f.async("string"), "application/xml");
+	const parse = async () => {
+		const f = zip.file(p);
+		return f ? new DOMParser().parseFromString(await f.async("string"), "application/xml") : null;
+	};
+	if (!SHARED.test(p)) return parse();
+	let m = shared.get(zip);
+	if (!m) shared.set(zip, (m = new Map()));
+	if (!m.has(p)) m.set(p, parse());
+	return m.get(p)!;
 }
 
 async function rels(zip: JSZip, part: string): Promise<Record<string, string>> {
@@ -331,7 +341,7 @@ async function mediaPath(ctx: Ctx, zipPath: string): Promise<string | null> {
 	const ext = name.split(".").pop();
 	if (ext === "emf" || ext === "wmf") { ctx.warnings.add("emf"); return null; }
 	const rel = `assets/${name}`;
-	await api.writeB64(ctx.dir, rel, b64FromBytes(await f.async("uint8array")));
+	await api.writeBytes(ctx.dir, rel, await f.async("uint8array"));
 	ctx.media.set(zipPath, "../" + rel);
 	return "../" + rel;
 }
@@ -486,7 +496,7 @@ async function readTheme(zip: JSZip, masterPath: string): Promise<Theme> {
 
 export interface ImportResult { deck: Deck; warnings: string[] }
 
-export async function importPptx(bytes: Uint8Array, dir: string, title: string, s: Settings, progress: (i: number, n: number) => void): Promise<ImportResult> {
+export async function importPptx(bytes: Uint8Array, src: string, dir: string, title: string, s: Settings, progress: (i: number, n: number) => void): Promise<ImportResult> {
 	const zip = await JSZip.loadAsync(bytes);
 	const pres = await xml(zip, "ppt/presentation.xml");
 	if (!pres) throw new Error("presentation.xml 이 없다 — PPTX 가 아니다");
@@ -501,13 +511,15 @@ export async function importPptx(bytes: Uint8Array, dir: string, title: string, 
 	await api.vcsInit(dir);
 	await embedFont(dir);
 	const deck: Deck = { format: FORMAT, title, size: { w: W, h: H }, slides: [], theme: "theme.css", source: { kind: "pptx", file: "source/original.pptx" }, created: new Date().toISOString(), updated: new Date().toISOString() };
-	await api.writeB64(dir, "source/original.pptx", b64FromBytes(bytes));
+	await api.absCopyIn(src, dir, "source/original.pptx");
 	const warnings = new Set<string>();
 	const media = new Map<string, string>();
 	let themeFont = "";
 
 	for (let i = 0; i < order.length; i++) {
 		progress(i, order.length);
+		// 쪽마다 화면에 한 번 숨을 돌려준다 — 안 그러면 진행 표시가 멈춰 보이고 창이 「응답 없음」이 된다
+		await new Promise((r) => setTimeout(r, 0));
 		const sp = order[i];
 		const slide = await xml(zip, sp);
 		if (!slide) continue;

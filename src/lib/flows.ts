@@ -34,8 +34,8 @@ export async function importFile(path: string) {
 	const dir = await freeDir(name);
 	useDeck.setState({ busy: tNow("importing") });
 	try {
-		const bytes = Uint8Array.from(atob(await api.absRead(path)), (c) => c.charCodeAt(0));
-		const { deck: imported, warnings } = await importPptx(bytes, dir, name, useSettings.getState().s, (i, n) => useDeck.setState({ busy: `${tNow("importing")} ${i}/${n}` }));
+		const bytes = new Uint8Array(await api.absReadBytes(path));
+		const { deck: imported, warnings } = await importPptx(bytes, path, dir, name, useSettings.getState().s, (i, n) => useDeck.setState({ busy: `${tNow("importing")} ${i}/${n}` }));
 		await st.openProject(dir);
 		if (warnings.length) {
 			const ko = useSettings.getState().s.lang === "ko";

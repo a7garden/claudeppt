@@ -35,6 +35,8 @@ notify-debouncer-mini = "0.7"
 # 이미지 생성 API (OpenAI · Gemini). 시스템 인증서 저장소 대신 rustls 로 — 회사 PC 프록시 설정과 무관하게 돈다.
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 base64 = "0.22"
+# 바이트 쓰기 명령의 경로 머리글 풀기 (한글 경로)
+percent-encoding = "2"
 
 [profile.release]
 codegen-units = 1
