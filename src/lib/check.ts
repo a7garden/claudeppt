@@ -91,7 +91,7 @@ export async function runCheck(dir: string, id: string, deck: Deck, version: num
 	const { w, h } = deck.size;
 	step("PPTX");
 	const built = await buildPptx(deck, id, (i, n) => step(`PPTX ${i}/${n}`));
-	await api.writeB64(dir, `${BASE}/check.pptx`, built.data);
+	await api.writeBytes(dir, `${BASE}/check.pptx`, built.data);
 	step("PowerPoint");
 	const pages = await api.pptSnapshot(join(dir, ".claudeppt", "check", "check.pptx"), join(dir, ".claudeppt", "check", "ppt"), w, h);
 	if (!pages) throw new Error("PowerPoint 로 쪽 그림을 뽑지 못했다");

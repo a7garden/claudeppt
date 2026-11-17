@@ -222,16 +222,22 @@ function Rail() {
 	);
 }
 
+/** 쪽 목록 미리보기는 목록에서 보이는 언저리(위아래 한 화면쯤)에 있을 때만 iframe 을 띄운다.
+ *  쪽마다 늘 띄우면 큰 덱(수백 쪽 · 큰 그림)을 여는 순간 iframe 이 쪽 수만큼 원본 크기로 그림을 읽어 웹뷰가 버벅이거나 멈춘다.
+ *  멀어지면 내린다 — 다시 오면 그때 새로 읽는다. 내보내기 · 비교 검사는 화면 밖 틀(offscreen)을 따로 쓰므로 이것과 무관하다. */
 function ThumbFrame(p: { file: string; rev: number; w: number; h: number; revHash?: string }) {
 	const ref = useRef<HTMLDivElement>(null);
 	const [width, setWidth] = useState(0);
+	const [near, setNear] = useState(false);
 	useLayoutEffect(() => {
 		const el = ref.current!;
 		const ro = new ResizeObserver(() => setWidth(el.clientWidth));
 		ro.observe(el);
-		return () => ro.disconnect();
+		const io = new IntersectionObserver(([e]) => setNear(e.isIntersecting), { root: el.closest(".rail"), rootMargin: "100% 0px" });
+		io.observe(el);
+		return () => { ro.disconnect(); io.disconnect(); };
 	}, []);
-	return <div ref={ref} style={{ position: "absolute", inset: 0 }}>{width > 0 && <SlideFrame {...p} width={width} />}</div>;
+	return <div ref={ref} style={{ position: "absolute", inset: 0 }}>{near && width > 0 && <SlideFrame {...p} width={width} />}</div>;
 }
 
 // ── 무대 ──

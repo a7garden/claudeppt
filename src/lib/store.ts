@@ -322,7 +322,7 @@ export const useDeck = create<S>()((set, get) => ({
 		set({ busy: tNow("exporting") });
 		try {
 			const b = await buildPptx(deck, id, (i, n) => set({ busy: `${tNow("exporting")} ${i}/${n}` }), exact);
-			await api.absWrite(path, b.data);
+			await api.absWriteBytes(path, b.data);
 			// 깔리지 않은 글꼴은 PowerPoint 에서 다른 글꼴로 보인다 — 알린다
 			get().notify(path.split(/[\\/]/).pop()! + (b.missingFonts.length ? ` · ${tNow("missingFont")}: ${b.missingFonts.join(", ")}` : ""), b.missingFonts.length ? "err" : "ok");
 		} catch (e) {
@@ -347,7 +347,7 @@ export const useDeck = create<S>()((set, get) => ({
 			// 릴리즈가 가리키는 것은 내용 판(head)이다. 릴리즈 판은 PPTX 와 기록만 더한다
 			const file = `releases/${tag}-v${head.n}.pptx`;
 			const b = await buildPptx(deck, id, (i, n) => set({ busy: `${tNow("release")} ${i}/${n}` }));
-			await api.writeB64(dir, file, b.data);
+			await api.writeBytes(dir, file, b.data);
 			const rel: Release = { name: name.trim() || tag, tag, n: head.n, hash: head.hash, file, notes: notes.trim(), at: new Date().toISOString() };
 			const releases = [...get().releases, rel];
 			await api.writeText(dir, "releases/releases.json", JSON.stringify(releases, null, 2) + "\n");

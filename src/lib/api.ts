@@ -13,8 +13,8 @@ export const api = {
 	/** 큰 파일은 base64 를 거치지 않고 날바이트로 — 그림 · 동영상 · 원본 PPTX */
 	writeBytes: (root: string, rel: string, data: Uint8Array) => invoke<void>("fs_write_bytes", data, { headers: { "x-root": encodeURIComponent(root), "x-rel": encodeURIComponent(rel) } }),
 	absReadBytes: (path: string) => invoke<ArrayBuffer>("abs_read_bytes", { path }),
-	absCopyIn: (src: string, root: string, rel: string) => invoke<void>("abs_copy_in", { src, root, rel }),
-	absWrite: (path: string, data: string) => invoke<void>("abs_write_base64", { path, data }),
+	absWriteBytes: (path: string, data: Uint8Array) => invoke<void>("abs_write_bytes", data, { headers: { "x-path": encodeURIComponent(path) } }),
+	absCopyIn:(src: string, root: string, rel: string) => invoke<void>("abs_copy_in", { src, root, rel }),
 
 	paths: () => invoke<{ data: string; library: string }>("app_paths"),
 	settingsLoad: () => invoke<any>("settings_load"),

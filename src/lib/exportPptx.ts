@@ -1,7 +1,7 @@
 // 웹 슬라이드 → PPTX. 쪽마다 화면 밖 iframe 에 1:1 로 그려 런타임(rt.js extract)이 잰 좌표로 PowerPoint 도형을 만든다.
 // 상자 → 도형 · 글자 묶음 → 글상자 · 표 → 표 · 그림/SVG → 그림. 96px = 1in.
 import PptxGenJS from "pptxgenjs";
-import { api, b64FromBytes } from "./api";
+import { api } from "./api";
 import type { Deck } from "./deck";
 import { ask, offscreen } from "./frames";
 
@@ -68,7 +68,8 @@ function toRuns(runs: any[], f: FontCtx) {
 		.filter(Boolean) as any[];
 }
 
-export interface Built { data: string; missingFonts: string[] }
+/** data 는 날바이트 — base64 로 싸면 큰 덱에서 메모리가 몇 벌로 불어난다 (가져오기와 같은 까닭) */
+export interface Built { data: Uint8Array; missingFonts: string[] }
 
 /**
  * exact=true 면 쪽마다 웹을 2배로 구운 그림 한 장을 깔고, 그 위에 같은 자리의 글상자를 투명하게 얹는다.
@@ -157,5 +158,5 @@ export async function buildPptx(deck: Deck, projectId: string, progress: (i: num
 	}
 	progress(deck.slides.length, deck.slides.length);
 	const out = (await pptx.write({ outputType: "uint8array" })) as Uint8Array;
-	return { data: b64FromBytes(out), missingFonts: [...fonts.missing] };
+	return { data: out, missingFonts: [...fonts.missing] };
 }

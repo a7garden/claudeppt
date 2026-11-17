@@ -51,7 +51,7 @@ pub fn run() {
 			fsx::fs_write_bytes,
 			fsx::abs_read_bytes,
 			fsx::abs_copy_in,
-			fsx::abs_write_base64,
+			fsx::abs_write_bytes,
 			project::app_paths,
 			project::settings_load,
 			project::settings_save,

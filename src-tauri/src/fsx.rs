@@ -55,12 +55,8 @@ pub fn abs_read_bytes(path: String) -> Res<tauri::ipc::Response> {
 /// 본문은 날바이트, 경로는 머리글(x-root · x-rel)로 받는다. 머리글은 ASCII 만 되므로 JS 가 encodeURIComponent 로 싸서 보낸다.
 #[tauri::command]
 pub fn fs_write_bytes(request: tauri::ipc::Request) -> Res<()> {
-	let head = |k: &str| -> Res<String> {
-		let v = request.headers().get(k).ok_or_else(|| format!("머리글 없음: {k}"))?;
-		Ok(percent_encoding::percent_decode(v.as_bytes()).decode_utf8().map_err(err)?.into_owned())
-	};
 	let tauri::ipc::InvokeBody::Raw(data) = request.body() else { return Err("본문이 바이트가 아니다".into()) };
-	let p = inside(&head("x-root")?, &head("x-rel")?)?;
+	let p = inside(&header(&request, "x-root")?, &header(&request, "x-rel")?)?;
 	ensure_parent(&p)?;
 	std::fs::write(p, data).map_err(err)
 }
@@ -73,9 +69,16 @@ pub fn abs_copy_in(src: String, root: String, rel: String) -> Res<()> {
 	std::fs::copy(src, p).map(|_| ()).map_err(err)
 }
 
+/// 내보낸 PPTX 를 사용자가 고른 자리에 쓴다. 경로는 머리글 x-path (fs_write_bytes 와 같은 꼴).
 #[tauri::command]
-pub fn abs_write_base64(path: String, data: String) -> Res<()> {
-	let p = PathBuf::from(path);
+pub fn abs_write_bytes(request: tauri::ipc::Request) -> Res<()> {
+	let tauri::ipc::InvokeBody::Raw(data) = request.body() else { return Err("본문이 바이트가 아니다".into()) };
+	let p = PathBuf::from(header(&request, "x-path")?);
 	ensure_parent(&p)?;
-	std::fs::write(p, B64.decode(data).map_err(err)?).map_err(err)
+	std::fs::write(p, data).map_err(err)
+}
+
+fn header(request: &tauri::ipc::Request, k: &str) -> Res<String> {
+	let v = request.headers().get(k).ok_or_else(|| format!("머리글 없음: {k}"))?;
+	Ok(percent_encoding::percent_decode(v.as_bytes()).decode_utf8().map_err(err)?.into_owned())
 }
