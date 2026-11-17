@@ -88,8 +88,11 @@ input, textarea, select { font: inherit; color: inherit; }
 .modes button.pin[aria-pressed="true"]::after { background: var(--accent); }
 
 /* ── 작업 화면 ── */
-.work { display: grid; grid-template-columns: 148px 1fr 384px; min-height: 0; }
-.work.narrow { grid-template-columns: 0 1fr 344px; }
+.work { position: relative; display: grid; grid-template-columns: 148px minmax(0, 1fr) 384px; min-height: 0; }
+/* 영역 경계 손잡이 — 평소엔 경계선만 보이고, 손을 대면 그 선이 굵어진다. 6px 폭은 잡기 쉬우라고 */
+.split { position: absolute; top: 0; bottom: 0; width: 6px; cursor: col-resize; z-index: 5; touch-action: none; outline: none; }
+.split::after { content: ""; position: absolute; left: 2px; top: 0; bottom: 0; width: 2px; background: transparent; transition: background 0.12s; }
+.split:hover::after, .split.on::after, .split:focus-visible::after { background: var(--dim); }
 
 /* 쪽 목록 — 번호는 틀 밖 왼쪽, 핀 수 · 바뀜 표식은 번호 줄에 */
 .rail { overflow-y: auto; padding: 14px 12px 40px 10px; border-right: 1px solid var(--hair); scrollbar-width: thin; }

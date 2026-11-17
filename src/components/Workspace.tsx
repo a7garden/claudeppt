@@ -47,6 +47,53 @@ export function SlideFrame({ file, rev, width, height, w, h, onWin, revHash }: {
 	);
 }
 
+/** 옆 영역 너비 — 이 PC 에만 남긴다(설정 파일에 넣을 만한 값이 아니다). 저장소가 막혀도 기본값으로 그린다 */
+function useWidth(key: string, init: number, min: number, max: number) {
+	const k = "claudeppt.width." + key;
+	const [w, setW] = useState(() => {
+		try { const v = Number(localStorage.getItem(k)); return v ? Math.min(max, Math.max(min, v)) : init; } catch { return init; }
+	});
+	const set = useCallback((v: number | null) => {
+		const n = v == null ? init : Math.round(Math.min(max, Math.max(min, v)));
+		setW(n);
+		try { localStorage.setItem(k, String(n)); } catch {}
+	}, [k, init, min, max]);
+	return [w, set] as const;
+}
+
+/** 영역 경계 손잡이 — 끌기 · 화살표 키(Shift 는 크게)로 너비를 바꾸고, 두 번 누르면 기본 너비로 돌린다.
+ *  끄는 동안 iframe 이 포인터를 가로채면 손을 놓쳐서 포인터를 손잡이에 붙잡아 둔다. */
+function Splitter({ side, at, set, label }: { side: "left" | "right"; at: number; set: (v: number | null) => void; label: string }) {
+	const [drag, setDrag] = useState(false);
+	const start = useRef({ x: 0, w: 0 });
+	const dir = side === "left" ? 1 : -1;
+	return (
+		<div
+			className={"split" + (drag ? " on" : "")}
+			style={side === "left" ? { left: at - 3 } : { right: at - 3 }}
+			role="separator"
+			aria-orientation="vertical"
+			aria-label={label}
+			aria-valuenow={at}
+			tabIndex={0}
+			onPointerDown={(e) => { e.currentTarget.setPointerCapture(e.pointerId); start.current = { x: e.clientX, w: at }; setDrag(true); }}
+			onPointerMove={(e) => { if (drag) set(start.current.w + (e.clientX - start.current.x) * dir); }}
+			onPointerUp={() => setDrag(false)}
+			onPointerCancel={() => setDrag(false)}
+			onDoubleClick={() => set(null)}
+			onKeyDown={(e) => {
+				const step = e.shiftKey ? 48 : 12;
+				if (e.key === "ArrowLeft") set(at - step * dir);
+				else if (e.key === "ArrowRight") set(at + step * dir);
+				else if (e.key === "Home" || e.key === "Enter") set(null);
+				else return;
+				e.preventDefault();
+				e.stopPropagation();
+			}}
+		/>
+	);
+}
+
 export default function Workspace() {
 	const setMode = useDeck((s) => s.setMode);
 	const setCurrent = useDeck((s) => s.setCurrent);
@@ -69,11 +116,17 @@ export default function Workspace() {
 		addEventListener("keydown", k);
 		return () => removeEventListener("keydown", k);
 	}, [setMode, setCurrent]);
+	const t = useT();
+	const [railW, setRailW] = useWidth("rail", 148, 96, 280);
+	const [talkW, setTalkW] = useWidth("talk", 384, 300, 720);
 	return (
-		<main className="work">
+		<main className="work" style={{ gridTemplateColumns: `${railW}px minmax(0, 1fr) ${talkW}px` }}>
 			<Rail />
 			<Stage />
 			<Talk />
+			{/* 무대는 360px 아래로 줄이지 않는다 — 옆 영역을 넓혀도 슬라이드가 보여야 한다 */}
+			<Splitter side="left" at={railW} set={(v) => setRailW(v == null ? v : Math.min(v, innerWidth - talkW - 360))} label={t("slides")} />
+			<Splitter side="right" at={talkW} set={(v) => setTalkW(v == null ? v : Math.min(v, innerWidth - railW - 360))} label={t("talk")} />
 			{over && <div className="dropzone">{useSettings.getState().s.lang === "ko" ? "PPTX · CPPT 열기" : "Open PPTX · CPPT"}</div>}
 		</main>
 	);
