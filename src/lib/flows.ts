@@ -28,19 +28,30 @@ export async function startNew(brief: string) {
 	if (brief.trim()) useDeck.getState().send(brief.trim());
 }
 
+/** PPTX 가져오기는 화면을 막지 않는다 — 오른쪽 아래 작은 진행 막대(jobs)만 띄우고, 그동안 다른 프로젝트를 보거나 고칠 수 있다.
+ *  끝났을 때 아무 프로젝트도 열려 있지 않으면 바로 열고, 무언가 작업 중이면 화면을 빼앗지 않고 알림의 「열기」로 둔다. */
 export async function importFile(path: string) {
 	const st = useDeck.getState();
 	const name = path.split(/[\\/]/).pop()!.replace(/\.pptx$/i, "");
 	const dir = await freeDir(name);
-	useDeck.setState({ busy: tNow("importing") });
+	const id = "imp" + Date.now().toString(36);
+	const step = (i: number, n: number) => useDeck.setState((s) => ({
+		jobs: s.jobs.some((j) => j.id === id) ? s.jobs.map((j) => (j.id === id ? { ...j, i, n } : j)) : [...s.jobs, { id, label: name, i, n }],
+	}));
+	step(0, 0);
 	try {
 		const bytes = new Uint8Array(await api.absReadBytes(path));
-		const { deck: imported, warnings } = await importPptx(bytes, path, dir, name, useSettings.getState().s, (i, n) => useDeck.setState({ busy: `${tNow("importing")} ${i}/${n}` }));
-		await st.openProject(dir);
-		if (warnings.length) {
-			const ko = useSettings.getState().s.lang === "ko";
-			const names: Record<string, [string, string]> = { emf: ["EMF 그림", "EMF images"], chart: ["차트", "charts"], object: ["개체", "objects"], custGeom: ["자유형 도형", "freeform shapes"] };
-			st.notify((ko ? "원본과 다를 수 있음 — " : "May differ from original — ") + warnings.map((w) => names[w]?.[ko ? 0 : 1] || w).join(" · "));
+		const { deck: imported, warnings } = await importPptx(bytes, path, dir, name, useSettings.getState().s, step);
+		// 첫 판은 여기서 남긴다 — 바로 열지 않으면 openProject 의 첫 판 남기기가 늦어져, 아래 「원본 쪽 그림」이 첫 판 이름을 가져간다
+		await api.commit(dir, "PPTX 를 가져온다");
+		const ko = useSettings.getState().s.lang === "ko";
+		const names: Record<string, [string, string]> = { emf: ["EMF 그림", "EMF images"], chart: ["차트", "charts"], object: ["개체", "objects"], custGeom: ["자유형 도형", "freeform shapes"] };
+		const differ = warnings.length ? (ko ? "원본과 다를 수 있음 — " : "May differ from original — ") + warnings.map((w) => names[w]?.[ko ? 0 : 1] || w).join(" · ") : "";
+		if (!useDeck.getState().deck) {
+			await st.openProject(dir);
+			if (differ) st.notify(differ);
+		} else {
+			st.notify(`${name} · ${tNow("imported")}${differ ? " · " + differ : ""}`, "ok", { label: tNow("open"), run: () => useDeck.getState().openProject(dir) });
 		}
 		// 원본 쪽 그림 — PowerPoint 가 있으면 뒤에서 뽑는다. 없으면 조용히 넘어간다
 		api.pptSnapshot(join(dir, "source", "original.pptx"), join(dir, "source", "pages"), imported.size.w, imported.size.h).then(async (pages) => {
@@ -54,9 +65,9 @@ export async function importFile(path: string) {
 			useDeck.getState().refreshVersions();
 		}, () => {});
 	} catch (e) {
-		st.notify(String(e), "err");
+		st.notify(`${name} · ${String(e)}`, "err");
 	} finally {
-		useDeck.setState({ busy: null });
+		useDeck.setState((s) => ({ jobs: s.jobs.filter((j) => j.id !== id) }));
 	}
 }
 

@@ -61,12 +61,33 @@ export default function App() {
 function Toasts() {
 	const toast = useDeck((s) => s.toast);
 	const busy = useDeck((s) => s.busy);
+	const jobs = useDeck((s) => s.jobs);
 	const up = useUpdate();
 	const t = useT();
 	return (
 		<>
 			{busy && <div className="busy" role="status">{busy}<div className="progress-line" /></div>}
-			{toast && !busy && <div className={"toast " + toast.kind} role="status">{toast.text}</div>}
+			{toast && !busy && (
+				<div className={"toast " + toast.kind} role="status">
+					<span>{toast.text}</span>
+					{toast.action && <button onClick={() => { toast.action!.run(); useDeck.setState({ toast: null }); }}>{toast.action.label}</button>}
+				</div>
+			)}
+			{jobs.length > 0 && (
+				<div className="jobs" role="status" aria-live="polite">
+					{jobs.map((j) => (
+						<div className="job" key={j.id}>
+							<div className="head">
+								<span className="label" title={j.label}>{j.label}</span>
+								<span className="mono">{j.n ? `${j.i}/${j.n}${t("slideN") === "쪽" ? "쪽" : ""}` : t("importRead")}</span>
+							</div>
+							<div className={"bar" + (j.n ? "" : " unknown")} role="progressbar" aria-label={`${t("importing")} ${j.label}`} aria-valuemin={0} aria-valuemax={j.n || undefined} aria-valuenow={j.n ? j.i : undefined}>
+								<i style={j.n ? { width: `${(j.i / j.n) * 100}%` } : undefined} />
+							</div>
+						</div>
+					))}
+				</div>
+			)}
 			{up.phase === "available" && up.notified && !busy && (
 				<div className="toast" role="status">
 					<span>{t("update")} <span className="mono">{up.version}</span></span>

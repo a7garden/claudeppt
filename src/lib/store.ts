@@ -36,6 +36,8 @@ export interface Turn {
 	error?: string;
 	phase?: string;
 }
+/** 화면 뒤에서 도는 긴 일(PPTX 가져오기) 하나. n 이 0 이면 아직 전체 양을 모른다 */
+export interface Job { id: string; label: string; i: number; n: number }
 export interface Release { name: string; tag: string; n: number; hash: string; file: string; notes: string; at: string }
 export type Mode = "view" | "pin" | "edit";
 
@@ -54,7 +56,9 @@ interface S {
 	releases: Release[];
 	preview: Commit | null;
 	busy: string | null;
-	toast: { text: string; kind: "ok" | "err" } | null;
+	/** busy 와 달리 화면을 막지 않는 일. 프로젝트를 닫아도 남는다 */
+	jobs: Job[];
+	toast: { text: string; kind: "ok" | "err"; action?: { label: string; run: () => void } } | null;
 	frames: Set<Window>;
 	report: Report | null;
 	compare: boolean;
@@ -75,7 +79,7 @@ interface S {
 	restore: (c: Commit) => Promise<void>;
 	exportTo: (path: string, exact?: boolean) => Promise<void>;
 	release: (name: string, notes: string) => Promise<void>;
-	notify: (text: string, kind?: "ok" | "err") => void;
+	notify: (text: string, kind?: "ok" | "err", action?: { label: string; run: () => void }) => void;
 	saveDeck: (deck: Deck) => Promise<void>;
 	check: () => Promise<void>;
 	setCompare: (on: boolean) => void;
@@ -114,6 +118,7 @@ export const useDeck = create<S>()((set, get) => ({
 	releases: [],
 	preview: null,
 	busy: null,
+	jobs: [],
 	toast: null,
 	frames: new Set(),
 	report: null,
@@ -363,9 +368,10 @@ export const useDeck = create<S>()((set, get) => ({
 		}
 	},
 
-	notify: (text, kind = "ok") => {
-		set({ toast: { text, kind } });
-		setTimeout(() => { if (get().toast?.text === text) set({ toast: null }); }, kind === "err" ? 7000 : 3500);
+	notify: (text, kind = "ok", action) => {
+		set({ toast: { text, kind, action } });
+		// 누를 단추가 있으면 오래 둔다 — 다른 일을 하다 돌아와도 놓치지 않게
+		setTimeout(() => { if (get().toast?.text === text) set({ toast: null }); }, action ? 15000 : kind === "err" ? 7000 : 3500);
 	},
 
 	check: async () => {
