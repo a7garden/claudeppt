@@ -717,6 +717,19 @@ export async function importPptx(bytes: Uint8Array, src: string, dir: string, ti
 			const k2 = phKey(spEl);
 			if (k2 && (k2.type === "title" || k2.type === "ctrTitle")) { stitle = (spEl.textContent || "").replace(/\s+/g, " ").trim(); break; }
 		}
+		// 제목 자리 표시자 없이 글상자로 제목을 단 덱이 많다 — 그때는 가장 큰 글자(같으면 위쪽)의 첫 문단을 제목으로 삼는다.
+		// 제목이 비면 쪽 목록 · @쪽 고르기 창에 「제목 없음」만 늘어서 쪽을 가려 고를 수 없다
+		if (!stitle) {
+			let best = { sz: 0, y: Infinity, text: "" };
+			for (const spEl of sTree?.getElementsByTagName("p:sp") || []) {
+				const p = [...spEl.getElementsByTagName("a:p")].find((x) => (x.textContent || "").trim());
+				if (!p) continue;
+				const sz = Math.max(0, ...[...p.getElementsByTagName("a:rPr")].map((r) => num(r.getAttribute("sz"))));
+				const y = num(path(spEl, "p:spPr", "a:xfrm", "a:off")?.getAttribute("y"), Infinity);
+				if (sz > best.sz || (sz === best.sz && y < best.y)) best = { sz, y, text: (p.textContent || "").replace(/\s+/g, " ").trim() };
+			}
+			stitle = best.text.slice(0, 60);
+		}
 		// 발표자 메모
 		const notesPath = Object.values(sRel).find((p) => p.includes("notesSlides/"));
 		let notes = "";

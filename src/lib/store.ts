@@ -4,6 +4,7 @@
 //   열기 · 닫기          openProject · closeProject (폴더 감시와 deck:// 등록은 Rust)
 //   핫 리로드            onFs — deck.json 이면 목차를, 쪽 HTML 이면 그 쪽만, CSS 면 CSS 만 다시 읽힌다
 //   핀                   addPin · updatePin · removePin → .claudeppt/pins.json
+//   무대 보기            setFlow — 한 쪽 보기 ↔ 이어 보기(모든 쪽을 세로로 스크롤) · mentionSlide — 쪽 목록에서 요청칸에 @쪽 넣기
 //   대화                 send → claude 한 턴 → 그림 채우기 → 한 판으로 남김 → .claudeppt/talk.json
 //   직접 편집            applyDirect → 원본 HTML 에 되쓰고 잠시 뒤 한 판으로 남김
 //   판 · 릴리즈          refreshVersions · preview · restore · release
@@ -19,6 +20,7 @@ import { tell } from "./frames";
 import { tNow } from "./i18n";
 import { askClaude, linkFonts } from "./fonts";
 import { fillGenerated } from "./imagegen";
+import { type Mention, mentionsIn } from "./mention";
 import { type PinNote, systemPrompt, turnPrompt } from "./prompt";
 import { useSettings } from "./settings";
 
@@ -29,6 +31,8 @@ export interface Turn {
 	at: number;
 	request: string;
 	pins: PinNote[];
+	/** 요청 글의 @쪽 멘션을 보낼 때 푼 것 — 쪽 순서가 나중에 바뀌어도 같은 쪽을 가리킨다 */
+	mentions?: Mention[];
 	reply: string;
 	tools: ToolUse[];
 	status: "running" | "done" | "failed" | "stopped";
@@ -49,6 +53,10 @@ interface S {
 	rev: Record<string, number>;
 	current: number;
 	mode: Mode;
+	/** 이어 보기 — 무대에 모든 쪽을 세로로 늘어놓고 스크롤로 넘긴다. 보기 모드에서만 쓴다 */
+	flow: boolean;
+	/** 쪽 목록에서 「이 쪽 언급」을 누르면 요청칸이 받아 @쪽 을 넣는다 (k 는 같은 쪽을 거듭 눌러도 다시 넣게 하는 표식) */
+	mentionReq: { no: number; k: number } | null;
 	pins: Pin[];
 	turns: Turn[];
 	sessionId: string | null;
@@ -69,6 +77,8 @@ interface S {
 	closeProject: () => Promise<void>;
 	setCurrent: (i: number) => void;
 	setMode: (m: Mode) => void;
+	setFlow: (on: boolean) => void;
+	mentionSlide: (no: number) => void;
 	addPin: (p: Omit<Pin, "id" | "at">) => string;
 	updatePin: (id: string, text: string) => void;
 	removePin: (id: string) => void;
@@ -116,6 +126,8 @@ export const useDeck = create<S>()((set, get) => ({
 	rev: {},
 	current: 0,
 	mode: "view",
+	flow: (() => { try { return localStorage.getItem("claudeppt.flow") === "1"; } catch { return false; } })(),
+	mentionReq: null,
 	pins: [],
 	turns: [],
 	sessionId: null,
@@ -216,9 +228,17 @@ export const useDeck = create<S>()((set, get) => ({
 
 	setCurrent: (i) => set({ current: Math.max(0, Math.min(i, (get().deck?.slides.length || 1) - 1)) }),
 	setMode: (mode) => {
-		set({ mode });
+		// 핀 · 편집은 한 쪽 무대에서만 한다 — 이어 보기의 작은 쪽에 핀을 찍으면 자리가 거칠다
+		set(mode === "view" ? { mode } : { mode, flow: false });
 		for (const w of get().frames) tell(w, { t: "mode", mode });
 	},
+
+	setFlow: (flow) => {
+		if (flow && get().mode !== "view") get().setMode("view");
+		set({ flow });
+		try { localStorage.setItem("claudeppt.flow", flow ? "1" : "0"); } catch {}
+	},
+	mentionSlide: (no) => set({ mentionReq: { no, k: Date.now() } }),
 
 	addPin: (p) => {
 		const pin: Pin = { ...p, id: Math.random().toString(36).slice(2, 9), at: Date.now() };
@@ -249,7 +269,8 @@ export const useDeck = create<S>()((set, get) => ({
 		const order = (id: string) => deck.slides.findIndex((x) => x.id === id) + 1;
 		const notes: PinNote[] = pins.map((p, i) => ({ n: i + 1, slide: p.slide, slideNo: order(p.slide), x: p.x, y: p.y, text: p.text, target: p.target }));
 		const cur = deck.slides[current];
-		const turn: Turn = { id: "t" + Date.now().toString(36), at: Date.now(), request: text.trim(), pins: notes, reply: "", tools: [], status: "running" };
+		const mentions = mentionsIn(text, deck);
+		const turn: Turn = { id: "t" + Date.now().toString(36), at: Date.now(), request: text.trim(), pins: notes, mentions, reply: "", tools: [], status: "running" };
 		set({ turns: [...get().turns, turn], running: turn.id, pins: [] });
 		persistPins(dir, []);
 		const patch = (fn: (t: Turn) => Turn) => set({ turns: get().turns.map((t) => (t.id === turn.id ? fn(t) : t)) });
@@ -258,7 +279,7 @@ export const useDeck = create<S>()((set, get) => ({
 			const r = await api.claudeRun({
 				turn: turn.id,
 				dir,
-				prompt: turnPrompt(text, notes, cur ? { id: cur.id, no: current + 1 } : null, attachments),
+				prompt: turnPrompt(text, notes, cur ? { id: cur.id, no: current + 1 } : null, attachments, mentions),
 				system: systemPrompt(s, deck),
 				claudePath: s.claude.path,
 				model: s.claude.model,

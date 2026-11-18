@@ -3,6 +3,7 @@
 // 도형 · 그림 규칙은 설정에서 만들어 매번 덧붙인다 — 설정을 바꾸면 다음 턴부터 따른다.
 
 import type { Deck } from "./deck";
+import type { Mention } from "./mention";
 import type { Settings } from "./settings";
 
 export const BASE_PROMPT = `You are the slide engine of ClaudePPT, a desktop app where a person builds a presentation by talking with you.
@@ -84,10 +85,17 @@ export function systemPrompt(s: Settings, deck: Deck) {
 
 export interface PinNote { n: number; slide: string; slideNo: number; x: number; y: number; text: string; target?: { tag: string; text: string; path: number[] | null } }
 
-/** 한 턴의 요청문 — 사용자 글 · 핀 · 지금 보던 쪽. */
-export function turnPrompt(text: string, pins: PinNote[], current: { id: string; no: number } | null, attachments: string[]) {
+/** 한 턴의 요청문 — 사용자 글 · @쪽 멘션 · 핀 · 지금 보던 쪽.
+ *  멘션 풀이는 시스템 프롬프트가 아니라 여기에 둔다 — 「설정 › Claude › 프롬프트」로 기본 프롬프트를 갈아 끼워도 빠지지 않게 */
+export function turnPrompt(text: string, pins: PinNote[], current: { id: string; no: number } | null, attachments: string[], mentions: Mention[] = []) {
 	const parts: string[] = [];
 	if (text.trim()) parts.push(text.trim());
+	if (mentions.length) {
+		parts.push(
+			"Slides mentioned with @ (@N = slide N in deck.json order, @N-M = slides N to M). Apply the request to these slides and leave the others unchanged unless the request says otherwise:\n" +
+				mentions.map((m) => `- @${m.no}: ${m.file}${m.title ? ` "${m.title}"` : ""}`).join("\n"),
+		);
+	}
 	if (pins.length) {
 		parts.push(
 			"Pins:\n" +

@@ -3,7 +3,8 @@
 // 목차
 //   SlideFrame    슬라이드 iframe 하나. 크기를 맞춰 줄이고, 다시 그릴 표식(rev)이 바뀌면 새로 읽는다
 //   Rail          쪽 목록 — 끌어서 순서 바꾸기 · Delete 로 빼기 · 끝의 + 로 빈 쪽
-//   Stage         무대 — 핀 찍기 · 직접 편집 메시지 받기 · 지난 판 미리 보기
+//   Stage         무대 — 핀 찍기 · 직접 편집 메시지 받기 · 지난 판 미리 보기 · 휠로 쪽 넘기기
+//   Flow          이어 보기 — 모든 쪽을 세로로 늘어놓고 스크롤로 넘긴다. 가운데 온 쪽이 지금 쪽이 된다
 //   Track         판 줄기 — 판마다 눈금, 릴리즈는 긴 눈금
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { api, type Commit, deckUrl } from "../lib/api";
@@ -45,6 +46,36 @@ export function SlideFrame({ file, rev, width, height, w, h, onWin, revHash }: {
 			}}
 		/>
 	);
+}
+
+/** 쪽 넘김 키 — 앱 화면에서 누른 것도, 슬라이드 창이 넘겨준 것(rt.js key)도 여기서 처리한다. 처리했으면 true.
+ *  편집 모드의 좌우 방향키는 고르는 요소를 옮기는 데 쓰므로 넘기지 않는다 */
+function navKey(key: string): boolean {
+	const st = useDeck.getState();
+	const n = st.deck?.slides.length || 1;
+	if (key === "ArrowDown" || key === "PageDown" || (key === "ArrowRight" && st.mode !== "edit")) st.setCurrent(st.current + 1);
+	else if (key === "ArrowUp" || key === "PageUp" || (key === "ArrowLeft" && st.mode !== "edit")) st.setCurrent(st.current - 1);
+	else if (key === "Home") st.setCurrent(0);
+	else if (key === "End") st.setCurrent(n - 1);
+	else return false;
+	return true;
+}
+
+/** 휠로 쪽 넘기기 — 한 칸 굴림(≈100)이나 터치패드로 조금씩 민 양이 모이면 한 쪽 넘기고, 잠깐 쉰다.
+ *  쉬지 않으면 터치패드 관성 한 번에 열 쪽씩 날아간다 */
+function useWheelNav() {
+	const acc = useRef(0);
+	const until = useRef(0);
+	return useCallback((dy: number) => {
+		const now = performance.now();
+		if (now < until.current) return;
+		acc.current += dy;
+		if (Math.abs(acc.current) < 60) return;
+		const st = useDeck.getState();
+		st.setCurrent(st.current + (acc.current > 0 ? 1 : -1));
+		acc.current = 0;
+		until.current = now + 260;
+	}, []);
 }
 
 /** 옆 영역 너비 — 이 PC 에만 남긴다(설정 파일에 넣을 만한 값이 아니다). 저장소가 막혀도 기본값으로 그린다 */
@@ -107,10 +138,11 @@ export default function Workspace() {
 			else if (key === "p") setMode("pin");
 			else if (key === "e") setMode("edit");
 			else if (key === "c") { const st = useDeck.getState(); if (st.report) st.setCompare(!st.compare); else st.check(); }
-			else if (e.key === "ArrowDown" || e.key === "PageDown" || (e.key === "ArrowRight" && useDeck.getState().mode !== "edit")) setCurrent(useDeck.getState().current + 1);
-			else if (e.key === "ArrowUp" || e.key === "PageUp" || (e.key === "ArrowLeft" && useDeck.getState().mode !== "edit")) setCurrent(useDeck.getState().current - 1);
-			else if (e.key === "Escape") { if (useDeck.getState().compare) useDeck.getState().setCompare(false); else setMode("view"); }
-			else return;
+			else if (key === "s") { const st = useDeck.getState(); st.setFlow(!st.flow); }
+			else if (!navKey(e.key)) {
+				if (e.key === "Escape") { if (useDeck.getState().compare) useDeck.getState().setCompare(false); else setMode("view"); }
+				else return;
+			}
 			e.preventDefault();
 		};
 		addEventListener("keydown", k);
@@ -158,6 +190,7 @@ function Rail() {
 	const saveDeck = useDeck((s) => s.saveDeck);
 	const report = useDeck((s) => s.report);
 	const dir = useDeck((s) => s.dir);
+	const mentionSlide = useDeck((s) => s.mentionSlide);
 	const [drag, setDrag] = useState<number | null>(null);
 	const [dropAt, setDropAt] = useState<number | null>(null);
 	const lastFiles = useMemo(() => new Set(turns[turns.length - 1]?.tools.map((x) => x.file).filter(Boolean)), [turns]);
@@ -204,6 +237,7 @@ function Rail() {
 								if (!c) return null;
 								return c.score > 0.05 ? <span className="drift" title={`${t("diff")} ${c.score}%`}>≠{c.score < 10 ? c.score.toFixed(1) : Math.round(c.score)}</span> : <span className="same" title={`${t("diff")} 0%`}>=</span>;
 							})()}
+							{!preview && <button className="at" onClick={() => mentionSlide(i + 1)} title={`${t("mention")} (@${i + 1})`} aria-label={`${t("mention")} @${i + 1}`}>@</button>}
 						</div>
 						<button className="thumb" draggable={!preview} onDragStart={() => setDrag(i)} onDragEnd={() => { setDrag(null); setDropAt(null); }}
 							onClick={() => setCurrent(i)} title={sl.title || `${i + 1}`} aria-current={i === current}>
@@ -257,6 +291,11 @@ function Stage() {
 	const setPreview = useDeck((s) => s.setPreview);
 	const compare = useDeck((s) => s.compare && !!s.report && !s.preview);
 	const report = useDeck((s) => s.report);
+	const flowOn = useDeck((s) => s.flow);
+	const setFlow = useDeck((s) => s.setFlow);
+	// 비교 렌즈는 한 쪽 무대에만 있다 — 비교 중에는 이어 보기를 잠시 접는다
+	const flow = flowOn && !compare;
+	const wheel = useWheelNav();
 	const canvas = useRef<HTMLDivElement>(null);
 	const [box, setBox] = useState({ w: 0, h: 0 });
 	const [active, setActive] = useState<string | null>(null);
@@ -275,7 +314,11 @@ function Stage() {
 
 	// 직접 편집 — 무대 iframe 이 보낸 것만 받는다
 	useEffect(() => onFrame((m, src) => {
-		if (src !== win.current || !slide || preview) return;
+		if (src !== win.current || !slide) return;
+		// 슬라이드 창 위에서 굴린 휠 · 누른 넘김 키 (rt.js 가 넘겨준다)
+		if (m.t === "wheel") return wheel(m.dy);
+		if (m.t === "key") return void navKey(m.key);
+		if (preview) return;
 		if (m.t === "edit") applyDirect(slide.id, m.path, { t: "edit", html: m.html });
 		else if (m.t === "patch") applyDirect(slide.id, m.path, { t: "patch", style: m.style });
 		else if (m.t === "remove") applyDirect(slide.id, m.path, { t: "remove" });
@@ -313,8 +356,12 @@ function Stage() {
 					</div>
 				)}
 			</div>
-			<div className="canvas" ref={canvas}>
-				{box.w > 0 && (
+			<div className="layout" role="group" aria-label={t("flow")}>
+				<button aria-pressed={!flowOn} onClick={() => setFlow(false)} title={`${t("single")} (S)`}>{t("single")}</button>
+				<button aria-pressed={flowOn} onClick={() => setFlow(true)} title={`${t("flow")} (S)`}>{t("flow")}</button>
+			</div>
+			<div className="canvas" ref={canvas} onWheel={flow ? undefined : (e) => wheel(e.deltaY)}>
+				{flow ? <Flow deck={deck} revHash={preview?.hash} /> : box.w > 0 && (
 					<div className="sheet" style={{ left, top, width: deck.size.w * scale, height: deck.size.h * scale }}>
 						<div style={{ width: deck.size.w * scale, height: deck.size.h * scale, overflow: "hidden", position: "relative" }}>
 							<div style={{ position: "absolute", left: 0, top: 0 }}>
@@ -337,6 +384,94 @@ function Stage() {
 			<Track />
 		</section>
 	);
+}
+
+// ── 이어 보기 ──
+// 위 여백은 오른쪽 위 「한 쪽 · 이어 보기」 단추에 첫 쪽이 가리지 않을 만큼
+const FLOW_PAD = 56, FLOW_SIDE = 40, FLOW_GAP = 28;
+
+/** 모든 쪽을 세로로 늘어놓는다. 스크롤해서 화면 가운데에 온 쪽이 지금 쪽이 되고, 쪽 목록 · 방향키로 지금 쪽을 바꾸면 그 쪽으로 스크롤한다.
+ *  쪽은 화면 언저리에 올 때만 띄운다(ThumbFrame 과 같은 까닭 — 큰 덱에서 iframe 수십 개를 한꺼번에 띄우면 웹뷰가 멈춘다).
+ *  누르면 그 쪽이 지금 쪽, 두 번 누르면 한 쪽 보기로 그 쪽을 크게 연다. 핀 · 편집은 한 쪽 보기에서 한다 */
+function Flow({ deck, revHash }: { deck: Deck; revHash?: string }) {
+	const t = useT();
+	const current = useDeck((s) => s.current);
+	const setCurrent = useDeck((s) => s.setCurrent);
+	const setFlow = useDeck((s) => s.setFlow);
+	const rev = useDeck((s) => s.rev);
+	const pins = useDeck((s) => s.pins);
+	const ref = useRef<HTMLDivElement>(null);
+	const [box, setBox] = useState({ w: 0, h: 0 });
+	// 스크롤이 바꾼 지금 쪽이면 다시 스크롤하지 않는다 — 안 그러면 스크롤과 맞춤이 서로를 끌어당긴다
+	const fromScroll = useRef(false);
+	const first = useRef(true);
+	// 앱이 지금 쪽으로 스크롤해 가는 중이면 그 목적지(px). 가는 길에 지나는 쪽을 지금 쪽으로 잡지 않는다 — 안 그러면 중간 쪽에서 멈춘다.
+	// 사용자가 도중에 휠을 굴리면 목적지에 닿지 않으므로 잠시 뒤 놓아준다
+	const aim = useRef<{ y: number; until: number } | null>(null);
+	useLayoutEffect(() => {
+		const el = ref.current!;
+		const ro = new ResizeObserver(() => setBox({ w: el.clientWidth, h: el.clientHeight }));
+		ro.observe(el);
+		return () => ro.disconnect();
+	}, []);
+	const width = Math.max(160, Math.min(box.w - FLOW_SIDE * 2, deck.size.w));
+	const height = (width * deck.size.h) / deck.size.w;
+	const step = height + FLOW_GAP;
+	const topOf = (i: number) => FLOW_PAD + i * step;
+
+	useEffect(() => {
+		const el = ref.current;
+		if (!el || !box.w) return;
+		if (fromScroll.current) { fromScroll.current = false; return; }
+		const y = Math.max(0, Math.min(el.scrollHeight - el.clientHeight, topOf(current) - Math.max(FLOW_PAD, (el.clientHeight - height) / 2)));
+		if (Math.abs(el.scrollTop - y) < 2) return;
+		aim.current = { y, until: performance.now() + 1500 };
+		el.scrollTo({ top: y, behavior: first.current ? "auto" : "smooth" });
+		first.current = false;
+	}, [current, box.w, height]);
+
+	const onScroll = () => {
+		const el = ref.current!;
+		if (aim.current) {
+			if (Math.abs(el.scrollTop - aim.current.y) >= 2 && performance.now() < aim.current.until) return;
+			aim.current = null;
+		}
+		const mid = el.scrollTop + el.clientHeight / 2;
+		const i = Math.max(0, Math.min(deck.slides.length - 1, Math.floor((mid - FLOW_PAD + FLOW_GAP / 2) / step)));
+		if (i !== useDeck.getState().current) { fromScroll.current = true; setCurrent(i); }
+	};
+
+	return (
+		<div className="flow" ref={ref} onScroll={onScroll}>
+			{box.w > 0 && (
+				<div style={{ position: "relative", height: topOf(deck.slides.length) - FLOW_GAP + FLOW_PAD }}>
+					{deck.slides.map((sl, i) => {
+						const n = pins.filter((p) => p.slide === sl.id).length;
+						return (
+							<div key={sl.id} className={"flow-item" + (i === current ? " on" : "")} style={{ top: topOf(i), left: (box.w - width) / 2, width, height }}
+								onClick={() => setCurrent(i)} onDoubleClick={() => { setCurrent(i); setFlow(false); }}>
+								<span className="flow-no mono">{i + 1}{n > 0 && <i title={`${t("pins")} ${n}`} />}</span>
+								<FlowFrame file={sl.file} rev={rev[sl.id] || 0} w={deck.size.w} h={deck.size.h} width={width} revHash={revHash} />
+							</div>
+						);
+					})}
+				</div>
+			)}
+		</div>
+	);
+}
+
+function FlowFrame(p: { file: string; rev: number; w: number; h: number; width: number; revHash?: string }) {
+	const ref = useRef<HTMLDivElement>(null);
+	const [near, setNear] = useState(false);
+	useLayoutEffect(() => {
+		const el = ref.current!;
+		const io = new IntersectionObserver(([e]) => setNear(e.isIntersecting), { root: el.closest(".flow"), rootMargin: "100% 0px" });
+		io.observe(el);
+		return () => io.disconnect();
+	}, []);
+	// 쪽 위의 덮개 — 누름 · 두 번 누름을 iframe 이 삼키지 않게 한다. 휠은 덮개를 지나 스크롤 상자로 간다
+	return <div ref={ref} className="flow-sheet">{near && <SlideFrame {...p} />}<div className="flow-cover" /></div>;
 }
 
 function PinMark({ pin, n, scale, flip, open, onOpen, onClose }: { pin: Pin; n: number; scale: number; flip: boolean; open: boolean; onOpen: () => void; onClose: () => void }) {

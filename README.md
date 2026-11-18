@@ -12,6 +12,8 @@ Tauri 2 · React 19 · Vite · TypeScript. 화면 서식은 토큰 CSS 한 장(`
 | 새로 만들기 | 처음 화면의 「주제」에 한 줄을 쓰고 Enter — 빈 덱을 만들고 그 글로 첫 턴을 보낸다. 비워 두고 누르면 표지 한 장만 |
 | PPTX 가져오기 | 「PPTX 가져오기」(Ctrl+O) 또는 창에 끌어 놓기. 원본과 같은 모양의 HTML 로 옮기고, PowerPoint 가 있으면 원본 쪽 그림(`source/pages`)도 뽑는다 |
 | 고치기 | 오른쪽 대화칸에 쓰고 Enter. 붙여 넣은 그림은 첨부로 간다 |
+| 쪽 지정(@) | 요청칸에서 `@` 를 치면 쪽 고르기 창(번호 · 미리보기 · 제목)이 뜬다 — ↑↓ · Enter 로 넣는다. `@3` 은 3쪽, `@3-5` 는 3~5쪽. 쪽 목록 번호 옆 `@` 를 눌러도 들어간다. Claude 에게는 그 쪽들의 파일이 함께 가고, 지난 대화의 `@쪽` 을 누르면 그 쪽으로 간다 |
+| 넘겨 보기 | 무대 위에서 휠 · ↑↓ · PageUp/Down · Home/End 로 쪽을 넘긴다. 무대 오른쪽 위 「이어 보기」(S) 는 모든 쪽을 세로로 늘어놓고 스크롤로 넘긴다 — 가운데 온 쪽이 지금 쪽, 두 번 누르면 그 쪽을 「한 쪽」으로 크게 연다 |
 | 핀 | 제목 줄 「핀」(P) → 슬라이드를 눌러 의견을 단다. 여러 쪽에 찍은 핀이 요청칸 위에 쌓이고 보내기 한 번에 함께 간다 |
 | 직접 편집 | 「편집」(E) → 글자를 두 번 눌러 고치기 · 절대 위치 요소 끌어 옮기기 · 방향키 1px(Shift 10px) · Delete 로 지우기. 원본 HTML 에 되쓰고 잠잠해지면 한 판으로 남긴다 |
 | 판 | 무대 아래 판 줄기 — 판마다 눈금, 릴리즈는 긴 눈금. 누르면 그 판을 제자리에서 보고 「이 판으로 되돌리기」 |
@@ -129,7 +131,7 @@ cd src-tauri && cargo check
 | `src-tauri/src/pptsnap.rs` | PowerPoint 로 원본 쪽 그림 |
 | `src-tauri/runtime/rt.js` | 슬라이드 안 런타임 — CSS 다시 읽기 · 핀 위치 · 직접 편집 · PPTX 좌표 |
 | `src/lib/store.ts` | 열린 프로젝트 상태 · 대화 턴 · 핀 · 판 · 릴리즈 |
-| `src/lib/prompt.ts` | 앱 시스템 프롬프트 · 턴 요청문 |
+| `src/lib/prompt.ts` · `mention.ts` | 앱 시스템 프롬프트 · 턴 요청문 · `@쪽` 멘션 풀이 |
 | `src/lib/importPptx.ts` · `exportPptx.ts` | PPTX ↔ 웹 |
 | `src/lib/check.ts` · `src/components/CompareLens.tsx` | 비교 검사 · 비교 렌즈 |
 | `src-tauri/src/fonts.rs` · `src/lib/fonts.ts` | 글꼴 맞추기 — 깔린 글꼴 이름 표 읽기 · 원본 이름 별칭(`theme.css` 의 앱 구획) · 없는 글꼴 받아 깔기 |

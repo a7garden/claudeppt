@@ -16,6 +16,7 @@
 //   snapshot {req}      슬라이드 전체 굽기     snapshot {req, data}
 //                                              remove {path}             지웠다
 //                                              extracted {req, data}
+//                                              wheel {dy} · key {key}    휠 · 쪽 넘김 키 (무대가 쪽을 넘긴다)
 (() => {
 	const root = document.querySelector(".slide") || document.body;
 	const post = (m) => parent.postMessage({ __deck: 1, ...m }, "*");
@@ -85,7 +86,14 @@
 			if (el.innerHTML !== before) post({ t: "edit", path: pathOf(el), html: el.innerHTML });
 		}, { once: true });
 	});
+	// 휠 · 쪽 넘김 키는 앱으로 넘긴다 — 슬라이드 창이 받아 버리면 무대 위에서 휠을 굴리거나, 슬라이드를 한 번 누른 뒤 방향키를 눌러도 쪽이 안 넘어간다
+	addEventListener("wheel", (e) => post({ t: "wheel", dy: e.deltaY }), { passive: true });
 	addEventListener("keydown", (e) => {
+		if (mode !== "edit" && ["ArrowDown", "ArrowUp", "ArrowLeft", "ArrowRight", "PageDown", "PageUp", "Home", "End"].includes(e.key) && !e.ctrlKey && !e.altKey) {
+			post({ t: "key", key: e.key });
+			e.preventDefault();
+			return;
+		}
 		if (mode !== "edit") return;
 		const editing = document.activeElement?.isContentEditable;
 		if (editing) { if (e.key === "Escape") document.activeElement.blur(); return; }
