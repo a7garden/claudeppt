@@ -1,9 +1,10 @@
-// 처음 화면 — 주제 한 줄을 쓰면 바로 Claude 가 짓기 시작한다. 가져오기 · 열기는 그 아래 한 줄, 최근 프로젝트는 오른쪽.
+// 처음 화면 — 위에 주제 한 줄(쓰면 바로 Claude 가 짓기 시작) · 가져오기 · 열기, 그 아래 최근 덱을 첫 쪽 미리보기 카드로 깐다.
 // 창 어디에 놓아도 PPTX · CPPT · 프로젝트 폴더를 연다.
+// 2026.11.18 : 최근 목록을 오른쪽 글자 줄에서 화면 대부분을 쓰는 카드로 바꿨다 — 가장 잦은 일이 지난 덱을 여는 것이고, 덱은 모양으로 알아본다.
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { open } from "@tauri-apps/plugin-dialog";
-import { useEffect, useState } from "react";
-import { api, type LibItem } from "../lib/api";
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
+import { api, deckUrl, type LibItem } from "../lib/api";
 import { openAny, startNew } from "../lib/flows";
 import { useT } from "../lib/i18n";
 import { useSettings } from "../lib/settings";
@@ -72,7 +73,7 @@ export default function Home() {
 	return (
 		<main className="home">
 			{(working || busy) && <div className="progress-line" />}
-			<section className="home-main">
+			<section className="home-top">
 				<div className="brief">
 					<label htmlFor="brief">{t("brief")}</label>
 					<div className="line">
@@ -93,20 +94,59 @@ export default function Home() {
 					<button onClick={pickDeck}>{t("openDeck")}<kbd>Ctrl ⇧ O</kbd></button>
 				</div>
 			</section>
-			<aside className="home-side">
+			<section className="home-decks" aria-label={t("recent")}>
 				<div className="side-head"><span>{t("recent")}</span><span>{items.length || ""}</span></div>
-				<div className="recent">
-					{items.length === 0 && <div className="dim" style={{ padding: "10px 12px" }}>{t("drop")}</div>}
-					{items.map((it) => (
-						<button key={it.dir} onClick={() => openAny(it.dir)} title={it.dir}>
-							<span className="t">{it.deck?.title || it.dir.split(/[\\/]/).pop()}</span>
-							<span className="n">{it.deck?.slides?.length ?? 0}{t("slideN") === "쪽" ? "쪽" : " sl"}</span>
-							<span className="p">{it.dir}</span>
-						</button>
-					))}
-				</div>
-			</aside>
+				{items.length === 0 ? (
+					<div className="decks-empty">{t("drop")}</div>
+				) : (
+					<div className="decks">
+						{items.map((it) => (
+							<button key={it.dir} className="deck-card" onClick={() => openAny(it.dir)} title={it.dir}>
+								<DeckThumb item={it} />
+								<span className="t">{it.deck?.title || it.dir.split(/[\\/]/).pop()}</span>
+								<span className="n">{it.deck?.slides?.length ?? 0}{t("slideN") === "쪽" ? "쪽" : " sl"}</span>
+							</button>
+						))}
+					</div>
+				)}
+			</section>
 			{over && <div className="dropzone">{t("drop")}</div>}
 		</main>
+	);
+}
+
+/** 최근 덱 카드의 첫 쪽 미리보기. deck:// 은 열어 둔 프로젝트만 내주므로 잠깐 열어 id 를 받고 감시는 바로 끈다
+ *  (project_close 는 감시만 끄고 id 는 남긴다). 화면 언저리에 올 때만 띄운다 — 덱이 많으면 iframe 이 쌓인다 */
+function DeckThumb({ item }: { item: LibItem }) {
+	const ref = useRef<HTMLSpanElement>(null);
+	const [width, setWidth] = useState(0);
+	const [near, setNear] = useState(false);
+	const [id, setId] = useState<string | null>(null);
+	const first = item.deck?.slides?.[0]?.file as string | undefined;
+	const size = item.deck?.size || { w: 1280, h: 720 };
+	useLayoutEffect(() => {
+		const el = ref.current!;
+		const ro = new ResizeObserver(() => setWidth(el.clientWidth));
+		ro.observe(el);
+		const io = new IntersectionObserver(([e]) => { if (e.isIntersecting) setNear(true); }, { rootMargin: "50% 0px" });
+		io.observe(el);
+		return () => { ro.disconnect(); io.disconnect(); };
+	}, []);
+	useEffect(() => {
+		if (!near || !first || id) return;
+		let gone = false;
+		api.open(item.dir).then((x) => { api.close(x).catch(() => {}); if (!gone) setId(x); }, () => {});
+		return () => { gone = true; };
+	}, [near, first, item.dir]);
+	// 카드 틀은 16:9 로 고정하고 쪽은 그 안에 맞춰 넣는다 — 4:3 덱이 섞여도 카드 줄이 고르다
+	const boxH = (width * 9) / 16;
+	const k = Math.min(width / size.w, boxH / size.h);
+	return (
+		<span className="dthumb" ref={ref}>
+			{id && first && width > 0 && (
+				<iframe src={deckUrl(id, first)} title="" tabIndex={-1} width={size.w} height={size.h}
+					style={{ transform: `translate(${(width - size.w * k) / 2}px, ${(boxH - size.h * k) / 2}px) scale(${k})` }} />
+			)}
+		</span>
 	);
 }

@@ -24,7 +24,7 @@ export default function Talk() {
 		<aside className="talk" aria-label={t("talk")}>
 			<div className="log" ref={logRef} onScroll={(e) => { const el = e.currentTarget; stick.current = el.scrollHeight - el.scrollTop - el.clientHeight < 40; }}>
 				{turns.length === 0 ? (
-					<div className="log-empty"><span>{t("talk")}</span><span className="mono" style={{ fontSize: 11 }}>{t("composerHint")}</span></div>
+					<EmptyTalk />
 				) : (
 					turns.map((x) => <TurnView key={x.id} turn={x} onVersion={() => { const c = versions.find((v) => v.hash === x.version?.hash); if (c) setPreview(c); }} />)
 				)}
@@ -34,8 +34,28 @@ export default function Talk() {
 	);
 }
 
+/** 대화가 없을 때 — 빈 자리에 「대화」 글자만 두지 않고, 여기서 바로 시작할 길 셋을 둔다 */
+function EmptyTalk() {
+	const t = useT();
+	const current = useDeck((s) => s.current);
+	const mentionSlide = useDeck((s) => s.mentionSlide);
+	const refill = useDeck((s) => s.refill);
+	const setTool = useDeck((s) => s.setTool);
+	return (
+		<div className="log-empty">
+			<b>{t("emptyTalk")}</b>
+			<button onClick={() => mentionSlide(current + 1)}><span>{t("startThis")}</span><kbd>@{current + 1}</kbd></button>
+			<button onClick={() => setTool("pen")}><span>{t("startMark")}</span><kbd>1</kbd></button>
+			<button onClick={() => refill(t("startPolishText"))}><span>{t("startPolish")}</span><kbd>↵</kbd></button>
+			<p>{t("startDrop")}</p>
+		</div>
+	);
+}
+
 function TurnView({ turn, onVersion }: { turn: Turn; onVersion: () => void }) {
 	const t = useT();
+	const deck = useDeck((s) => s.deck)!;
+	const setCurrent = useDeck((s) => s.setCurrent);
 	const refill = useDeck((s) => s.refill);
 	const restore = useDeck((s) => s.restore);
 	const running = useDeck((s) => s.running);
@@ -51,12 +71,16 @@ function TurnView({ turn, onVersion }: { turn: Turn; onVersion: () => void }) {
 			{ label: t("restore"), run: () => restore(commit), disabled: commit.hash === head || !!running },
 		] : []),
 	]);
-	const files = useMemo(() => [...new Set(turn.tools.filter((x) => x.name === "Write" || x.name === "Edit" || x.name === "MultiEdit").map((x) => x.file).filter(Boolean))], [turn.tools]);
+	const files = useMemo(() => [...new Set(turn.tools.filter((x) => x.name === "Write" || x.name === "Edit" || x.name === "MultiEdit").map((x) => x.file).filter((f): f is string => !!f))], [turn.tools]);
 	const reads = turn.tools.filter((x) => x.name === "Read").length;
+	// 고친 파일은 쪽 번호로 — slides/sw3xe48.html 같은 내부 이름은 읽을 수 없다. 파일 이름 · 비용은 마우스를 올리면 보인다
+	const touched = files.map((f) => deck.slides.findIndex((s) => s.file === f) + 1).filter((n) => n > 0).sort((a, b) => a - b);
+	const others = files.filter((f) => f !== "deck.json" && !deck.slides.some((s) => s.file === f));
+	const detail = [...files, reads ? `read ×${reads}` : "", turn.cost != null ? `$${turn.cost.toFixed(3)}` : ""].filter(Boolean).join("  ");
 	return (
 		<article className={"turn " + turn.status} onContextMenu={menu}>
 			<div className="gutter">
-				{turn.status === "running" ? <span className="run" aria-label={t("working")} /> : turn.version ? <button onClick={onVersion} title={turn.version.short}>v{turn.version.n}</button> : <span className="mono dim" style={{ fontSize: 11 }}>—</span>}
+				{turn.status === "running" ? <span className="run" aria-label={t("working")} /> : turn.version ? <button onClick={onVersion} title={`${turn.version.short}${turn.cost != null ? ` · $${turn.cost.toFixed(3)}` : ""}`}>v{turn.version.n}</button> : <span className="mono dim" style={{ fontSize: 11 }}>—</span>}
 			</div>
 			<div style={{ minWidth: 0 }}>
 				{turn.request && <div className="req"><Mentioned text={turn.request} turn={turn} /></div>}
@@ -68,12 +92,12 @@ function TurnView({ turn, onVersion }: { turn: Turn; onVersion: () => void }) {
 				{(turn.reply || turn.status === "running") && <div className="reply">{turn.reply}</div>}
 				{turn.phase && <div className="meta">{turn.phase}</div>}
 				{turn.error && <div className="err">{turn.error}</div>}
-				{(files.length > 0 || turn.cost != null) && (
-					<div className="files">
-						{files.map((f) => <span key={f}>{f}</span>)}
-						{reads > 0 && <span>read ×{reads}</span>}
-						{turn.cost != null && <span>${turn.cost.toFixed(3)}</span>}
-						{turn.status === "stopped" && <span>{t("stop")}</span>}
+				{(touched.length > 0 || others.length > 0 || turn.status === "stopped") && (
+					<div className="touched" title={detail}>
+						{(touched.length > 0 || others.length > 0) && <span className="lbl">{t("changedSlides")}</span>}
+						{touched.map((no) => <button key={no} className="mention" onClick={() => setCurrent(no - 1)}>{no}{t("slideN") === "쪽" ? "쪽" : ""}</button>)}
+						{others.length > 0 && <span className="more">{others.some((f) => f.endsWith(".css")) ? t("styleFile") : `+${others.length}`}</span>}
+						{turn.status === "stopped" && <span className="more">{t("stop")}</span>}
 					</div>
 				)}
 			</div>

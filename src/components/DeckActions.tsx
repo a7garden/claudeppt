@@ -1,4 +1,5 @@
-// 제목 줄 오른쪽 — 내보내기(PPTX · CPPT 묶음 · 폴더 열기)와 릴리즈. 누른 단추 아래에 작은 띄움 상자로 편다.
+// 제목 줄 오른쪽 — 내보내기(PPTX 두 갈래 · CPPT 묶음 · 폴더 열기)와 릴리즈. 누른 단추 아래에 작은 띄움 상자로 편다.
+// 2026.11.18 : 내보내기의 「비교」는 무대 도구 띠 오른쪽으로 옮겼다 — 내보내는 일이 아니라 무대에서 보는 일이다.
 import { save } from "@tauri-apps/plugin-dialog";
 import { useEffect, useRef, useState } from "react";
 import { api, join } from "../lib/api";
@@ -34,29 +35,36 @@ export default function DeckActions() {
 	);
 }
 
+/** 내보내기 — 두 PPTX 는 「무엇이 되는가」 한 줄로 가른다. 이름 뒤 작은 꼬리표만으로는 둘의 차이를 몰랐다 */
 function ExportPop({ onDone }: { onDone: () => void }) {
 	const t = useT();
 	const { deck, dir, versions, exportTo, notify } = useDeck.getState();
 	const n = versions[0]?.n ?? 0;
 	const base = `${safeName(deck!.title)}_v${n}`;
+	const pptx = async (exact: boolean) => {
+		onDone();
+		const p = await save({ defaultPath: base + (exact ? "_exact" : "") + ".pptx", filters: [{ name: "PowerPoint", extensions: ["pptx"] }] });
+		if (p) exportTo(p, exact);
+	};
 	return (
-		<div className="pop" style={{ right: 210 }}>
-			<div className="menu">
-				<button onClick={async () => { onDone(); const p = await save({ defaultPath: base + ".pptx", filters: [{ name: "PowerPoint", extensions: ["pptx"] }] }); if (p) exportTo(p); }}>
-					{t("pptx")}<span>{t("editable")}</span>
+		<div className="pop export" style={{ right: 210 }}>
+			<div className="choices">
+				<button onClick={() => pptx(false)}>
+					<b>{t("pptxEditable")}</b>
+					<span>{t("pptxEditableHint")}</span>
 				</button>
-				<button onClick={async () => { onDone(); const p = await save({ defaultPath: base + "_exact.pptx", filters: [{ name: "PowerPoint", extensions: ["pptx"] }] }); if (p) exportTo(p, true); }}>
-					{t("pptx")}<span>{t("exact")}</span>
+				<button onClick={() => pptx(true)}>
+					<b>{t("pptxExact")}</b>
+					<span>{t("pptxExactHint")}</span>
 				</button>
+			</div>
+			<div className="list">
 				<button onClick={async () => {
 					onDone();
 					const p = await save({ defaultPath: base + ".cppt", filters: [{ name: "ClaudePPT", extensions: ["cppt"] }] });
 					if (p) { await api.commit(dir, t("direct")).catch(() => {}); await api.pack(dir, p).then(() => notify(p.split(/[\\/]/).pop()!), (e) => notify(String(e), "err")); }
 				}}>
-					{t("cppt")}<span>.cppt</span>
-				</button>
-				<button onClick={() => { onDone(); useDeck.getState().check(); }}>
-					{t("compare")}<span>{t("web")} ↔ PPT · C</span>
+					{t("cppt")}<span>{t("cpptHint")}</span>
 				</button>
 				<button onClick={() => { onDone(); api.reveal(join(dir, "deck.json")); }}>
 					{t("folder")}<span>↗</span>
@@ -66,20 +74,28 @@ function ExportPop({ onDone }: { onDone: () => void }) {
 	);
 }
 
+/** 릴리즈 — 무엇이 묶여 나가는지 보이게, 지난 릴리즈 뒤 보낸 요청을 메모에 미리 채운다. 사용자가 고쳐 쓴다 */
 function ReleasePop({ onDone }: { onDone: () => void }) {
 	const t = useT();
 	const releases = useDeck((s) => s.releases);
 	const versions = useDeck((s) => s.versions);
+	const turns = useDeck((s) => s.turns);
 	const release = useDeck((s) => s.release);
 	const dir = useDeck((s) => s.dir);
+	const last = releases[releases.length - 1];
+	const since = turns.filter((x) => x.version && x.request && (!last || x.version.n > last.n));
 	const [name, setName] = useState("");
-	const [notes, setNotes] = useState("");
+	const [notes, setNotes] = useState(() => since.map((x) => "- " + x.request.replace(/\s+/g, " ").slice(0, 80)).join("\n"));
 	const next = `r${releases.length + 1}`;
+	const head = versions[0]?.n ?? 0;
 	return (
 		<div className="pop" style={{ right: 150 }}>
-			<div className="k">{next} · v{(versions[0]?.n ?? 0) + 1}</div>
-			<input className="field" autoFocus placeholder={t("name")} value={name} onChange={(e) => setName(e.target.value)} onKeyDown={(e) => { if (e.key === "Enter") { onDone(); release(name, notes); } }} />
-			<textarea className="field" rows={3} placeholder={t("notes")} value={notes} onChange={(e) => setNotes(e.target.value)} style={{ fontFamily: "var(--ui)", fontSize: 13 }} />
+			<div className="head">
+				<b>{t("release")} {next}</b>
+				<span>{t("releaseOf").replace("{v}", `v${head}`)}{last ? ` · ${t("releaseSince").replace("{r}", last.tag).replace("{n}", String(since.length))}` : ""}</span>
+			</div>
+			<input className="field" autoFocus placeholder={t("releaseName")} value={name} onChange={(e) => setName(e.target.value)} onKeyDown={(e) => { if (e.key === "Enter") { onDone(); release(name, notes); } }} />
+			<textarea className="field" rows={4} placeholder={t("notes")} value={notes} onChange={(e) => setNotes(e.target.value)} style={{ fontFamily: "var(--ui)", fontSize: 13 }} />
 			<div className="acts">
 				<button className="ghost" onClick={onDone}>{t("cancel")}</button>
 				<button className="send" onClick={() => { onDone(); release(name, notes); }}>{t("confirm")}</button>

@@ -1,8 +1,13 @@
-// 사용자 제목 줄 — 끌어서 창 옮기기 · 두 번 눌러 최대화. 가운데에 무대 모드, 오른쪽에 내보내기 · 릴리즈 · 설정 · 창 단추.
+// 사용자 제목 줄 — 끌어서 창 옮기기 · 두 번 눌러 최대화. 왼쪽에 처음 · 덱 이름 · 판 번호(누르면 판 목록), 가운데에 한 쪽 · 이어 보기,
+// 오른쪽에 내보내기 · 릴리즈 · 설정 · 창 단추.
+// 2026.11.18 : 가운데의 보기 · 핀 · 편집 모드를 걷었다 — 무대 도구 띠(고르기 · 펜 · 화살표 · 범위) 하나로 합쳤다.
+//              무대 아래 판 줄기(눈금 띠)도 걷고 판 번호를 누르면 여는 판 목록으로 옮겼다 — 눈금이 거의 안 보이면서 자리만 먹었다.
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { useEffect, useRef, useState } from "react";
+import type { Commit } from "../lib/api";
 import { useT } from "../lib/i18n";
-import { type Mode, useDeck } from "../lib/store";
+import { useDeck } from "../lib/store";
+import { openMenu } from "./ContextMenu";
 import DeckActions from "./DeckActions";
 
 export const Mark = () => (
@@ -17,12 +22,13 @@ export default function TitleBar({ onSettings, settingsOpen }: { onSettings: () 
 	const deck = useDeck((s) => s.deck);
 	const versions = useDeck((s) => s.versions);
 	const releases = useDeck((s) => s.releases);
-	const mode = useDeck((s) => s.mode);
-	const setMode = useDeck((s) => s.setMode);
+	const flow = useDeck((s) => s.flow);
+	const setFlow = useDeck((s) => s.setFlow);
 	const close = useDeck((s) => s.closeProject);
 	const saveDeck = useDeck((s) => s.saveDeck);
 	const win = getCurrentWindow();
 	const [max, setMax] = useState(false);
+	const [list, setList] = useState(false);
 	useEffect(() => {
 		win.isMaximized().then(setMax);
 		const un = win.onResized(() => win.isMaximized().then(setMax));
@@ -31,12 +37,6 @@ export default function TitleBar({ onSettings, settingsOpen }: { onSettings: () 
 	const head = versions[0];
 	const lastRel = releases[releases.length - 1];
 	const titleRef = useRef<HTMLInputElement>(null);
-
-	const modes: { m: Mode; k: string; label: string }[] = [
-		{ m: "view", k: "V", label: t("view") },
-		{ m: "pin", k: "P", label: t("mark") },
-		{ m: "edit", k: "E", label: t("edit") },
-	];
 
 	return (
 		<header className="titlebar" data-tauri-drag-region onDoubleClick={(e) => { if (e.target === e.currentTarget) win.toggleMaximize(); }}>
@@ -58,9 +58,14 @@ export default function TitleBar({ onSettings, settingsOpen }: { onSettings: () 
 								onBlur={(e) => { const v = e.target.value.trim(); if (v && v !== deck.title) saveDeck({ ...deck, title: v }); }}
 							/>
 							{head && (
-								<span className="stamp">
+								<span className="stampwrap">
+								<button className={"stamp" + (list ? " on" : "")} onClick={() => setList(!list)} title={t("versions")} aria-expanded={list}>
 									<b>v{head.n}</b>
 									{lastRel && <> · <i>{lastRel.tag}</i>{head.n - lastRel.n > 1 ? `+${head.n - lastRel.n - 1}` : ""}</>}
+									<span className="caret" aria-hidden>▾</span>
+								</button>
+								{/* 판 번호 바로 아래로 편다 */}
+								{list && <VersionList onClose={() => setList(false)} />}
 								</span>
 							)}
 						</>
@@ -69,12 +74,13 @@ export default function TitleBar({ onSettings, settingsOpen }: { onSettings: () 
 					)}
 				</div>
 			</div>
-			<div className="modes" role="group" aria-label="mode">
-				{deck && modes.map(({ m, k, label }) => (
-					<button key={m} className={m} aria-pressed={mode === m} onClick={() => setMode(m)} title={label + " (" + k + ")"}>
-						{label}<kbd>{k}</kbd>
-					</button>
-				))}
+			<div className="center">
+				{deck && (
+					<div className="seg" role="group" aria-label={t("flow")}>
+						<button aria-pressed={!flow} onClick={() => setFlow(false)} title={`${t("single")} (S)`}>{t("single")}</button>
+						<button aria-pressed={flow} onClick={() => setFlow(true)} title={`${t("flow")} (S)`}>{t("flow")}</button>
+					</div>
+				)}
 			</div>
 			<div className="right" data-tauri-drag-region>
 				{deck && <DeckActions />}
@@ -90,5 +96,45 @@ export default function TitleBar({ onSettings, settingsOpen }: { onSettings: () 
 				</div>
 			</div>
 		</header>
+	);
+}
+
+/** 판 목록 — 새 판이 위. 누르면 그 판을 무대에서 제자리로 보고(지난 판 띠가 「되돌리기」를 준다), 릴리즈는 꼬리표로.
+ *  대화의 v 번호와 같은 판이다. 직접 편집 판처럼 대화에 없는 판도 여기에는 다 있다 */
+function VersionList({ onClose }: { onClose: () => void }) {
+	const t = useT();
+	const versions = useDeck((s) => s.versions);
+	const preview = useDeck((s) => s.preview);
+	const setPreview = useDeck((s) => s.setPreview);
+	const restore = useDeck((s) => s.restore);
+	const running = useDeck((s) => s.running);
+	const ref = useRef<HTMLDivElement>(null);
+	useEffect(() => {
+		const k = (e: MouseEvent) => { if (!ref.current?.contains(e.target as Node) && !(e.target as Element).closest?.(".stamp")) onClose(); };
+		const esc = (e: KeyboardEvent) => { if (e.key === "Escape") onClose(); };
+		addEventListener("mousedown", k);
+		addEventListener("keydown", esc);
+		return () => { removeEventListener("mousedown", k); removeEventListener("keydown", esc); };
+	}, [onClose]);
+	const head = versions[0];
+	const pick = (c: Commit) => setPreview(c === head || preview?.hash === c.hash ? null : c);
+	return (
+		<div className="pop versions" ref={ref} role="listbox" aria-label={t("versions")}>
+			{versions.map((c) => {
+				const rel = c.tags.find((x) => /^r\d+$/.test(x));
+				const on = preview ? preview.hash === c.hash : c === head;
+				return (
+					<button key={c.hash} role="option" aria-selected={on} className={on ? "on" : ""} onClick={() => pick(c)}
+						onContextMenu={(e) => openMenu(e, [
+							{ label: `v${c.n} ${t("viewVersion")}`, run: () => pick(c), disabled: c === head },
+							{ label: t("restore"), run: () => restore(c), disabled: c === head || !!running },
+						])}>
+						<span className="n">v{c.n}</span>
+						<span className="s">{c.subject}</span>
+						{rel ? <span className="rel">{rel}</span> : <span className="d">{c.date.slice(5, 16)}</span>}
+					</button>
+				);
+			})}
+		</div>
 	);
 }

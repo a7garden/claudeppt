@@ -42,7 +42,7 @@
 	let mode = "view", sel = null, drag = null;
 	const style = document.createElement("style");
 	style.textContent = `
-		[data-deck-edit] .slide *:hover { outline: 1px dashed rgba(229,72,45,.55); outline-offset: 1px; cursor: default }
+		[data-deck-edit] .slide *:hover { outline: 1px solid rgba(229,72,45,.32); outline-offset: 1px; cursor: default }
 		[data-deck-edit] [data-deck-sel] { outline: 1.5px solid #e5482d !important; outline-offset: 1px }
 		[data-deck-edit] [contenteditable=true] { outline: 1.5px solid #e5482d !important; cursor: text }`;
 	document.head.appendChild(style);
@@ -99,7 +99,8 @@
 		post({ t: "menu", x: e.clientX, y: e.clientY, path: pathOf(el), tag: el.tagName.toLowerCase(), text: el === root ? "" : label(el) });
 	});
 	addEventListener("keydown", (e) => {
-		if (mode !== "edit" && ["ArrowDown", "ArrowUp", "ArrowLeft", "ArrowRight", "PageDown", "PageUp", "Home", "End"].includes(e.key) && !e.ctrlKey && !e.altKey) {
+		// 고른 요소가 없으면(보기만 하는 중) 넘김 키는 쪽을 넘긴다 — 고르기 도구가 늘 켜져 있어도 방향키로 쪽을 넘길 수 있게
+		if ((mode !== "edit" || !sel) && !document.activeElement?.isContentEditable && ["ArrowDown", "ArrowUp", "ArrowLeft", "ArrowRight", "PageDown", "PageUp", "Home", "End"].includes(e.key) && !e.ctrlKey && !e.altKey) {
 			post({ t: "key", key: e.key });
 			e.preventDefault();
 			return;

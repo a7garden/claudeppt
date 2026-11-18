@@ -59,8 +59,9 @@ interface S {
 	mode: Mode;
 	/** 이어 보기 — 무대에 모든 쪽을 세로로 늘어놓고 스크롤로 넘긴다. 보기 모드에서만 쓴다 */
 	flow: boolean;
-	/** 표시 모드의 도구 — 펜 · 화살표 · 상자. 이 PC 에 남긴다 */
-	tool: Tool;
+	/** 무대 도구 — 고르기(보면서 바로 고치기) · 펜 · 화살표 · 상자. mode 는 이것에서 나온다(고르기 → edit, 나머지 → pin).
+	 *  2026.11.18 : 보기 · 표시 · 편집 세 모드를 도구 하나로 합쳤다 — 보다가 고치려면 매번 모드를 바꿔야 했다 */
+	tool: Tool | "select";
 	/** 요청칸에 넣어 달라는 글 — 커서 자리에 끼우거나(whole 아님) 칸 전체를 바꾼다. k 는 같은 글을 거듭 보내도 다시 넣게 하는 표식 */
 	insertReq: { text: string; whole?: boolean; k: number } | null;
 	pins: Pin[];
@@ -82,9 +83,8 @@ interface S {
 	openProject: (dir: string) => Promise<void>;
 	closeProject: () => Promise<void>;
 	setCurrent: (i: number) => void;
-	setMode: (m: Mode) => void;
 	setFlow: (on: boolean) => void;
-	setTool: (t: Tool) => void;
+	setTool: (t: Tool | "select") => void;
 	mentionSlide: (no: number) => void;
 	refill: (text: string) => void;
 	addSlide: (at: number) => Promise<void>;
@@ -137,9 +137,9 @@ export const useDeck = create<S>()((set, get) => ({
 	deck: null,
 	rev: {},
 	current: 0,
-	mode: "view",
+	mode: "edit",
 	flow: (() => { try { return localStorage.getItem("claudeppt.flow") === "1"; } catch { return false; } })(),
-	tool: (() => { try { const v = localStorage.getItem("claudeppt.tool"); return v === "arrow" || v === "box" ? v : "pen"; } catch { return "pen"; } })(),
+	tool: "select",
 	insertReq: null,
 	pins: [],
 	turns: [],
@@ -164,7 +164,7 @@ export const useDeck = create<S>()((set, get) => ({
 		const pins = await readJson<Pin[]>(dir, ".claudeppt/pins.json", []);
 		const talk = await readJson<{ sessionId: string | null; turns: Turn[] }>(dir, ".claudeppt/talk.json", { sessionId: null, turns: [] });
 		const releases = await readJson<Release[]>(dir, "releases/releases.json", []);
-		set({ dir, id, deck, rev: {}, current: 0, mode: "view", pins, turns: talk.turns, sessionId: talk.sessionId, versions: [], releases, preview: null, report: await readReport(dir), compare: false });
+		set({ dir, id, deck, rev: {}, current: 0, mode: "edit", tool: "select", pins, turns: talk.turns, sessionId: talk.sessionId, versions: [], releases, preview: null, report: await readReport(dir), compare: false });
 		useSettings.getState().remember(dir);
 		// 처음 여는 프로젝트(가져오기 직후)면 첫 판을 남긴다
 		const log = await api.log(dir, 1);
@@ -240,18 +240,15 @@ export const useDeck = create<S>()((set, get) => ({
 	},
 
 	setCurrent: (i) => set({ current: Math.max(0, Math.min(i, (get().deck?.slides.length || 1) - 1)) }),
-	setMode: (mode) => {
-		// 핀 · 편집은 한 쪽 무대에서만 한다 — 이어 보기의 작은 쪽에 핀을 찍으면 자리가 거칠다
-		set(mode === "view" ? { mode } : { mode, flow: false });
-		for (const w of get().frames) tell(w, { t: "mode", mode });
-	},
 
 	setTool: (tool) => {
-		set({ tool });
-		try { localStorage.setItem("claudeppt.tool", tool); } catch {}
+		const mode: Mode = tool === "select" ? "edit" : "pin";
+		// 긋기는 한 쪽 무대에서만 한다 — 이어 보기의 작은 쪽에 그으면 자리가 거칠다
+		set(tool === "select" ? { tool, mode } : { tool, mode, flow: false });
+		for (const w of get().frames) tell(w, { t: "mode", mode });
 	},
 	setFlow: (flow) => {
-		if (flow && get().mode !== "view") get().setMode("view");
+		if (flow && get().tool !== "select") get().setTool("select");
 		set({ flow });
 		try { localStorage.setItem("claudeppt.flow", flow ? "1" : "0"); } catch {}
 	},
