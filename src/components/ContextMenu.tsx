@@ -133,7 +133,7 @@ export function ContextMenu() {
 
 	if (!at) return null;
 	return (
-		<div className="menu" role="menu" ref={ref} style={{ left: pos.x, top: pos.y }} onContextMenu={(e) => e.preventDefault()}>
+		<div className="ctxmenu" role="menu" ref={ref} style={{ left: pos.x, top: pos.y }} onContextMenu={(e) => e.preventDefault()}>
 			{items.map((it, i) =>
 				it === "-" ? <div key={i} className="sep" role="separator" /> : (
 					<button key={i} role={it.checked != null ? "menuitemcheckbox" : "menuitem"} aria-checked={it.checked} disabled={it.disabled}

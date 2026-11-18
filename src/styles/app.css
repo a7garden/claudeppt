@@ -342,11 +342,11 @@ textarea.field { height: auto; padding: 8px 10px; line-height: 1.5; resize: vert
 @keyframes job-unknown { from { left: 0; } to { left: 70%; } }
 
 /* 우클릭 메뉴 — 토스트 · 설정보다 위. 단축키는 오른쪽에 흐리게, 지우는 항목은 경고 색 */
-.menu { position: fixed; z-index: 60; min-width: 190px; padding: 4px; border-radius: 9px; background: var(--raise-2); box-shadow: var(--shadow); outline: 1px solid var(--hair-2); display: flex; flex-direction: column; animation: in 0.1s ease-out; font-size: 13px; user-select: none; }
-.menu button { display: grid; grid-template-columns: 14px 1fr auto; gap: 6px; align-items: center; padding: 5px 10px 5px 6px; border-radius: 6px; text-align: left; background: none; color: var(--text); white-space: nowrap; }
-.menu button.on { background: color-mix(in srgb, var(--accent) 16%, transparent); }
-.menu button[disabled] { opacity: 0.4; }
-.menu button.danger { color: var(--err); }
-.menu .chk { font-size: 11px; color: var(--accent); }
-.menu kbd { font: 11px var(--mono); color: var(--dim); background: none; padding: 0; margin-left: 18px; }
-.menu .sep { height: 1px; margin: 4px 6px; background: var(--hair); }
+.ctxmenu { position: fixed; z-index: 60; min-width: 190px; padding: 4px; border-radius: 9px; background: var(--raise-2); box-shadow: var(--shadow); outline: 1px solid var(--hair-2); display: flex; flex-direction: column; animation: in 0.1s ease-out; font-size: 13px; user-select: none; }
+.ctxmenu button { display: grid; grid-template-columns: 14px 1fr auto; gap: 6px; align-items: center; padding: 5px 10px 5px 6px; border-radius: 6px; text-align: left; background: none; color: var(--text); white-space: nowrap; }
+.ctxmenu button.on { background: color-mix(in srgb, var(--accent) 16%, transparent); }
+.ctxmenu button[disabled] { opacity: 0.4; }
+.ctxmenu button.danger { color: var(--err); }
+.ctxmenu .chk { font-size: 11px; color: var(--accent); }
+.ctxmenu kbd { font: 11px var(--mono); color: var(--dim); background: none; padding: 0; margin-left: 18px; }
+.ctxmenu .sep { height: 1px; margin: 4px 6px; background: var(--hair); }
