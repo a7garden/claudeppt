@@ -4,7 +4,9 @@
 //   열기 · 닫기          openProject · closeProject (폴더 감시와 deck:// 등록은 Rust)
 //   핫 리로드            onFs — deck.json 이면 목차를, 쪽 HTML 이면 그 쪽만, CSS 면 CSS 만 다시 읽힌다
 //   핀                   addPin · updatePin · removePin → .claudeppt/pins.json
-//   무대 보기            setFlow — 한 쪽 보기 ↔ 이어 보기(모든 쪽을 세로로 스크롤) · mentionSlide — 쪽 목록에서 요청칸에 @쪽 넣기
+//   무대 보기            setFlow — 한 쪽 보기 ↔ 이어 보기(모든 쪽을 세로로 스크롤)
+//   요청칸 채우기        mentionSlide — 요청칸에 @쪽 넣기 · refill — 지난 요청을 다시 쓰기 (우클릭 메뉴 · 쪽 목록에서)
+//   쪽 손보기            addSlide · duplicateSlide · moveSlide · removeSlide — 쪽 목록 · 우클릭 메뉴가 같이 쓴다
 //   대화                 send → claude 한 턴 → 그림 채우기 → 한 판으로 남김 → .claudeppt/talk.json
 //   직접 편집            applyDirect → 원본 HTML 에 되쓰고 잠시 뒤 한 판으로 남김
 //   판 · 릴리즈          refreshVersions · preview · restore · release
@@ -12,7 +14,7 @@
 import { listen } from "@tauri-apps/api/event";
 import { create } from "zustand";
 import { api, type Commit } from "./api";
-import { type Deck, readDeck, writeDeck } from "./deck";
+import { type Deck, newId, readDeck, slideHtml, writeDeck } from "./deck";
 import { applyOp, type Op } from "./edits";
 import { buildPptx } from "./exportPptx";
 import { type Report, SAME, readReport, runCheck } from "./check";
@@ -55,8 +57,8 @@ interface S {
 	mode: Mode;
 	/** 이어 보기 — 무대에 모든 쪽을 세로로 늘어놓고 스크롤로 넘긴다. 보기 모드에서만 쓴다 */
 	flow: boolean;
-	/** 쪽 목록에서 「이 쪽 언급」을 누르면 요청칸이 받아 @쪽 을 넣는다 (k 는 같은 쪽을 거듭 눌러도 다시 넣게 하는 표식) */
-	mentionReq: { no: number; k: number } | null;
+	/** 요청칸에 넣어 달라는 글 — 커서 자리에 끼우거나(whole 아님) 칸 전체를 바꾼다. k 는 같은 글을 거듭 보내도 다시 넣게 하는 표식 */
+	insertReq: { text: string; whole?: boolean; k: number } | null;
 	pins: Pin[];
 	turns: Turn[];
 	sessionId: string | null;
@@ -79,6 +81,11 @@ interface S {
 	setMode: (m: Mode) => void;
 	setFlow: (on: boolean) => void;
 	mentionSlide: (no: number) => void;
+	refill: (text: string) => void;
+	addSlide: (at: number) => Promise<void>;
+	duplicateSlide: (i: number) => Promise<void>;
+	moveSlide: (from: number, to: number) => void;
+	removeSlide: (i: number) => void;
 	addPin: (p: Omit<Pin, "id" | "at">) => string;
 	updatePin: (id: string, text: string) => void;
 	removePin: (id: string) => void;
@@ -127,7 +134,7 @@ export const useDeck = create<S>()((set, get) => ({
 	current: 0,
 	mode: "view",
 	flow: (() => { try { return localStorage.getItem("claudeppt.flow") === "1"; } catch { return false; } })(),
-	mentionReq: null,
+	insertReq: null,
 	pins: [],
 	turns: [],
 	sessionId: null,
@@ -238,7 +245,48 @@ export const useDeck = create<S>()((set, get) => ({
 		set({ flow });
 		try { localStorage.setItem("claudeppt.flow", flow ? "1" : "0"); } catch {}
 	},
-	mentionSlide: (no) => set({ mentionReq: { no, k: Date.now() } }),
+	mentionSlide: (no) => set({ insertReq: { text: `@${no}`, k: Date.now() } }),
+	refill: (text) => set({ insertReq: { text, whole: true, k: Date.now() } }),
+
+	// 쪽을 빼도 HTML 파일은 남긴다 — 지난 판 미리 보기 · 되돌리기가 그 파일을 읽는다
+	addSlide: async (at) => {
+		const { dir, deck } = get();
+		if (!deck) return;
+		const id = newId();
+		await api.writeText(dir, `slides/${id}.html`, slideHtml(`<section class="slide"></section>`, useSettings.getState().s.lang));
+		const s = [...deck.slides];
+		s.splice(at, 0, { id, file: `slides/${id}.html` });
+		await get().saveDeck({ ...deck, slides: s });
+		get().setCurrent(at);
+	},
+	duplicateSlide: async (i) => {
+		const { dir, deck } = get();
+		const src = deck?.slides[i];
+		if (!deck || !src) return;
+		const id = newId();
+		// 같은 slides/ 폴더에 두므로 그림 · CSS 의 상대 경로가 그대로 맞는다
+		await api.writeText(dir, `slides/${id}.html`, await api.readText(dir, src.file));
+		const s = [...deck.slides];
+		s.splice(i + 1, 0, { ...src, id, file: `slides/${id}.html` });
+		await get().saveDeck({ ...deck, slides: s });
+		get().setCurrent(i + 1);
+	},
+	/** to 는 「이 자리 앞에」 — 끌어 놓기가 주는 값 그대로다 */
+	moveSlide: (from, to) => {
+		const deck = get().deck;
+		if (!deck || from === to || from + 1 === to) return;
+		const s = [...deck.slides];
+		const [x] = s.splice(from, 1);
+		s.splice(to > from ? to - 1 : to, 0, x);
+		get().saveDeck({ ...deck, slides: s });
+		get().setCurrent(to > from ? to - 1 : to);
+	},
+	removeSlide: (i) => {
+		const deck = get().deck;
+		if (!deck || deck.slides.length < 2) return;
+		get().saveDeck({ ...deck, slides: deck.slides.filter((_, k) => k !== i) });
+		get().setCurrent(Math.min(get().current > i ? get().current - 1 : get().current, deck.slides.length - 2));
+	},
 
 	addPin: (p) => {
 		const pin: Pin = { ...p, id: Math.random().toString(36).slice(2, 9), at: Date.now() };

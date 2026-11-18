@@ -17,6 +17,7 @@
 //                                              remove {path}             지웠다
 //                                              extracted {req, data}
 //                                              wheel {dy} · key {key}    휠 · 쪽 넘김 키 (무대가 쪽을 넘긴다)
+//                                              menu {x, y, path, tag, text}  우클릭 — 앱이 그 자리에 메뉴를 연다
 (() => {
 	const root = document.querySelector(".slide") || document.body;
 	const post = (m) => parent.postMessage({ __deck: 1, ...m }, "*");
@@ -57,7 +58,8 @@
 		const el = e.target.closest("[contenteditable=true]") ? null : e.target;
 		if (!el || el === root || el === document.body) return select(null);
 		select(el);
-		if (movable(el)) {
+		// 우클릭은 고르기만 한다 — 끌기를 시작하면 메뉴를 여는 동안 요소가 손에 붙는다
+		if (movable(el) && e.button === 0) {
 			drag = { el, x: e.clientX, y: e.clientY, l: parseFloat(css(el).left) || el.offsetLeft, t: parseFloat(css(el).top) || el.offsetTop, moved: false };
 			e.preventDefault();
 		}
@@ -88,6 +90,14 @@
 	});
 	// 휠 · 쪽 넘김 키는 앱으로 넘긴다 — 슬라이드 창이 받아 버리면 무대 위에서 휠을 굴리거나, 슬라이드를 한 번 누른 뒤 방향키를 눌러도 쪽이 안 넘어간다
 	addEventListener("wheel", (e) => post({ t: "wheel", dy: e.deltaY }), { passive: true });
+	// 우클릭도 앱으로 넘긴다 — 웹뷰 기본 메뉴(뒤로 · 새로 고침)는 슬라이드 창을 엉뚱한 곳으로 보낸다.
+	// 글자를 고치는 중이면 기본 메뉴(붙여 넣기 · 맞춤법)를 그대로 쓴다
+	addEventListener("contextmenu", (e) => {
+		if (e.target.isContentEditable) return;
+		e.preventDefault();
+		const el = e.target.nodeType === 1 ? e.target : root;
+		post({ t: "menu", x: e.clientX, y: e.clientY, path: pathOf(el), tag: el.tagName.toLowerCase(), text: el === root ? "" : label(el) });
+	});
 	addEventListener("keydown", (e) => {
 		if (mode !== "edit" && ["ArrowDown", "ArrowUp", "ArrowLeft", "ArrowRight", "PageDown", "PageUp", "Home", "End"].includes(e.key) && !e.ctrlKey && !e.altKey) {
 			post({ t: "key", key: e.key });

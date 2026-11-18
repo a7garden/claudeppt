@@ -45,6 +45,7 @@ pub fn run() {
 		})
 		.invoke_handler(tauri::generate_handler![
 			fsx::fs_read_text,
+			fsx::clip_text,
 			fsx::fs_write_text,
 			fsx::fs_write_base64,
 			fsx::fs_exists,

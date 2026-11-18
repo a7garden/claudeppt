@@ -2,7 +2,7 @@
 // 쓰는 법: WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS=--remote-debugging-port=9333 npm run tauri dev
 //         node tools/cdp.mjs eval "<js>"        결과를 JSON 으로
 //         node tools/cdp.mjs shot <out.png>     화면 찍기
-//         node tools/cdp.mjs click "x,y" · type "글"  누르기 · 글 넣기
+//         node tools/cdp.mjs click "x,y" · rclick "x,y" · type "글"  누르기 · 우클릭 · 글 넣기
 import fs from "node:fs";
 const [cmd, raw] = process.argv.slice(2);
 const arg = raw?.startsWith("@") ? fs.readFileSync(raw.slice(1), "utf8") : raw;
@@ -22,10 +22,11 @@ const call = (method, params = {}) => new Promise((resolve) => {
 if (cmd === "eval") {
 	const r = await call("Runtime.evaluate", { expression: arg, awaitPromise: true, returnByValue: true });
 	console.log(JSON.stringify(r.result?.result?.value ?? r.result, null, 1));
-} else if (cmd === "click") {
-	// node tools/cdp.mjs click "x,y" — 실제 마우스 누름
+} else if (cmd === "click" || cmd === "rclick") {
+	// node tools/cdp.mjs click "x,y" — 실제 마우스 누름 · rclick 은 오른쪽 단추(우클릭 메뉴 시험)
 	const [x, y] = arg.split(",").map(Number);
-	for (const type of ["mousePressed", "mouseReleased"]) await call("Input.dispatchMouseEvent", { type, x, y, button: "left", clickCount: 1 });
+	const button = cmd === "rclick" ? "right" : "left";
+	for (const type of ["mousePressed", "mouseReleased"]) await call("Input.dispatchMouseEvent", { type, x, y, button, clickCount: 1 });
 } else if (cmd === "type") {
 	await call("Input.insertText", { text: arg });
 } else if (cmd === "shot") {

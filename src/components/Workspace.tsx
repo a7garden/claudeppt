@@ -6,14 +6,16 @@
 //   Stage         무대 — 핀 찍기 · 직접 편집 메시지 받기 · 지난 판 미리 보기 · 휠로 쪽 넘기기
 //   Flow          이어 보기 — 모든 쪽을 세로로 늘어놓고 스크롤로 넘긴다. 가운데 온 쪽이 지금 쪽이 된다
 //   Track         판 줄기 — 판마다 눈금, 릴리즈는 긴 눈금
+//   우클릭 메뉴   slideItems(쪽 목록 · 이어 보기) · Stage 의 무대 메뉴 · 판 눈금 메뉴 — 메뉴 틀은 ContextMenu.tsx
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
-import { api, type Commit, deckUrl } from "../lib/api";
-import { type Deck, newId, slideHtml } from "../lib/deck";
+import { type Commit, deckUrl } from "../lib/api";
+import { type Deck } from "../lib/deck";
 import { ask, onFrame } from "../lib/frames";
 import { openAny } from "../lib/flows";
 import { useT } from "../lib/i18n";
 import { useSettings } from "../lib/settings";
 import { type Pin, useDeck } from "../lib/store";
+import { type MenuItem, openMenu } from "./ContextMenu";
 import { useFileDrop } from "./Home";
 import { CompareBar, CompareLens } from "./CompareLens";
 import Talk from "./Talk";
@@ -76,6 +78,33 @@ function useWheelNav() {
 		acc.current = 0;
 		until.current = now + 260;
 	}, []);
+}
+
+/** 쪽 하나의 우클릭 항목 — 쪽 목록 · 이어 보기가 같이 쓴다. 빼기는 Delete 키와 같다 */
+function slideItems(i: number, n: number, t: ReturnType<typeof useT>): MenuItem[] {
+	const st = useDeck.getState();
+	return [
+		{ label: t("mention"), kbd: `@${i + 1}`, run: () => st.mentionSlide(i + 1) },
+		"-",
+		{ label: t("insertAbove"), run: () => st.addSlide(i) },
+		{ label: t("insertBelow"), run: () => st.addSlide(i + 1) },
+		{ label: t("duplicate"), run: () => st.duplicateSlide(i) },
+		"-",
+		{ label: t("moveUp"), run: () => st.moveSlide(i, i - 1), disabled: i === 0 },
+		{ label: t("moveDown"), run: () => st.moveSlide(i, i + 2), disabled: i >= n - 1 },
+		"-",
+		{ label: t("removeSlide"), kbd: "Delete", danger: true, run: () => st.removeSlide(i), disabled: n < 2 },
+	];
+}
+
+/** 지난 판을 보는 동안의 우클릭 — 지난 판의 쪽은 고칠 수 없으니 돌아가거나 되돌리는 것만 둔다 */
+function previewItems(t: ReturnType<typeof useT>): MenuItem[] {
+	const st = useDeck.getState();
+	const p = st.preview;
+	return p ? [
+		{ label: t("backToNow"), run: () => st.setPreview(null) },
+		{ label: t("restore"), run: () => st.restore(p), disabled: !!st.running },
+	] : [];
 }
 
 /** 옆 영역 너비 — 이 PC 에만 남긴다(설정 파일에 넣을 만한 값이 아니다). 저장소가 막혀도 기본값으로 그린다 */
@@ -187,47 +216,32 @@ function Rail() {
 	const setCurrent = useDeck((s) => s.setCurrent);
 	const pins = useDeck((s) => s.pins);
 	const turns = useDeck((s) => s.turns);
-	const saveDeck = useDeck((s) => s.saveDeck);
 	const report = useDeck((s) => s.report);
-	const dir = useDeck((s) => s.dir);
 	const mentionSlide = useDeck((s) => s.mentionSlide);
+	const move = useDeck((s) => s.moveSlide);
+	const addSlide = useDeck((s) => s.addSlide);
+	const removeSlide = useDeck((s) => s.removeSlide);
 	const [drag, setDrag] = useState<number | null>(null);
 	const [dropAt, setDropAt] = useState<number | null>(null);
 	const lastFiles = useMemo(() => new Set(turns[turns.length - 1]?.tools.map((x) => x.file).filter(Boolean)), [turns]);
 	const listRef = useRef<HTMLDivElement>(null);
 	useEffect(() => { listRef.current?.querySelectorAll(".rail-item")[current]?.scrollIntoView({ block: "nearest" }); }, [current]);
 
-	const move = (from: number, to: number) => {
-		if (from === to || from + 1 === to) return;
-		const s = [...live.slides];
-		const [x] = s.splice(from, 1);
-		s.splice(to > from ? to - 1 : to, 0, x);
-		saveDeck({ ...live, slides: s });
-		setCurrent(to > from ? to - 1 : to);
-	};
-	const add = async () => {
-		const id = newId();
-		await api.writeText(dir, `slides/${id}.html`, slideHtml(`<section class="slide"></section>`, useSettings.getState().s.lang));
-		const s = [...live.slides];
-		s.splice(current + 1, 0, { id, file: `slides/${id}.html` });
-		await saveDeck({ ...live, slides: s });
-		setCurrent(current + 1);
-	};
+	const add = () => addSlide(current + 1);
 
 	return (
 		<nav className="rail" ref={listRef} aria-label={t("slides")}
 			onKeyDown={(e) => {
-				if (e.key === "Delete" && !preview && live.slides.length > 1) {
-					saveDeck({ ...live, slides: live.slides.filter((_, i) => i !== current) });
-					setCurrent(Math.min(current, live.slides.length - 2));
-				}
+				if (e.key === "Delete" && !preview) removeSlide(current);
 			}}>
 			{deck.slides.map((sl, i) => {
 				const n = pins.filter((p) => p.slide === sl.id).length;
 				return (
 					<div key={sl.id} className={"rail-item" + (i === current ? " on" : "") + (dropAt === i ? " drop-before" : "")}
 						onDragOver={(e) => { if (drag != null) { e.preventDefault(); setDropAt(i); } }}
-						onDrop={() => { if (drag != null) move(drag, i); setDrag(null); setDropAt(null); }}>
+						onDrop={() => { if (drag != null) move(drag, i); setDrag(null); setDropAt(null); }}
+						// 누른 쪽을 지금 쪽으로 — PowerPoint 처럼 메뉴가 가리키는 쪽이 무대에 보인다
+						onContextMenu={(e) => { setCurrent(i); openMenu(e, preview ? previewItems(t) : slideItems(i, live.slides.length, t)); }}>
 						<div className="no">
 							<span>{i + 1}</span>
 							{n > 0 && <span className="pins" title={`${t("pins")} ${n}`} />}
@@ -293,6 +307,7 @@ function Stage() {
 	const report = useDeck((s) => s.report);
 	const flowOn = useDeck((s) => s.flow);
 	const setFlow = useDeck((s) => s.setFlow);
+	const setMode = useDeck((s) => s.setMode);
 	// 비교 렌즈는 한 쪽 무대에만 있다 — 비교 중에는 이어 보기를 잠시 접는다
 	const flow = flowOn && !compare;
 	const wheel = useWheelNav();
@@ -324,10 +339,14 @@ function Stage() {
 		else if (m.t === "remove") applyDirect(slide.id, m.path, { t: "remove" });
 	}), [slide?.id, preview]);
 
-	const onPin = async (e: React.MouseEvent) => {
+	const onPin = (e: React.MouseEvent) => {
 		if (mode !== "pin" || preview || !slide || (e.target as Element).closest(".pinmark")) return;
 		const r = (e.currentTarget as HTMLElement).getBoundingClientRect();
-		const x = (e.clientX - r.left) / scale, y = (e.clientY - r.top) / scale;
+		pinAt((e.clientX - r.left) / scale, (e.clientY - r.top) / scale);
+	};
+	/** 슬라이드 (x, y) 에 핀을 꽂고 의견 칸을 연다. 그 자리 요소는 슬라이드 창에 물어 핀에 붙인다 */
+	const pinAt = async (x: number, y: number) => {
+		if (!slide) return;
 		let target: Pin["target"];
 		try {
 			if (win.current) {
@@ -336,6 +355,36 @@ function Stage() {
 			}
 		} catch {}
 		setActive(addPin({ slide: slide.id, x, y, text: "", target }));
+	};
+
+	// 무대 우클릭 — 슬라이드 창 안에서 누른 것은 frames.ts 가 다시 쏴 준다(__deck 에 창이 잰 자리 · 요소)
+	const stageMenu = (e: React.MouseEvent) => {
+		if (!slide) return;
+		if (preview) return openMenu(e, previewItems(t));
+		const st = useDeck.getState();
+		const hit = (e.nativeEvent as MouseEvent & { __deck?: { x: number; y: number; path: number[] | null; tag: string; text: string } }).__deck;
+		let at = hit ? { x: hit.x, y: hit.y } : null;
+		const sheet = !flow && canvas.current?.querySelector(".sheet");
+		if (!at && sheet) {
+			const r = sheet.getBoundingClientRect();
+			const x = (e.clientX - r.left) / scale, y = (e.clientY - r.top) / scale;
+			if (x >= 0 && y >= 0 && x <= deck.size.w && y <= deck.size.h) at = { x, y };
+		}
+		const i = current, n = deck.slides.length;
+		openMenu(e, [
+			{ label: t("mention"), kbd: `@${i + 1}`, run: () => st.mentionSlide(i + 1) },
+			...(at && !flow && !compare ? [{ label: t("pinHere"), run: () => pinAt(at.x, at.y) }] : []),
+			...(mode === "edit" && hit?.path?.length ? [{ label: `${t("removeEl")} <${hit.tag}>`, kbd: "Delete", danger: true, run: () => applyDirect(slide.id, hit.path, { t: "remove" }) }] : []),
+			"-",
+			{ label: t("view"), kbd: "V", checked: mode === "view", run: () => setMode("view") },
+			{ label: t("pin"), kbd: "P", checked: mode === "pin", run: () => setMode("pin") },
+			{ label: t("edit"), kbd: "E", checked: mode === "edit", run: () => setMode("edit") },
+			{ label: t("flow"), kbd: "S", checked: flowOn, run: () => setFlow(!flowOn) },
+			report ? { label: t("compare"), kbd: "C", checked: st.compare, run: () => st.setCompare(!st.compare) } : { label: t("runCheck"), kbd: "C", run: () => st.check(), disabled: !!st.busy },
+			"-",
+			{ label: t("duplicate"), run: () => st.duplicateSlide(i) },
+			{ label: t("removeSlide"), danger: true, run: () => st.removeSlide(i), disabled: n < 2 },
+		]);
 	};
 
 	if (!slide) return <section className="stage" />;
@@ -360,7 +409,7 @@ function Stage() {
 				<button aria-pressed={!flowOn} onClick={() => setFlow(false)} title={`${t("single")} (S)`}>{t("single")}</button>
 				<button aria-pressed={flowOn} onClick={() => setFlow(true)} title={`${t("flow")} (S)`}>{t("flow")}</button>
 			</div>
-			<div className="canvas" ref={canvas} onWheel={flow ? undefined : (e) => wheel(e.deltaY)}>
+			<div className="canvas" ref={canvas} onWheel={flow ? undefined : (e) => wheel(e.deltaY)} onContextMenu={stageMenu}>
 				{flow ? <Flow deck={deck} revHash={preview?.hash} /> : box.w > 0 && (
 					<div className="sheet" style={{ left, top, width: deck.size.w * scale, height: deck.size.h * scale }}>
 						<div style={{ width: deck.size.w * scale, height: deck.size.h * scale, overflow: "hidden", position: "relative" }}>
@@ -449,7 +498,12 @@ function Flow({ deck, revHash }: { deck: Deck; revHash?: string }) {
 						const n = pins.filter((p) => p.slide === sl.id).length;
 						return (
 							<div key={sl.id} className={"flow-item" + (i === current ? " on" : "")} style={{ top: topOf(i), left: (box.w - width) / 2, width, height }}
-								onClick={() => setCurrent(i)} onDoubleClick={() => { setCurrent(i); setFlow(false); }}>
+								onClick={() => setCurrent(i)} onDoubleClick={() => { setCurrent(i); setFlow(false); }}
+								onContextMenu={(e) => {
+									setCurrent(i);
+									if (revHash) return openMenu(e, previewItems(t));
+									openMenu(e, [{ label: t("openSingle"), run: () => setFlow(false) }, "-", ...slideItems(i, deck.slides.length, t)]);
+								}}>
 								<span className="flow-no mono">{i + 1}{n > 0 && <i title={`${t("pins")} ${n}`} />}</span>
 								<FlowFrame file={sl.file} rev={rev[sl.id] || 0} w={deck.size.w} h={deck.size.h} width={width} revHash={revHash} />
 							</div>
@@ -507,6 +561,8 @@ function Track() {
 	const versions = useDeck((s) => s.versions);
 	const preview = useDeck((s) => s.preview);
 	const setPreview = useDeck((s) => s.setPreview);
+	const restore = useDeck((s) => s.restore);
+	const running = useDeck((s) => s.running);
 	const [hover, setHover] = useState<{ c: Commit; x: number } | null>(null);
 	const list = useMemo(() => [...versions].reverse(), [versions]);
 	const head = versions[0];
@@ -524,7 +580,11 @@ function Track() {
 							aria-label={`v${c.n} ${c.subject}`}
 							onMouseEnter={(e) => { const r = ref.current!.getBoundingClientRect(), b = e.currentTarget.getBoundingClientRect(); setHover({ c, x: b.left + b.width / 2 - r.left }); }}
 							onMouseLeave={() => setHover(null)}
-							onClick={() => setPreview(preview?.hash === c.hash ? null : c)}>
+							onClick={() => setPreview(preview?.hash === c.hash ? null : c)}
+							onContextMenu={(e) => openMenu(e, [
+								{ label: `v${c.n} ${t("viewVersion")}`, run: () => setPreview(c), disabled: c === head },
+								{ label: t("restore"), run: () => restore(c), disabled: c === head || !!running },
+							])}>
 							{rel && <span>{rel}</span>}
 						</button>
 					);

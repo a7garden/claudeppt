@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { ContextMenu, useDefaultMenu } from "./components/ContextMenu";
 import Home from "./components/Home";
 import Settings from "./components/Settings";
 import TitleBar from "./components/TitleBar";
@@ -41,12 +42,8 @@ export default function App() {
 		addEventListener("keydown", k);
 		return () => removeEventListener("keydown", k);
 	}, [settings]);
-	// 설치본에서 WebView 기본 우클릭 메뉴(뒤로 · 새로 고침)를 막는다. 입력칸은 그대로 둔다
-	useEffect(() => {
-		const k = (e: MouseEvent) => { if (!import.meta.env.DEV && !(e.target as Element).closest("input, textarea, [contenteditable]")) e.preventDefault(); };
-		addEventListener("contextmenu", k);
-		return () => removeEventListener("contextmenu", k);
-	}, []);
+	// WebView 기본 우클릭 메뉴(뒤로 · 새로 고침) 대신 앱 메뉴 — 영역마다 제 항목을 열고, 남은 우클릭(입력칸 · 고른 글)은 여기서 받는다
+	useDefaultMenu();
 	if (!loaded) return <div className="app" />;
 	return (
 		<div className="app">
@@ -54,6 +51,7 @@ export default function App() {
 			{open ? <Workspace /> : <Home />}
 			{settings && <Settings onClose={() => setSettings(false)} />}
 			<Toasts />
+			<ContextMenu />
 		</div>
 	);
 }

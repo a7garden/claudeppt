@@ -8,6 +8,7 @@ const subs = new Set<(m: Msg, src: MessageEventSource | null) => void>();
 window.addEventListener("message", (e) => {
 	const m = e.data as Msg;
 	if (!m || !m.__deck) return;
+	if (m.t === "menu") return refire(m, e.source);
 	if (m.req && waiting.has(m.req)) {
 		waiting.get(m.req)!(m);
 		waiting.delete(m.req);
@@ -15,6 +16,20 @@ window.addEventListener("message", (e) => {
 	}
 	for (const f of subs) f(m, e.source);
 });
+
+/** 슬라이드 창 안의 우클릭을 그 iframe 에 다시 쏜다 — 앱의 onContextMenu 들이 보통 우클릭처럼 받는다.
+ *  창이 잰 자리(1:1 슬라이드 픽셀)와 그 자리 요소는 사건의 __deck 에 붙인다. iframe 은 transform 으로 줄여 그리므로 배율을 곱한다 */
+function refire(m: Msg, src: MessageEventSource | null) {
+	for (const f of document.querySelectorAll("iframe")) {
+		if (f.contentWindow !== src) continue;
+		const r = f.getBoundingClientRect();
+		const k = r.width / (f.offsetWidth || r.width);
+		const ev = new MouseEvent("contextmenu", { bubbles: true, cancelable: true, button: 2, clientX: r.left + m.x * k, clientY: r.top + m.y * k });
+		(ev as MouseEvent & { __deck?: Msg }).__deck = m;
+		f.dispatchEvent(ev);
+		return;
+	}
+}
 
 export const onFrame = (f: (m: Msg, src: MessageEventSource | null) => void) => {
 	subs.add(f);

@@ -5,6 +5,7 @@ import { Fragment, useEffect, useMemo, useRef, useState } from "react";
 import { api, b64FromBytes } from "../lib/api";
 import { useT } from "../lib/i18n";
 import { mentionCandidates, mentionTokens, mentionsIn, typingMention } from "../lib/mention";
+import { copyText, openMenu } from "./ContextMenu";
 import { SlideFrame } from "./Workspace";
 import { type Turn, useDeck } from "../lib/store";
 
@@ -35,10 +36,25 @@ export default function Talk() {
 
 function TurnView({ turn, onVersion }: { turn: Turn; onVersion: () => void }) {
 	const t = useT();
+	const refill = useDeck((s) => s.refill);
+	const restore = useDeck((s) => s.restore);
+	const running = useDeck((s) => s.running);
+	const head = useDeck((s) => s.versions[0]?.hash);
+	const commit = useDeck((s) => s.versions.find((v) => v.hash === turn.version?.hash));
+	const menu = (e: React.MouseEvent) => openMenu(e, [
+		{ label: t("rewrite"), run: () => refill(turn.request), disabled: !turn.request },
+		{ label: t("copyReply"), run: () => copyText(turn.reply.trim()), disabled: !turn.reply.trim() },
+		"-",
+		...(commit ? [
+			{ label: `v${commit.n} ${t("viewVersion")}`, run: onVersion },
+			// 지금 판이면 되돌릴 것이 없다. 턴이 도는 중에 되돌리면 Claude 가 고치던 파일을 덮는다
+			{ label: t("restore"), run: () => restore(commit), disabled: commit.hash === head || !!running },
+		] : []),
+	]);
 	const files = useMemo(() => [...new Set(turn.tools.filter((x) => x.name === "Write" || x.name === "Edit" || x.name === "MultiEdit").map((x) => x.file).filter(Boolean))], [turn.tools]);
 	const reads = turn.tools.filter((x) => x.name === "Read").length;
 	return (
-		<article className={"turn " + turn.status}>
+		<article className={"turn " + turn.status} onContextMenu={menu}>
 			<div className="gutter">
 				{turn.status === "running" ? <span className="run" aria-label={t("working")} /> : turn.version ? <button onClick={onVersion} title={turn.version.short}>v{turn.version.n}</button> : <span className="mono dim" style={{ fontSize: 11 }}>—</span>}
 			</div>
@@ -99,7 +115,7 @@ function Composer() {
 	const setCurrent = useDeck((s) => s.setCurrent);
 	const dir = useDeck((s) => s.dir);
 	const current = useDeck((s) => s.current);
-	const mentionReq = useDeck((s) => s.mentionReq);
+	const insertReq = useDeck((s) => s.insertReq);
 	const rev = useDeck((s) => s.rev);
 	const [text, setText] = useState("");
 	const [attach, setAttach] = useState<string[]>([]);
@@ -122,16 +138,21 @@ function Composer() {
 	};
 	// 방향키로 고른 줄이 고르기 창 밖으로 나가지 않게
 	useEffect(() => { document.querySelector(".picker .on")?.scrollIntoView({ block: "nearest" }); }, [pick?.sel]);
-	// 쪽 목록의 「이 쪽 언급」 — 커서 자리에 넣는다. 앞 글자에 붙지 않게 빈칸을 둔다
+	// 「이 쪽 언급」 — 커서 자리에 넣는다. 앞 글자에 붙지 않게 빈칸을 둔다. 「요청 다시 쓰기」 — 칸 전체를 바꾼다
 	useEffect(() => {
-		if (!mentionReq) return;
+		if (!insertReq) return;
 		const el = ta.current;
+		if (insertReq.whole) {
+			setText(insertReq.text);
+			requestAnimationFrame(() => { el?.focus(); el?.setSelectionRange(insertReq.text.length, insertReq.text.length); });
+			return;
+		}
 		const at = el ? el.selectionStart : text.length;
 		const pad = at > 0 && !/\s/.test(text[at - 1]) ? " " : "";
-		const ins = `${pad}@${mentionReq.no} `;
+		const ins = `${pad}${insertReq.text} `;
 		setText(text.slice(0, at) + ins + text.slice(at));
 		requestAnimationFrame(() => { el?.focus(); el?.setSelectionRange(at + ins.length, at + ins.length); });
-	}, [mentionReq]);
+	}, [insertReq]);
 	useEffect(() => {
 		const el = ta.current!;
 		el.style.height = "auto";

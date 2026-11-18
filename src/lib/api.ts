@@ -10,6 +10,7 @@ export interface FontFace { file: string; family: string[]; full: string[]; loca
 
 export const api = {
 	readText: (root: string, rel: string) => invoke<string>("fs_read_text", { root, rel }),
+	clipText: () => invoke<string>("clip_text"),
 	writeText: (root: string, rel: string, text: string) => invoke<void>("fs_write_text", { root, rel, text }),
 	writeB64: (root: string, rel: string, data: string) => invoke<void>("fs_write_base64", { root, rel, data }),
 	exists: (root: string, rel: string) => invoke<boolean>("fs_exists", { root, rel }),

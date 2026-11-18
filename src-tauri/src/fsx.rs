@@ -21,6 +21,12 @@ fn ensure_parent(p: &Path) -> Res<()> {
 	Ok(())
 }
 
+/// 클립보드의 글. 비었거나 글이 아니면 빈 문자열
+#[tauri::command]
+pub fn clip_text() -> Res<String> {
+	arboard::Clipboard::new().and_then(|mut c| c.get_text()).or_else(|e| if matches!(e, arboard::Error::ContentNotAvailable) { Ok(String::new()) } else { Err(err(e)) })
+}
+
 #[tauri::command]
 pub fn fs_read_text(root: String, rel: String) -> Res<String> {
 	std::fs::read_to_string(inside(&root, &rel)?).map_err(err)
