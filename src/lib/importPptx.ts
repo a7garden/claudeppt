@@ -38,7 +38,8 @@ interface Ctx {
 	warnings: Set<string>;
 	slideNo: number;
 }
-interface TextDefaults { size?: number; color?: string; bold?: boolean; font?: string; align?: string }
+/** spc = 자간(1/100 pt). 한글 PPT 는 대부분 음수 자간을 준다 — 빼면 글이 넓어져 원본과 다른 자리에서 줄이 바뀐다 */
+interface TextDefaults { size?: number; color?: string; bold?: boolean; font?: string; align?: string; spc?: number }
 
 // 레이아웃 · 마스터 · 테마는 쪽마다 같은 것을 다시 읽는다 — 한 번 푼 것을 가져오기가 끝날 때까지 둔다.
 // 쪽 XML 은 담지 않는다 (수백 쪽이면 메모리만 먹는다). 읽기만 하는 DOM 이라 나눠 써도 된다.
@@ -209,6 +210,7 @@ function textDefaultsOf(lvl: El | null, ctx: Ctx): TextDefaults {
 	const d = kid(lvl, "a:defRPr");
 	const out: TextDefaults = {};
 	if (d?.getAttribute("sz")) out.size = num(d.getAttribute("sz")) / 100;
+	if (d?.getAttribute("spc")) out.spc = num(d.getAttribute("spc"));
 	if (d?.getAttribute("b")) out.bold = d.getAttribute("b") === "1";
 	const c = colorOf(kid(d, "a:solidFill"), ctx);
 	if (c) out.color = c;
@@ -218,19 +220,16 @@ function textDefaultsOf(lvl: El | null, ctx: Ctx): TextDefaults {
 	return out;
 }
 
+/** 글꼴 이름은 원본 PPTX 에 적힌 그대로 둔다(한글 이름 포함). 웹뷰가 그 이름을 알아보게 하는 것은 fonts.ts 의 별칭(@font-face)이 맡는다 —
+ *  이름을 바꿔 적으면 내보낸 PPTX 에도 바뀐 이름이 들어가 원본과 달라진다. */
 function fontName(f: string | undefined | null, ctx: Ctx) {
 	if (!f) return null;
-	if (f === "+mj-lt") f = ctx.theme.major;
-	else if (f === "+mn-lt") f = ctx.theme.minor;
-	else if (f === "+mj-ea") f = ctx.theme.majorEa || ctx.theme.major;
-	else if (f === "+mn-ea") f = ctx.theme.minorEa || ctx.theme.minor;
-	return f ? webFont(f) : null;
+	if (f === "+mj-lt") return ctx.theme.major;
+	if (f === "+mn-lt") return ctx.theme.minor;
+	if (f === "+mj-ea") return ctx.theme.majorEa || ctx.theme.major;
+	if (f === "+mn-ea") return ctx.theme.minorEa || ctx.theme.minor;
+	return f;
 }
-
-// 웹뷰는 글꼴의 한글 이름(「에스코어 드림 5 Medium」)을 못 알아보고 영어 이름(「S-Core Dream 5 Medium」)만 알아본다.
-// PowerPoint 는 한글 이름으로 저장하므로, 그대로 두면 그 글꼴을 쓴 글이 모두 기본 글꼴로 보인다. 가져오기 시작 때 한 번 읽는다.
-let aliases: Record<string, string> = {};
-const webFont = (f: string) => aliases[f] || f;
 
 function textHtml(txBody: El, ctx: Ctx, inh: TextDefaults[]): { html: string; anchor: string; ins: number[] } {
 	const bodyPr = kid(txBody, "a:bodyPr");
@@ -274,6 +273,8 @@ function textHtml(txBody: El, ctx: Ctx, inh: TextDefaults[]): { html: string; an
 			const st = [`font-size:${r1(size * PT * ctx.k)}px`];
 			if (bold) st.push("font-weight:700");
 			if (italic) st.push("font-style:italic");
+			const spc = rPr?.getAttribute("spc") != null ? num(rPr.getAttribute("spc")) : base.spc || 0;
+			if (spc) st.push(`letter-spacing:${r1((spc / 100) * PT * ctx.k)}px`);
 			if (u || strike) st.push(`text-decoration:${[u && "underline", strike && "line-through"].filter(Boolean).join(" ")}`);
 			if (color) st.push(`color:${color}`);
 			if (fam.length) st.push(`font-family:${fam.join(",")},var(--font)`);
@@ -291,12 +292,19 @@ function textHtml(txBody: El, ctx: Ctx, inh: TextDefaults[]): { html: string; an
 			else bullet = bu!.getAttribute("char") || "•";
 			if (bullet === "Ø" || bullet === "§" || bullet === "ü") bullet = "•";
 		}
+		// 빈 문단의 높이는 문단 끝 서식(endParaRPr)의 크기다 — PowerPoint 가 빈 줄을 그 크기로 띄운다
+		if (!runs.length) {
+			const end = num(kid(p, "a:endParaRPr")?.getAttribute("sz")) / 100;
+			if (end) firstSize = end * scale;
+		}
 		const pxSize = firstSize * PT * ctx.k;
-		const pst = [`text-align:${align}`, `margin:0`, `padding-left:${r1(marL)}px`, `text-indent:${r1(indent)}px`];
+		// 문단 글자 크기를 첫 조각 크기로 준다. 안 주면 문단이 덱 기본 크기(24px)를 물려받아, 글이 작아도 줄마다 24px × 줄 간격 높이를 차지한다
+		// (2026.11.18 16px 글이 줄마다 29px 씩 벌어져 칸을 넘쳤다)
+		const pst = [`text-align:${align}`, `margin:0`, `padding-left:${r1(marL)}px`, `text-indent:${r1(indent)}px`, `font-size:${r1(pxSize)}px`];
 		if (lnPct) pst.push(`line-height:${num(lnPct) / 100000 * 1.2}`);
 		if (spcBef) pst.push(`margin-top:${r1(num(spcBef) / 100 * PT * ctx.k)}px`);
 		if (spcAft) pst.push(`margin-bottom:${r1(num(spcAft) / 100 * PT * ctx.k)}px`);
-		if (!runs.length) { ps.push(`<p style="${pst.join(";")};font-size:${r1(pxSize)}px;min-height:1em"></p>`); continue; }
+		if (!runs.length) { ps.push(`<p style="${pst.join(";")};min-height:1em"></p>`); continue; }
 		ps.push(`<p style="${pst.join(";")}">${bullet ? `<span style="display:inline-block;min-width:${r1(Math.max(0, -indent))}px;font-size:${r1(pxSize)}px">${escapeHtml(bullet)}</span>` : ""}${runs.join("")}</p>`);
 	}
 	return { html: ps.join(""), anchor, ins };
@@ -452,7 +460,8 @@ async function shapeHtml(el: El, ctx: Ctx, rel: Record<string, string>, tx: Tx, 
 					const tb = kid(tc, "a:txBody");
 					const t = tb ? textHtml(tb, ctx, [{ size: 14, color: "#000000" }]).html : "";
 					const span = [tc.getAttribute("gridSpan") ? ` colspan="${tc.getAttribute("gridSpan")}"` : "", tc.getAttribute("rowSpan") ? ` rowspan="${tc.getAttribute("rowSpan")}"` : ""].join("");
-					return `<td${span} style="border:1px solid #c8c8c8;padding:4px 8px;vertical-align:middle${f && f !== "none" ? `;background:${f}` : ""}">${t}</td>`;
+					// 줄 간격 1.2 = PowerPoint 의 「한 줄」. 안 주면 덱 기본(.slide 1.45)을 물려받아 칸 글이 넘친다
+					return `<td${span} style="border:1px solid #c8c8c8;padding:4px 8px;vertical-align:middle;line-height:1.2${f && f !== "none" ? `;background:${f}` : ""}">${t}</td>`;
 				});
 				return `<tr style="height:${r1(h)}px">${cells.join("")}</tr>`;
 			});
@@ -513,7 +522,6 @@ export async function importPptx(bytes: Uint8Array, src: string, dir: string, ti
 	const presRels = await rels(zip, "ppt/presentation.xml");
 	const order = [...pres.getElementsByTagName("p:sldId")].map((e) => presRels[e.getAttribute("r:id")!]).filter(Boolean);
 
-	aliases = await api.fontAliases().catch(() => ({}));
 	await api.vcsInit(dir);
 	await embedFont(dir);
 	const deck: Deck = { format: FORMAT, title, size: { w: W, h: H }, slides: [], theme: "theme.css", source: { kind: "pptx", file: "source/original.pptx" }, created: new Date().toISOString(), updated: new Date().toISOString() };
@@ -537,7 +545,7 @@ export async function importPptx(bytes: Uint8Array, src: string, dir: string, ti
 		const master = masterPath ? await xml(zip, masterPath) : null;
 		const mRel = masterPath ? await rels(zip, masterPath) : {};
 		const theme = masterPath ? await readTheme(zip, masterPath) : { colors: {}, major: "", minor: "", majorEa: "", minorEa: "" };
-		themeFont ||= webFont(theme.minorEa || theme.minor);
+		themeFont ||= theme.minorEa || theme.minor;
 		const cm = master?.getElementsByTagName("p:clrMap")[0];
 		const clrMap: Record<string, string> = {};
 		for (const a of cm?.attributes || []) clrMap[a.name] = a.value;

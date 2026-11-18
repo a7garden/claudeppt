@@ -69,7 +69,11 @@ Tauri 2 · React 19 · Vite · TypeScript. 화면 서식은 토큰 CSS 한 장(`
 | 그라데이션 · 바탕 그림 · 그림자 · `::before/::after` · 고르지 않은 테두리 · 모서리 | 그 요소의 바탕만 구운 그림 + 그 위 글자는 편집 가능 |
 | `<img>` · `<svg>` · 변형(회전) · 필터 · 블렌드 · clip-path · 글자 그림자 · 목록 표식 | 자식째 구운 그림 |
 
-- 글꼴: CSS 글꼴 목록에서 **이 PC 에 깔린 첫 글꼴**을 고른다(브라우저와 같은 차례). 500 · 600 같은 굵기는 「Pretendard Medium」 · 「Pretendard SemiBold」 처럼 깔린 이름으로 고른다. 깔린 글꼴이 하나도 없으면 알린다.
+- 글꼴 이름은 원본 PPTX 에 적힌 그대로(한글 이름 포함) 쓴다. 웹뷰는 가족 이름으로 영어 이름만 알아보므로, 프로젝트를 열 때 `theme.css` 맨 앞 앱 구획에
+  `@font-face { font-family: "에스코어 드림 5 Medium"; src: local("S-Core Dream 5 Medium") }` 꼴 별칭을 쓴다(굵게 · 기울임 판까지). 깔린 글꼴은 이름 표의 모든 나라말 이름으로 찾는다.
+  못 찾은 글꼴은 알림의 「맡기기」로 Claude 가 공식 배포처를 웹에서 찾고(주소만 · 파일을 못 건드린다), 앱이 받아 글꼴인지 가려 사용자 글꼴로 깔고 프로젝트 `assets/fonts` 에도 넣는다.
+  PPTX 안에 넣어 둔 글꼴(MicroType Express 압축 EOT)은 아직 꺼내지 못한다.
+- 내보낼 때 글꼴: CSS 글꼴 목록에서 **이 PC 에 깔린 첫 글꼴**을 고른다(브라우저와 같은 차례). 500 · 600 같은 굵기는 「Pretendard Medium」 · 「Pretendard SemiBold」 처럼 깔린 이름으로 고른다. 깔린 글꼴이 하나도 없으면 알린다.
 - 기준선: PowerPoint 는 「정확히」 줄 간격에서 첫 줄 기준선을 약 `0.716 × 줄 높이 + 0.089 × 글자 크기` 아래에 둔다(2026.11.17 크기 12~56px × 줄 높이 1.0~1.8 실측). 브라우저가 실제로 그린 기준선과의 차이만큼 글상자를 옮긴다.
 - 「모양 그대로」 내보내기: 쪽마다 웹을 2배로 구운 그림 한 장 + 같은 자리의 투명 글상자(찾기 · 복사용). 글자 획 가장자리까지 같지만 PowerPoint 에서 모양을 고치지 못한다.
 
@@ -128,5 +132,5 @@ cd src-tauri && cargo check
 | `src/lib/prompt.ts` | 앱 시스템 프롬프트 · 턴 요청문 |
 | `src/lib/importPptx.ts` · `exportPptx.ts` | PPTX ↔ 웹 |
 | `src/lib/check.ts` · `src/components/CompareLens.tsx` | 비교 검사 · 비교 렌즈 |
-| `src-tauri/src/fonts.rs` | 이 PC 에 깔린 글꼴 이름 |
+| `src-tauri/src/fonts.rs` · `src/lib/fonts.ts` | 글꼴 맞추기 — 깔린 글꼴 이름 표 읽기 · 원본 이름 별칭(`theme.css` 의 앱 구획) · 없는 글꼴 받아 깔기 |
 | `src/components/` | 제목 줄 · 처음 화면 · 작업 화면(쪽 목록 · 무대 · 판 줄기) · 대화 · 설정 |

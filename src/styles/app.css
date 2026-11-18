@@ -294,6 +294,7 @@ textarea.field { height: auto; padding: 8px 10px; line-height: 1.5; resize: vert
 .toast { position: fixed; left: 50%; bottom: 66px; transform: translateX(-50%); padding: 8px 14px; border-radius: 8px; background: var(--raise-2); box-shadow: var(--shadow); z-index: 50; display: flex; gap: 12px; align-items: center; max-width: 70vw; animation: in 0.16s ease-out; user-select: text; }
 .toast.err { color: var(--err); }
 .toast button { color: var(--accent); font-weight: 600; }
+.toast button.dim { color: var(--dim); font-weight: 400; }
 .busy { position: fixed; left: 50%; bottom: 66px; transform: translateX(-50%); padding: 8px 14px; border-radius: 8px; background: var(--raise-2); box-shadow: var(--shadow); z-index: 49; font: 12px var(--mono); overflow: hidden; }
 .busy .progress-line { top: auto; bottom: 0; }
 /* 화면 뒤 일 — 제목 줄 아래 오른쪽 작은 카드. 아래쪽은 대화 보내기 단추 · 알림 자리라 피한다.
@@ -305,5 +306,6 @@ textarea.field { height: auto; padding: 8px 10px; line-height: 1.5; resize: vert
 .job .head .mono { color: var(--dim); font-size: 11px; flex: none; }
 .job .bar { position: relative; height: 4px; border-radius: 2px; background: var(--hair-2); overflow: hidden; }
 .job .bar i { position: absolute; left: 0; top: 0; bottom: 0; background: var(--accent); border-radius: 2px; transition: width 0.2s ease-out; }
+.job .detail { margin-top: 6px; font-size: 11px; color: var(--dim); overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
 .job .bar.unknown i { width: 30%; animation: job-unknown 1.1s ease-in-out infinite alternate; }
 @keyframes job-unknown { from { left: 0; } to { left: 70%; } }

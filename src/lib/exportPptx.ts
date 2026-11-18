@@ -1,8 +1,8 @@
 // 웹 슬라이드 → PPTX. 쪽마다 화면 밖 iframe 에 1:1 로 그려 런타임(rt.js extract)이 잰 좌표로 PowerPoint 도형을 만든다.
 // 상자 → 도형 · 글자 묶음 → 글상자 · 표 → 표 · 그림/SVG → 그림. 96px = 1in.
 import PptxGenJS from "pptxgenjs";
-import { api } from "./api";
 import type { Deck } from "./deck";
+import { installedNames } from "./fonts";
 import { ask, offscreen } from "./frames";
 
 const IN = (px: number) => px / 96;
@@ -24,8 +24,6 @@ const WEIGHT_NAMES: Record<number, string[]> = {
 	100: ["Thin", "Hairline"], 200: ["ExtraLight", "UltraLight"], 300: ["Light"], 400: ["Regular"],
 	500: ["Medium"], 600: ["SemiBold", "DemiBold"], 700: ["Bold"], 800: ["ExtraBold", "UltraBold"], 900: ["Black", "Heavy"],
 };
-let installedP: Promise<Set<string>> | null = null;
-const installed = () => (installedP ||= api.fonts().then((l) => new Set(l.map((x) => x.toLowerCase())), () => new Set<string>()));
 const GENERIC = new Set(["sans-serif", "serif", "monospace", "system-ui", "cursive", "fantasy", ""]);
 
 interface FontCtx { have: Set<string>; missing: Set<string> }
@@ -76,7 +74,8 @@ export interface Built { data: Uint8Array; missingFonts: string[] }
  * 글자 획 가장자리까지 웹과 같다 — 대신 PowerPoint 에서 모양을 고치지 못한다(글은 찾기 · 복사만).
  */
 export async function buildPptx(deck: Deck, projectId: string, progress: (i: number, n: number) => void, exact = false): Promise<Built> {
-	const fonts: FontCtx = { have: await installed(), missing: new Set() };
+	// 깔린 글꼴은 가족 이름 · 전체 이름을 나라말마다 본다 — 한글 이름(「에스코어 드림 5 Medium」)도 깔린 것으로 알아본다
+	const fonts: FontCtx = { have: await installedNames(), missing: new Set() };
 	const pptx = new PptxGenJS();
 	pptx.defineLayout({ name: "DECK", width: IN(deck.size.w), height: IN(deck.size.h) });
 	pptx.layout = "DECK";

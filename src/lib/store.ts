@@ -17,6 +17,7 @@ import { buildPptx } from "./exportPptx";
 import { type Report, SAME, readReport, runCheck } from "./check";
 import { tell } from "./frames";
 import { tNow } from "./i18n";
+import { askClaude, linkFonts } from "./fonts";
 import { fillGenerated } from "./imagegen";
 import { type PinNote, systemPrompt, turnPrompt } from "./prompt";
 import { useSettings } from "./settings";
@@ -37,7 +38,7 @@ export interface Turn {
 	phase?: string;
 }
 /** 화면 뒤에서 도는 긴 일(PPTX 가져오기) 하나. n 이 0 이면 아직 전체 양을 모른다 */
-export interface Job { id: string; label: string; i: number; n: number }
+export interface Job { id: string; label: string; i: number; n: number; note?: string }
 export interface Release { name: string; tag: string; n: number; hash: string; file: string; notes: string; at: string }
 export type Mode = "view" | "pin" | "edit";
 
@@ -58,7 +59,7 @@ interface S {
 	busy: string | null;
 	/** busy 와 달리 화면을 막지 않는 일. 프로젝트를 닫아도 남는다 */
 	jobs: Job[];
-	toast: { text: string; kind: "ok" | "err"; action?: { label: string; run: () => void } } | null;
+	toast: { text: string; kind: "ok" | "err"; action?: { label: string; run: () => void }; sticky?: boolean } | null;
 	frames: Set<Window>;
 	report: Report | null;
 	compare: boolean;
@@ -79,7 +80,10 @@ interface S {
 	restore: (c: Commit) => Promise<void>;
 	exportTo: (path: string, exact?: boolean) => Promise<void>;
 	release: (name: string, notes: string) => Promise<void>;
-	notify: (text: string, kind?: "ok" | "err", action?: { label: string; run: () => void }) => void;
+	/** action 이 있거나 sticky 면 사용자가 닫을 때까지 둔다 */
+	notify: (text: string, kind?: "ok" | "err", opt?: { action?: { label: string; run: () => void }; sticky?: boolean }) => void;
+	/** 못 찾은 글꼴을 Claude 에게 맡긴다 — 사용자가 알림의 「맡기기」를 눌렀을 때만 부른다 */
+	fixFonts: (missing: string[]) => Promise<void>;
 	saveDeck: (deck: Deck) => Promise<void>;
 	check: () => Promise<void>;
 	setCompare: (on: boolean) => void;
@@ -87,6 +91,8 @@ interface S {
 }
 
 let unlisten: (() => void)[] = [];
+/** 이 앱을 켜 둔 동안 글꼴을 물어본 프로젝트 — 열 때마다 같은 것을 다시 묻지 않는다 */
+const fontAsked = new Set<string>();
 let directTimer: ReturnType<typeof setTimeout> | undefined;
 
 const persistPins = (dir: string, pins: Pin[]) => api.writeText(dir, ".claudeppt/pins.json", JSON.stringify(pins, null, 1)).catch(() => {});
@@ -139,6 +145,13 @@ export const useDeck = create<S>()((set, get) => ({
 		const log = await api.log(dir, 1);
 		if (!log.length) await api.commit(dir, deck.source?.kind === "pptx" ? "PPTX 를 가져온다" : "새로 만든다");
 		await get().refreshVersions();
+		// 글꼴 잇기 — 화면을 막지 않고 뒤에서 한다 (깔린 글꼴을 처음 읽을 때 몇 초 걸린다)
+		linkFonts(dir, deck).then(({ missing }) => {
+			if (get().dir !== dir || !missing.length || fontAsked.has(dir)) return;
+			fontAsked.add(dir);
+			const list = missing.slice(0, 4).join(" · ") + (missing.length > 4 ? ` 외 ${missing.length - 4}개` : "");
+			get().notify(`글꼴 ${missing.length}개를 찾지 못했습니다 — ${list}. Claude 에게 글꼴 설정을 맡길까요?`, "ok", { action: { label: "맡기기", run: () => get().fixFonts(missing) } });
+		}, () => {});
 
 		unlisten.push(
 			await listen<{ id: string; paths: string[] }>("deck-fs", async (e) => {
@@ -368,10 +381,33 @@ export const useDeck = create<S>()((set, get) => ({
 		}
 	},
 
-	notify: (text, kind = "ok", action) => {
-		set({ toast: { text, kind, action } });
-		// 누를 단추가 있으면 오래 둔다 — 다른 일을 하다 돌아와도 놓치지 않게
-		setTimeout(() => { if (get().toast?.text === text) set({ toast: null }); }, action ? 15000 : kind === "err" ? 7000 : 3500);
+	notify: (text, kind = "ok", opt = {}) => {
+		const sticky = !!(opt.action || opt.sticky);
+		set({ toast: { text, kind, action: opt.action, sticky } });
+		// 누를 단추가 있거나 꼭 읽어야 할 글이면 사용자가 닫을 때까지 둔다 — 다른 일을 하다 돌아와도 놓치지 않게
+		if (!sticky) setTimeout(() => { if (get().toast?.text === text) set({ toast: null }); }, kind === "err" ? 7000 : 3500);
+	},
+
+	fixFonts: async (missing) => {
+		const { dir, deck } = get();
+		if (!deck) return;
+		const id = "font" + Date.now().toString(36);
+		const note = (n: string) => useDeck.setState((s) => ({
+			jobs: s.jobs.some((j) => j.id === id) ? s.jobs.map((j) => (j.id === id ? { ...j, note: n } : j)) : [...s.jobs, { id, label: "글꼴 설정", i: 0, n: 0, note: n }],
+		}));
+		note("시작");
+		try {
+			const r = await askClaude(dir, deck, missing, note);
+			if (get().dir === dir && !get().running) await api.commit(dir, "글꼴을 받아 잇는다").catch(() => null);
+			const parts = [r.installed.length ? `글꼴 파일 ${r.installed.length}개를 깔았습니다` : "깐 글꼴이 없습니다"];
+			if (r.missing.length) parts.push(`아직 없는 글꼴: ${r.missing.join(" · ")}`);
+			if (r.reasons.length) parts.push(r.reasons.join(" / "));
+			get().notify(parts.join(" — "), r.missing.length ? "err" : "ok", { sticky: !!(r.missing.length || r.reasons.length) });
+		} catch (e) {
+			get().notify(`글꼴 설정 실패 — ${String(e)}`, "err", { sticky: true });
+		} finally {
+			useDeck.setState((s) => ({ jobs: s.jobs.filter((j) => j.id !== id) }));
+		}
 	},
 
 	check: async () => {

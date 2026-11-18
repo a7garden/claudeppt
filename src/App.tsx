@@ -71,6 +71,7 @@ function Toasts() {
 				<div className={"toast " + toast.kind} role="status">
 					<span>{toast.text}</span>
 					{toast.action && <button onClick={() => { toast.action!.run(); useDeck.setState({ toast: null }); }}>{toast.action.label}</button>}
+					{toast.sticky && <button className="dim" onClick={() => useDeck.setState({ toast: null })} aria-label={t("close")}>{t("close")}</button>}
 				</div>
 			)}
 			{jobs.length > 0 && (
@@ -79,11 +80,12 @@ function Toasts() {
 						<div className="job" key={j.id}>
 							<div className="head">
 								<span className="label" title={j.label}>{j.label}</span>
-								<span className="mono">{j.n ? `${j.i}/${j.n}${t("slideN") === "쪽" ? "쪽" : ""}` : t("importRead")}</span>
+								<span className="mono">{j.n ? `${j.i}/${j.n}${t("slideN") === "쪽" ? "쪽" : ""}` : j.note ? "" : t("importRead")}</span>
 							</div>
 							<div className={"bar" + (j.n ? "" : " unknown")} role="progressbar" aria-label={`${t("importing")} ${j.label}`} aria-valuemin={0} aria-valuemax={j.n || undefined} aria-valuenow={j.n ? j.i : undefined}>
 								<i style={j.n ? { width: `${(j.i / j.n) * 100}%` } : undefined} />
 							</div>
+							{j.note && <div className="detail" title={j.note}>{j.note}</div>}
 						</div>
 					))}
 				</div>

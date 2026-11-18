@@ -6,6 +6,8 @@
 //                            사용자 설정이 남는다 (2026.11.17 CLI 2.1.325 실측: 없으면 영어 질문에 한국어로 답했다)
 //   --system-prompt-file     기본 시스템 프롬프트를 이 앱의 프롬프트로 바꾼다 (화면 「설정 › Claude」에서 고친다)
 //   --tools                  파일 읽기 · 쓰기만. 셸 · 웹은 주지 않는다 — 프로젝트 폴더 밖을 건드릴 길을 막는다
+//                            단 「글꼴 찾기」(mode = "fonts")는 거꾸로 웹 찾기 · 웹 읽기만 주고 파일은 못 건드린다.
+//                            받아서 까는 일은 Claude 가 아니라 앱(fonts::font_install)이 한다 — 받은 것이 글꼴인지 앱이 가린다
 //   --permission-prompts none 물어볼 일이 생기면 기다리지 않고 거절한다 (헤드리스라 답할 사람이 없다)
 // 구독 로그인(OAuth)은 그대로 쓴다. --bare 는 API 키만 받아 쓰지 않는다.
 
@@ -17,6 +19,7 @@ use tauri::{AppHandle, Emitter, State};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
 const TOOLS: &str = "Read,Edit,Write,Glob,Grep";
+const FONT_TOOLS: &str = "WebSearch,WebFetch";
 
 #[derive(Serialize)]
 pub struct Detected {
@@ -72,6 +75,8 @@ pub struct RunSpec {
 	model: String,
 	effort: String,
 	resume: Option<String>,
+	/// None 이면 쪽 고치기. "fonts" 면 글꼴 찾기 (위 머리말)
+	mode: Option<String>,
 }
 
 #[derive(Serialize, Clone)]
@@ -96,15 +101,20 @@ pub async fn claude_run(app: AppHandle, state: State<'_, AppState>, spec: RunSpe
 	let sys_file = run_dir.join("system.md");
 	std::fs::write(&sys_file, &spec.system).map_err(err)?;
 
+	let fonts = spec.mode.as_deref() == Some("fonts");
 	let mut args: Vec<String> = [
 		"-p", "--output-format", "stream-json", "--verbose", "--include-partial-messages",
 		"--safe-mode", "--setting-sources", "",
 		"--strict-mcp-config", "--disable-slash-commands",
-		"--tools", TOOLS,
+		"--tools", if fonts { FONT_TOOLS } else { TOOLS },
 		"--permission-mode", "acceptEdits", "--permission-prompts", "none",
 	]
 	.map(String::from)
 	.to_vec();
+	if fonts {
+		// 웹 도구는 acceptEdits 로 허락되지 않는다 — 물어볼 사람이 없으니 미리 허락해 둔다
+		args.extend(["--allowedTools".into(), FONT_TOOLS.into()]);
+	}
 	args.extend(["--system-prompt-file".into(), sys_file.to_string_lossy().into()]);
 	if !spec.model.trim().is_empty() {
 		args.extend(["--model".into(), spec.model.trim().into()]);

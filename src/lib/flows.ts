@@ -51,7 +51,7 @@ export async function importFile(path: string) {
 			await st.openProject(dir);
 			if (differ) st.notify(differ);
 		} else {
-			st.notify(`${name} · ${tNow("imported")}${differ ? " · " + differ : ""}`, "ok", { label: tNow("open"), run: () => useDeck.getState().openProject(dir) });
+			st.notify(`${name} · ${tNow("imported")}${differ ? " · " + differ : ""}`, "ok", { action: { label: tNow("open"), run: () => useDeck.getState().openProject(dir) } });
 		}
 		// 원본 쪽 그림 — PowerPoint 가 있으면 뒤에서 뽑는다. 없으면 조용히 넘어간다
 		api.pptSnapshot(join(dir, "source", "original.pptx"), join(dir, "source", "pages"), imported.size.w, imported.size.h).then(async (pages) => {

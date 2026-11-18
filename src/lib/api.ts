@@ -4,6 +4,8 @@ import { invoke } from "@tauri-apps/api/core";
 export interface Commit { n: number; hash: string; short: string; date: string; subject: string; tags: string[] }
 export interface LibItem { dir: string; deck: any; modified: number }
 export interface Tool { name: string; path: string | null; version: string }
+/** 깔린 글꼴 하나. family = 가족 이름(나라말마다) · full = 전체 이름들 · local = @font-face local() 에 쓸 영어 전체 이름 */
+export interface FontFace { file: string; family: string[]; full: string[]; local: string; bold: boolean; italic: boolean }
 
 export const api = {
 	readText: (root: string, rel: string) => invoke<string>("fs_read_text", { root, rel }),
@@ -33,14 +35,13 @@ export const api = {
 	restore: (dir: string, hash: string, message: string) => invoke<Commit | null>("vcs_restore", { dir, hash, message }),
 
 	claudeDetect: (path: string) => invoke<{ path: string; version: string } | null>("claude_detect", { path }),
-	claudeRun: (spec: { turn: string; dir: string; prompt: string; system: string; claudePath: string; model: string; effort: string; resume?: string | null }) => invoke<{ code: number; stderr: string }>("claude_run", { spec }),
+	claudeRun: (spec: { turn: string; dir: string; prompt: string; system: string; claudePath: string; model: string; effort: string; resume?: string | null; mode?: "fonts" }) => invoke<{ code: number; stderr: string }>("claude_run", { spec }),
 	claudeStop: (turn: string) => invoke<void>("claude_stop", { turn }),
 
 	toolsDetect: () => invoke<Tool[]>("tools_detect"),
 	imageGenerate: (spec: { provider: string; prompt: string; out: string; apiKey?: string; model?: string; size?: string }) => invoke<string>("image_generate", { spec }),
-	fonts: () => invoke<string[]>("fonts_list"),
-	/** 글꼴의 한글 등 다른 이름 → 웹뷰가 알아보는 영어 이름 */
-	fontAliases: () => invoke<Record<string, string>>("font_aliases"),
+	fontIndex: () => invoke<FontFace[]>("font_index"),
+	fontInstall: (urls: string[]) => invoke<{ url: string; files: string[]; error: string | null }[]>("font_install", { urls }),
 	pptSnapshot: (pptx: string, outDir: string, width = 1280, height = 720) => invoke<number>("ppt_snapshot", { pptx, outDir, width, height }),
 };
 
