@@ -117,6 +117,7 @@ cd src-tauri && cargo check
 - 설치된 앱은 켤 때와 1시간마다 `releases/latest/download/latest.json` 을 보고 새 판이면 알림의 「설치」로 받아 다시 켠다. 「설정 › 업데이트」에서 끄고 켠다. 개발 실행에서는 확인하지 않는다.
 - 업데이트 주소는 `tauri.conf.json` 의 `plugins.updater.endpoints` (지금 `a7garden/claudeppt` — 저장소를 만들면 맞춘다).
 - 서명 키는 `~/.tauri/claudeppt.key`(비밀번호 없음). 저장소 비밀 `TAURI_SIGNING_PRIVATE_KEY` 에 같은 내용을 넣는다.
+- 저장소 비밀이 없으면 CI 는 빌드를 건너뛴다. 그때는 키가 있는 PC 에서 서명 키를 주고 `npm run tauri build` 를 돌린 뒤 `git push origin main && node tools/release-local.mjs` — 설치 파일 · 서명 · `latest.json` 을 `v<버전>` 릴리즈로 올린다 (2026.11.18 0.1.1 을 이 길로 냈다).
   **키를 잃으면 이미 깔린 앱은 더는 업데이트를 받지 못한다** — 공개 키가 앱 안에 박혀 있다.
 
 ### 구조
