@@ -2,7 +2,7 @@
 // 쓰는 법: WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS=--remote-debugging-port=9333 npm run tauri dev
 //         node tools/cdp.mjs eval "<js>"        결과를 JSON 으로
 //         node tools/cdp.mjs shot <out.png>     화면 찍기
-//         node tools/cdp.mjs click "x,y" · rclick "x,y" · type "글"  누르기 · 우클릭 · 글 넣기
+//         node tools/cdp.mjs click "x,y" · rclick "x,y" · drag "x0,y0,x1,y1" · type "글"  누르기 · 우클릭 · 끌기 · 글 넣기
 import fs from "node:fs";
 const [cmd, raw] = process.argv.slice(2);
 const arg = raw?.startsWith("@") ? fs.readFileSync(raw.slice(1), "utf8") : raw;
@@ -27,6 +27,12 @@ if (cmd === "eval") {
 	const [x, y] = arg.split(",").map(Number);
 	const button = cmd === "rclick" ? "right" : "left";
 	for (const type of ["mousePressed", "mouseReleased"]) await call("Input.dispatchMouseEvent", { type, x, y, button, clickCount: 1 });
+} else if (cmd === "drag") {
+	// node tools/cdp.mjs drag "x0,y0,x1,y1" — 눌러서 끌고 놓기 (표시 긋기 시험). 사이를 12걸음으로 나눠 움직인다
+	const [x0, y0, x1, y1] = arg.split(",").map(Number);
+	await call("Input.dispatchMouseEvent", { type: "mousePressed", x: x0, y: y0, button: "left", buttons: 1, clickCount: 1 });
+	for (let k = 1; k <= 12; k++) await call("Input.dispatchMouseEvent", { type: "mouseMoved", x: x0 + ((x1 - x0) * k) / 12, y: y0 + ((y1 - y0) * k) / 12 + Math.sin(k / 2) * 8, button: "left", buttons: 1 });
+	await call("Input.dispatchMouseEvent", { type: "mouseReleased", x: x1, y: y1, button: "left", buttons: 0, clickCount: 1 });
 } else if (cmd === "type") {
 	await call("Input.insertText", { text: arg });
 } else if (cmd === "shot") {

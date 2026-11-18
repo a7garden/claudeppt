@@ -6,7 +6,7 @@ import { api, b64FromBytes } from "../lib/api";
 import { useT } from "../lib/i18n";
 import { mentionCandidates, mentionTokens, mentionsIn, typingMention } from "../lib/mention";
 import { copyText, openMenu } from "./ContextMenu";
-import { SlideFrame } from "./Workspace";
+import { SLIDE_MIME, SlideFrame } from "./Workspace";
 import { type Turn, useDeck } from "../lib/store";
 
 export default function Talk() {
@@ -103,6 +103,9 @@ function Mentioned({ text, turn }: { text: string; turn?: Turn }) {
 	return <>{out}</>;
 }
 
+/** 요청칸 위 쌓인 표시의 종류 — 글자 한 자로 (핀은 비워 둔다) */
+const GLYPH = { pen: "〰", arrow: "→", box: "▭" } as const;
+
 function Composer() {
 	const t = useT();
 	const pins = useDeck((s) => s.pins);
@@ -118,6 +121,9 @@ function Composer() {
 	const insertReq = useDeck((s) => s.insertReq);
 	const rev = useDeck((s) => s.rev);
 	const [text, setText] = useState("");
+	// 쪽 목록 · 이어 보기에서 쪽을 끌어 요청칸 위에 올린 동안 — 놓으면 @쪽 이 들어간다
+	const [dropping, setDropping] = useState(false);
+	const mentionSlide = useDeck((s) => s.mentionSlide);
 	const [attach, setAttach] = useState<string[]>([]);
 	const ta = useRef<HTMLTextAreaElement>(null);
 	// @ 고르기 창 — start 는 @ 자리, sel 은 고른 줄
@@ -187,7 +193,7 @@ function Composer() {
 					{pins.map((p, i) => (
 						<div className="tray-pin" key={p.id}>
 							<span className="n">{i + 1}</span>
-							<button className="where" onClick={() => setCurrent(slideNo(p.slide) - 1)}>{slideNo(p.slide)}{t("slideN") === "쪽" ? "쪽" : ""}</button>
+							<button className="where" onClick={() => setCurrent(slideNo(p.slide) - 1)}>{slideNo(p.slide)}{t("slideN") === "쪽" ? "쪽" : ""}{p.shape ? ` ${GLYPH[p.shape.kind]}` : ""}</button>
 							<input defaultValue={p.text} key={p.text} placeholder={p.target?.text || t("pinPlaceholder")} onBlur={(e) => { if (e.target.value !== p.text) update(p.id, e.target.value); }}
 								onKeyDown={(e) => { if (e.key === "Enter") { (e.target as HTMLInputElement).blur(); if (e.ctrlKey) go(); } }} />
 							<button className="x" onClick={() => remove(p.id)} aria-label={t("delete")}>×</button>
@@ -195,7 +201,16 @@ function Composer() {
 					))}
 				</div>
 			)}
-			<div className="box">
+			<div className={"box" + (dropping ? " dropping" : "")} data-drop={t("dropMention")}
+				onDragOver={(e) => { if (!e.dataTransfer.types.includes(SLIDE_MIME)) return; e.preventDefault(); e.dataTransfer.dropEffect = "copy"; setDropping(true); }}
+				onDragLeave={(e) => { if (!e.currentTarget.contains(e.relatedTarget as Node)) setDropping(false); }}
+				onDrop={(e) => {
+					setDropping(false);
+					const no = deck.slides.findIndex((s) => s.id === e.dataTransfer.getData(SLIDE_MIME)) + 1;
+					if (!no) return;
+					e.preventDefault();
+					mentionSlide(no);
+				}}>
 				{pick && (
 					<div className="picker" role="listbox" aria-label={t("slides")}>
 						{cands.length === 0 && <div className="none">{t("mentionNone")}</div>}

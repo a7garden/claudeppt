@@ -22,11 +22,13 @@ import { tell } from "./frames";
 import { tNow } from "./i18n";
 import { askClaude, linkFonts } from "./fonts";
 import { fillGenerated } from "./imagegen";
+import { markedPictures, type Shape, type Tool } from "./markup";
 import { type Mention, mentionsIn } from "./mention";
 import { type PinNote, systemPrompt, turnPrompt } from "./prompt";
 import { useSettings } from "./settings";
 
-export interface Pin { id: string; slide: string; x: number; y: number; text: string; target?: PinNote["target"]; at: number }
+/** 핀 하나 — shape 가 있으면 그어 놓은 표시(펜 · 화살표 · 상자)이고 x, y 는 그 번호 표식 자리다 (markup.ts) */
+export interface Pin { id: string; slide: string; x: number; y: number; text: string; target?: PinNote["target"]; shape?: Shape; at: number }
 export interface ToolUse { name: string; file?: string }
 export interface Turn {
 	id: string;
@@ -57,6 +59,8 @@ interface S {
 	mode: Mode;
 	/** 이어 보기 — 무대에 모든 쪽을 세로로 늘어놓고 스크롤로 넘긴다. 보기 모드에서만 쓴다 */
 	flow: boolean;
+	/** 표시 모드의 도구 — 펜 · 화살표 · 상자. 이 PC 에 남긴다 */
+	tool: Tool;
 	/** 요청칸에 넣어 달라는 글 — 커서 자리에 끼우거나(whole 아님) 칸 전체를 바꾼다. k 는 같은 글을 거듭 보내도 다시 넣게 하는 표식 */
 	insertReq: { text: string; whole?: boolean; k: number } | null;
 	pins: Pin[];
@@ -80,6 +84,7 @@ interface S {
 	setCurrent: (i: number) => void;
 	setMode: (m: Mode) => void;
 	setFlow: (on: boolean) => void;
+	setTool: (t: Tool) => void;
 	mentionSlide: (no: number) => void;
 	refill: (text: string) => void;
 	addSlide: (at: number) => Promise<void>;
@@ -134,6 +139,7 @@ export const useDeck = create<S>()((set, get) => ({
 	current: 0,
 	mode: "view",
 	flow: (() => { try { return localStorage.getItem("claudeppt.flow") === "1"; } catch { return false; } })(),
+	tool: (() => { try { const v = localStorage.getItem("claudeppt.tool"); return v === "arrow" || v === "box" ? v : "pen"; } catch { return "pen"; } })(),
 	insertReq: null,
 	pins: [],
 	turns: [],
@@ -240,6 +246,10 @@ export const useDeck = create<S>()((set, get) => ({
 		for (const w of get().frames) tell(w, { t: "mode", mode });
 	},
 
+	setTool: (tool) => {
+		set({ tool });
+		try { localStorage.setItem("claudeppt.tool", tool); } catch {}
+	},
 	setFlow: (flow) => {
 		if (flow && get().mode !== "view") get().setMode("view");
 		set({ flow });
@@ -315,7 +325,7 @@ export const useDeck = create<S>()((set, get) => ({
 		clearTimeout(directTimer);
 		await api.commit(dir, tNow("direct")).catch(() => {});
 		const order = (id: string) => deck.slides.findIndex((x) => x.id === id) + 1;
-		const notes: PinNote[] = pins.map((p, i) => ({ n: i + 1, slide: p.slide, slideNo: order(p.slide), x: p.x, y: p.y, text: p.text, target: p.target }));
+		const notes: PinNote[] = pins.map((p, i) => ({ n: i + 1, slide: p.slide, slideNo: order(p.slide), x: p.x, y: p.y, text: p.text, target: p.target, shape: p.shape }));
 		const cur = deck.slides[current];
 		const mentions = mentionsIn(text, deck);
 		const turn: Turn = { id: "t" + Date.now().toString(36), at: Date.now(), request: text.trim(), pins: notes, mentions, reply: "", tools: [], status: "running" };
@@ -324,6 +334,12 @@ export const useDeck = create<S>()((set, get) => ({
 		const patch = (fn: (t: Turn) => Turn) => set({ turns: get().turns.map((t) => (t.id === turn.id ? fn(t) : t)) });
 
 		try {
+			// 표시가 있으면 그 쪽 그림 위에 그려 붙인다. 못 만들어도 좌표 글은 가므로 턴은 그대로 돈다
+			if (notes.some((n) => n.shape)) {
+				patch((t) => ({ ...t, phase: tNow("marking") }));
+				attachments = [...attachments, ...(await markedPictures(dir, get().id, deck, notes).catch(() => []))];
+				patch((t) => ({ ...t, phase: undefined }));
+			}
 			const r = await api.claudeRun({
 				turn: turn.id,
 				dir,

@@ -3,7 +3,8 @@
 // 목차
 //   SlideFrame    슬라이드 iframe 하나. 크기를 맞춰 줄이고, 다시 그릴 표식(rev)이 바뀌면 새로 읽는다
 //   Rail          쪽 목록 — 끌어서 순서 바꾸기 · Delete 로 빼기 · 끝의 + 로 빈 쪽
-//   Stage         무대 — 핀 찍기 · 직접 편집 메시지 받기 · 지난 판 미리 보기 · 휠로 쪽 넘기기
+//   Stage         무대 — 표시(핀 · 펜 · 화살표 · 상자) · 직접 편집 메시지 받기 · 지난 판 미리 보기 · 휠로 쪽 넘기기
+//   MarkLayer     표시 층 — 그어 놓은 표시를 그리고, 표시 모드에서는 긋기를 받는다 · MarkTools 도구 띠
 //   Flow          이어 보기 — 모든 쪽을 세로로 늘어놓고 스크롤로 넘긴다. 가운데 온 쪽이 지금 쪽이 된다
 //   Track         판 줄기 — 판마다 눈금, 릴리즈는 긴 눈금
 //   우클릭 메뉴   slideItems(쪽 목록 · 이어 보기) · Stage 의 무대 메뉴 · 판 눈금 메뉴 — 메뉴 틀은 ContextMenu.tsx
@@ -14,6 +15,7 @@ import { ask, onFrame } from "../lib/frames";
 import { openAny } from "../lib/flows";
 import { useT } from "../lib/i18n";
 import { useSettings } from "../lib/settings";
+import { anchor, bbox, MARK, type Shape, shapePath, tiny, type Tool } from "../lib/markup";
 import { type Pin, useDeck } from "../lib/store";
 import { type MenuItem, openMenu } from "./ContextMenu";
 import { useFileDrop } from "./Home";
@@ -78,6 +80,13 @@ function useWheelNav() {
 		acc.current = 0;
 		until.current = now + 260;
 	}, []);
+}
+
+/** 쪽을 끌 때 쪽 id 를 싣는다 — 요청칸에 놓으면 @쪽 으로 들어간다 (Talk Composer) */
+export const SLIDE_MIME = "application/x-claudeppt-slide";
+function dragSlide(e: React.DragEvent, id: string) {
+	e.dataTransfer.setData(SLIDE_MIME, id);
+	e.dataTransfer.effectAllowed = "copyMove";
 }
 
 /** 쪽 하나의 우클릭 항목 — 쪽 목록 · 이어 보기가 같이 쓴다. 빼기는 Delete 키와 같다 */
@@ -253,7 +262,7 @@ function Rail() {
 							})()}
 							{!preview && <button className="at" onClick={() => mentionSlide(i + 1)} title={`${t("mention")} (@${i + 1})`} aria-label={`${t("mention")} @${i + 1}`}>@</button>}
 						</div>
-						<button className="thumb" draggable={!preview} onDragStart={() => setDrag(i)} onDragEnd={() => { setDrag(null); setDropAt(null); }}
+						<button className="thumb" draggable={!preview} onDragStart={(e) => { setDrag(i); dragSlide(e, sl.id); }} onDragEnd={() => { setDrag(null); setDropAt(null); }}
 							onClick={() => setCurrent(i)} title={sl.title || `${i + 1}`} aria-current={i === current}>
 							<ThumbFrame file={sl.file} rev={rev[sl.id] || 0} w={deck.size.w} h={deck.size.h} revHash={preview?.hash} />
 						</button>
@@ -339,22 +348,41 @@ function Stage() {
 		else if (m.t === "remove") applyDirect(slide.id, m.path, { t: "remove" });
 	}), [slide?.id, preview]);
 
-	const onPin = (e: React.MouseEvent) => {
-		if (mode !== "pin" || preview || !slide || (e.target as Element).closest(".pinmark")) return;
-		const r = (e.currentTarget as HTMLElement).getBoundingClientRect();
-		pinAt((e.clientX - r.left) / scale, (e.clientY - r.top) / scale);
-	};
-	/** 슬라이드 (x, y) 에 핀을 꽂고 의견 칸을 연다. 그 자리 요소는 슬라이드 창에 물어 핀에 붙인다 */
-	const pinAt = async (x: number, y: number) => {
+	/** 슬라이드 (x, y) 에 핀을 꽂고 의견 칸을 연다. 표시면 그 모양도 함께. 그 자리(표시면 가운데) 요소는 슬라이드 창에 물어 붙인다 */
+	const pinAt = async (x: number, y: number, shape?: Shape) => {
 		if (!slide) return;
 		let target: Pin["target"];
+		const b = shape && bbox(shape);
 		try {
 			if (win.current) {
-				const hit: any = await ask(win.current, { t: "hit", x, y }, 1500);
+				const hit: any = await ask(win.current, { t: "hit", x: b ? (b.x0 + b.x1) / 2 : x, y: b ? (b.y0 + b.y1) / 2 : y }, 1500);
 				target = { tag: hit.tag, text: hit.text, path: hit.path };
 			}
 		} catch {}
-		setActive(addPin({ slide: slide.id, x, y, text: "", target }));
+		setActive(addPin({ slide: slide.id, x, y, text: "", target, shape }));
+	};
+	// 긋기를 마쳤다 — 거의 안 움직였으면 누른 것으로 보고 핀, 아니면 표시
+	const onMark = (s: Shape) => {
+		if (tiny(s)) return pinAt(s.pts[0], s.pts[1]);
+		const a = anchor(s);
+		pinAt(a.x, a.y, s);
+	};
+	// 표시 모드 단축키 — 1 · 2 · 3 도구, Ctrl+Z 이 쪽의 마지막 표시 지우기
+	useEffect(() => {
+		if (mode !== "pin" || preview) return;
+		const k = (e: KeyboardEvent) => {
+			if ((e.target as Element).closest?.("input, textarea, [contenteditable]")) return;
+			const st = useDeck.getState();
+			if (e.ctrlKey && e.key.toLowerCase() === "z") { undoMark(); e.preventDefault(); }
+			else if (!e.ctrlKey && !e.altKey && ["1", "2", "3"].includes(e.key)) { st.setTool((["pen", "arrow", "box"] as Tool[])[+e.key - 1]); e.preventDefault(); }
+		};
+		addEventListener("keydown", k);
+		return () => removeEventListener("keydown", k);
+	}, [mode, preview, slide?.id]);
+	const undoMark = () => {
+		const st = useDeck.getState();
+		const last = st.pins.filter((p) => p.slide === slide?.id).sort((a, b) => b.at - a.at)[0];
+		if (last) { st.removePin(last.id); setActive(null); }
 	};
 
 	// 무대 우클릭 — 슬라이드 창 안에서 누른 것은 frames.ts 가 다시 쏴 준다(__deck 에 창이 잰 자리 · 요소)
@@ -377,7 +405,7 @@ function Stage() {
 			...(mode === "edit" && hit?.path?.length ? [{ label: `${t("removeEl")} <${hit.tag}>`, kbd: "Delete", danger: true, run: () => applyDirect(slide.id, hit.path, { t: "remove" }) }] : []),
 			"-",
 			{ label: t("view"), kbd: "V", checked: mode === "view", run: () => setMode("view") },
-			{ label: t("pin"), kbd: "P", checked: mode === "pin", run: () => setMode("pin") },
+			{ label: t("mark"), kbd: "P", checked: mode === "pin", run: () => setMode("pin") },
 			{ label: t("edit"), kbd: "E", checked: mode === "edit", run: () => setMode("edit") },
 			{ label: t("flow"), kbd: "S", checked: flowOn, run: () => setFlow(!flowOn) },
 			report ? { label: t("compare"), kbd: "C", checked: st.compare, run: () => st.setCompare(!st.compare) } : { label: t("runCheck"), kbd: "C", run: () => st.check(), disabled: !!st.busy },
@@ -421,7 +449,8 @@ function Stage() {
 							<CompareLens slide={report.slides.find((x) => x.id === slide.id)!} w={deck.size.w} h={deck.size.h} scale={scale} />
 						)}
 						{!preview && !compare && (
-							<div className="overlay" onClick={onPin}>
+							<div className="overlay">
+								<MarkLayer marks={mine} w={deck.size.w} h={deck.size.h} scale={scale} drawing={mode === "pin"} active={active} onMark={onMark} />
 								{mine.map((p) => (
 									<PinMark key={p.id} pin={p} n={order.indexOf(p.id) + 1} scale={scale} flip={p.x * scale > deck.size.w * scale - 290} open={active === p.id} onOpen={() => setActive(active === p.id ? null : p.id)} onClose={() => setActive(null)} />
 								))}
@@ -430,8 +459,70 @@ function Stage() {
 					</div>
 				)}
 			</div>
+			{mode === "pin" && !preview && !compare && !flow && box.w > 0 && <MarkTools left={left} top={top} onUndo={undoMark} canUndo={mine.length > 0} />}
 			<Track />
 		</section>
+	);
+}
+
+// ── 표시 ──
+/** 그어 놓은 표시와 지금 긋는 표시. drawing 이면 누르기 · 끌기를 받는다 — 펜은 지난 길을, 화살표 · 상자는 시작점에서 지금 자리까지.
+ *  그리는 동안의 점은 이 층 안 상태로만 들고 있다 — 무대 전체를 다시 그리면 슬라이드 iframe 까지 흔들린다 */
+function MarkLayer({ marks, w, h, scale, drawing, active, onMark }: { marks: Pin[]; w: number; h: number; scale: number; drawing: boolean; active: string | null; onMark: (s: Shape) => void }) {
+	const tool = useDeck((s) => s.tool);
+	const [draft, setDraft] = useState<Shape | null>(null);
+	const at = (e: React.PointerEvent) => {
+		const r = (e.currentTarget as Element).getBoundingClientRect();
+		return [(e.clientX - r.left) / scale, (e.clientY - r.top) / scale];
+	};
+	return (
+		<svg className={"marks" + (drawing ? " drawing" : "")} data-tool={tool} width={w * scale} height={h * scale} viewBox={`0 0 ${w} ${h}`}
+			onPointerDown={drawing ? (e) => {
+				if (e.button !== 0) return;
+				e.currentTarget.setPointerCapture(e.pointerId);
+				const [x, y] = at(e);
+				setDraft({ kind: tool, pts: tool === "pen" ? [x, y] : [x, y, x, y] });
+			} : undefined}
+			onPointerMove={draft ? (e) => {
+				const [x, y] = at(e);
+				const p = draft.pts;
+				// 펜은 2px 넘게 움직였을 때만 점을 더한다 — 점이 너무 많으면 곡선이 떨린다
+				if (draft.kind === "pen") { if (Math.hypot(x - p[p.length - 2], y - p[p.length - 1]) > 2 / scale) setDraft({ ...draft, pts: [...p, x, y] }); }
+				else setDraft({ ...draft, pts: [p[0], p[1], x, y] });
+			} : undefined}
+			onPointerUp={draft ? () => { onMark(draft); setDraft(null); } : undefined}
+			onPointerCancel={() => setDraft(null)}>
+			{marks.filter((p) => p.shape).map((p) => (
+				<path key={p.id} d={shapePath(p.shape!)} className={(p.text ? "" : "draft") + (active === p.id ? " on" : "")} stroke={MARK} />
+			))}
+			{draft && !tiny(draft) && <path d={shapePath(draft)} className="live" stroke={MARK} />}
+		</svg>
+	);
+}
+
+/** 표시 도구 띠 — 슬라이드 위 가장자리 왼쪽에 붙는다. 슬라이드에서 손이 멀리 가지 않고, 옆 여백(36px)보다 넓은 위아래 여백을 쓴다 */
+function MarkTools({ left, top, onUndo, canUndo }: { left: number; top: number; onUndo: () => void; canUndo: boolean }) {
+	const t = useT();
+	const tool = useDeck((s) => s.tool);
+	const setTool = useDeck((s) => s.setTool);
+	const tools: { k: Tool; key: string; label: string; icon: React.ReactNode }[] = [
+		{ k: "pen", key: "1", label: t("toolPen"), icon: <path d="M2.5 11.5c2-4 3.5-6 5-6s.5 4 2 4 2-3 4-6" /> },
+		{ k: "arrow", key: "2", label: t("toolArrow"), icon: <path d="M3 13L13 3M7 3h6v6" /> },
+		{ k: "box", key: "3", label: t("toolBox"), icon: <rect x="2.5" y="4" width="11" height="8" rx="1" /> },
+	];
+	// 위 여백이 좁으면(창이 낮을 때) 슬라이드 안쪽 위에 겹쳐 둔다
+	return (
+		<div className="marktools" role="toolbar" aria-label={t("mark")} style={{ left, top: top > 50 ? top - 44 : top + 8 }}>
+			{tools.map((x) => (
+				<button key={x.k} aria-pressed={tool === x.k} onClick={() => setTool(x.k)} title={`${x.label} (${x.key}) — ${t("toolHint")}`} aria-label={x.label}>
+					<svg width="16" height="16" viewBox="0 0 16 16" aria-hidden>{x.icon}</svg>
+				</button>
+			))}
+			<i />
+			<button onClick={onUndo} disabled={!canUndo} title={`${t("undoMark")} (Ctrl+Z)`} aria-label={t("undoMark")}>
+				<svg width="16" height="16" viewBox="0 0 16 16" aria-hidden><path d="M5 3L2 6l3 3M2.5 6H10a3.5 3.5 0 010 7H6" /></svg>
+			</button>
+		</div>
 	);
 }
 
@@ -498,6 +589,7 @@ function Flow({ deck, revHash }: { deck: Deck; revHash?: string }) {
 						const n = pins.filter((p) => p.slide === sl.id).length;
 						return (
 							<div key={sl.id} className={"flow-item" + (i === current ? " on" : "")} style={{ top: topOf(i), left: (box.w - width) / 2, width, height }}
+								draggable={!revHash} onDragStart={(e) => dragSlide(e, sl.id)}
 								onClick={() => setCurrent(i)} onDoubleClick={() => { setCurrent(i); setFlow(false); }}
 								onContextMenu={(e) => {
 									setCurrent(i);

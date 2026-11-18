@@ -34,7 +34,7 @@ export default function TitleBar({ onSettings, settingsOpen }: { onSettings: () 
 
 	const modes: { m: Mode; k: string; label: string }[] = [
 		{ m: "view", k: "V", label: t("view") },
-		{ m: "pin", k: "P", label: t("pin") },
+		{ m: "pin", k: "P", label: t("mark") },
 		{ m: "edit", k: "E", label: t("edit") },
 	];
 

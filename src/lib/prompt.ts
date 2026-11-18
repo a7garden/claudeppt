@@ -3,6 +3,7 @@
 // 도형 · 그림 규칙은 설정에서 만들어 매번 덧붙인다 — 설정을 바꾸면 다음 턴부터 따른다.
 
 import type { Deck } from "./deck";
+import { describe, type Shape } from "./markup";
 import type { Mention } from "./mention";
 import type { Settings } from "./settings";
 
@@ -40,7 +41,7 @@ The exporter measures the rendered DOM and rebuilds it in PowerPoint:
 - Hierarchy through size and weight, not boxes around everything. Keep generous margins (≥ 64px).
 
 # Requests with pins
-A request may carry pins: comments the person placed on a slide, each with the slide id, a point (x, y in slide pixels) and the element found at that point. Address every pin; the point tells you where on the slide the comment applies.
+A request may carry pins: comments the person placed on a slide, each with the slide id, a point (x, y in slide pixels) and the element found at that point. A pin can also be a drawn mark — a freehand stroke, an arrow or a box — that shows the area or direction meant. Address every pin; the point or mark tells you where on the slide the comment applies.
 
 # Replies
 Keep the reply to 1–3 short lines: what you changed, and a question only if something is truly ambiguous. The app already shows which files changed.`;
@@ -83,7 +84,7 @@ export function systemPrompt(s: Settings, deck: Deck) {
 		.join("\n\n");
 }
 
-export interface PinNote { n: number; slide: string; slideNo: number; x: number; y: number; text: string; target?: { tag: string; text: string; path: number[] | null } }
+export interface PinNote { n: number; slide: string; slideNo: number; x: number; y: number; text: string; target?: { tag: string; text: string; path: number[] | null }; shape?: Shape }
 
 /** 한 턴의 요청문 — 사용자 글 · @쪽 멘션 · 핀 · 지금 보던 쪽.
  *  멘션 풀이는 시스템 프롬프트가 아니라 여기에 둔다 — 「설정 › Claude › 프롬프트」로 기본 프롬프트를 갈아 끼워도 빠지지 않게 */
@@ -97,10 +98,11 @@ export function turnPrompt(text: string, pins: PinNote[], current: { id: string;
 		);
 	}
 	if (pins.length) {
+		// 표시(펜 · 화살표 · 상자)는 좌표만으로는 뜻이 흐려서, 표시를 그려 넣은 쪽 그림을 첨부로 함께 준다 (markup.ts markedPictures)
 		parts.push(
-			"Pins:\n" +
+			"Pins (numbered marks the person placed on slides; coordinates are slide pixels" + (pins.some((p) => p.shape) ? ". The attached marks-*.png pictures show each slide with the marks drawn in red and numbered — Read them first" : "") + "):\n" +
 				pins
-					.map((p) => `${p.n}. slide ${p.slideNo} (slides/${p.slide}.html) at (${Math.round(p.x)}, ${Math.round(p.y)})` + (p.target ? ` on <${p.target.tag}>${p.target.text ? ` "${p.target.text}"` : ""}` : "") + `\n   ${p.text.trim() || "(no comment — look at this spot)"}`)
+					.map((p) => `${p.n}. slide ${p.slideNo} (slides/${p.slide}.html) ` + (p.shape ? describe(p.shape) : `at (${Math.round(p.x)}, ${Math.round(p.y)})`) + (p.target ? ` on <${p.target.tag}>${p.target.text ? ` "${p.target.text}"` : ""}` : "") + `\n   ${p.text.trim() || (p.shape ? "(no comment — look at what this mark shows)" : "(no comment — look at this spot)")}`)
 					.join("\n"),
 		);
 	}
