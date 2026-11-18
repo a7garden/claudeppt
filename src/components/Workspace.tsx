@@ -530,7 +530,7 @@ function StageTools({ left, top, right, onUndo, canUndo }: { left: number; top: 
 						</button>
 					</>
 				)}
-				<span className="hint">{tool === "select" ? t("selectHint") : t("toolHint")}</span>
+				<span className="hint" key={tool}>{tool === "select" ? t("selectHint") : t("toolHint")}</span>
 			</div>
 			{/* 비교 — 결과가 있으면 렌즈를 켜고 끄고, 없으면 검사를 돌린다 (C) */}
 			<button className={"stagecheck" + (compare && report ? " on" : "")} style={{ right: `calc(100% - ${right}px)`, top: y }} disabled={busy}
@@ -653,7 +653,8 @@ function PinMark({ pin, n, scale, flip, open, onOpen, onClose }: { pin: Pin; n: 
 							if (e.key === "Escape") { e.stopPropagation(); commit(); onClose(); }
 						}} />
 					<div className="row">
-						<span className="mono">{pin.target ? `<${pin.target.tag}>` : ""} {Math.round(pin.x)},{Math.round(pin.y)}</span>
+						{/* 가리킨 자리의 글 — 좌표 · 태그 이름은 Claude 에게만 간다 */}
+						<span className="at">{pin.target?.text || ""}</span>
 						<button onClick={() => { remove(pin.id); onClose(); }}>{t("delete")}</button>
 					</div>
 				</div>

@@ -75,10 +75,10 @@ export default function Home() {
 			{(working || busy) && <div className="progress-line" />}
 			<section className="home-top">
 				<div className="brief">
-					<label htmlFor="brief">{t("brief")}</label>
 					<div className="line">
 						<textarea
 							id="brief"
+							aria-label={t("brief")}
 							autoFocus
 							rows={1}
 							placeholder={t("briefHint")}
@@ -94,10 +94,10 @@ export default function Home() {
 					<button onClick={pickDeck}>{t("openDeck")}<kbd>Ctrl ⇧ O</kbd></button>
 				</div>
 			</section>
-			<section className="home-decks" aria-label={t("recent")}>
-				<div className="side-head"><span>{t("recent")}</span><span>{items.length || ""}</span></div>
+			<section className="home-decks" aria-label={t("recentDecks")}>
+				<div className="side-head">{t("recentDecks")}<span>{items.length || ""}</span></div>
 				{items.length === 0 ? (
-					<div className="decks-empty">{t("drop")}</div>
+					<div className="decks-empty">{t("decksEmpty")}</div>
 				) : (
 					<div className="decks">
 						{items.map((it) => (
