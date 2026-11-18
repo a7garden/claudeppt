@@ -5,7 +5,8 @@ export interface Commit { n: number; hash: string; short: string; date: string; 
 export interface LibItem { dir: string; deck: any; modified: number }
 export interface Tool { name: string; path: string | null; version: string }
 /** 깔린 글꼴 하나. family = 가족 이름(나라말마다) · full = 전체 이름들 · local = @font-face local() 에 쓸 영어 전체 이름 */
-export interface FontFace { file: string; family: string[]; full: string[]; local: string; bold: boolean; italic: boolean }
+/** metrics = [winAscent, winDescent, typoAscender, typoDescender, typoLineGap] (em 비율) · typo = USE_TYPO_METRICS */
+export interface FontFace { file: string; family: string[]; full: string[]; local: string; bold: boolean; italic: boolean; weight: number; metrics: number[]; typo: boolean }
 
 export const api = {
 	readText: (root: string, rel: string) => invoke<string>("fs_read_text", { root, rel }),

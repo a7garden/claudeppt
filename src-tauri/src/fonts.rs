@@ -27,6 +27,14 @@ pub struct Face {
 	local: String,
 	bold: bool,
 	italic: bool,
+	/// 굵기 (OS/2 usWeightClass) — 이 값이 600 아래인 글꼴에 「굵게」를 주면 PowerPoint 도 웹뷰도 굵기를 흉내 낸다
+	weight: u16,
+	/// 세로 지표(em 비율) — [winAscent, winDescent, typoAscender, typoDescender(양수), typoLineGap].
+	/// PowerPoint 는 win 값으로 첫 줄 기준선을 잡고, 웹뷰(DirectWrite)도 typo 표시가 없으면 win 값으로 글줄 높이를 잡는다.
+	/// 둘의 차이만큼 문단이 위아래로 어긋나므로 가져오기가 이것으로 문단 자리를 고친다
+	metrics: [f32; 5],
+	/// OS/2 fsSelection 의 USE_TYPO_METRICS — 켜져 있으면 웹뷰가 win 대신 typo 값을 쓴다
+	typo: bool,
 }
 
 fn font_dirs() -> Vec<PathBuf> {
@@ -86,12 +94,22 @@ fn faces_of(p: &Path, out: &mut Vec<Face>) -> std::io::Result<()> {
 		let h = at(base, 12)?;
 		let n = be16(&h, 4);
 		let recs = at(base + 12, n * 16)?;
-		let Some(i) = (0..n).find(|i| &recs[i * 16..i * 16 + 4] == b"name") else { continue };
-		let (off, len) = (be32(&recs, i * 16 + 8), be32(&recs, i * 16 + 12) as usize);
+		let table = |tag: &[u8]| (0..n).find(|i| &recs[i * 16..i * 16 + 4] == tag).map(|i| (be32(&recs, i * 16 + 8), be32(&recs, i * 16 + 12) as usize));
+		let Some((off, len)) = table(b"name") else { continue };
 		let t = at(off, len.min(1 << 20))?;
-		if let Some(face) = face_of_name_table(&t, p) {
-			out.push(face);
+		let Some(mut face) = face_of_name_table(&t, p) else { continue };
+		// 세로 지표 — head 의 unitsPerEm 과 OS/2 표. 없거나 짧으면 0 으로 두고, 가져오기는 그 글꼴의 자리를 고치지 않는다
+		if let (Some((ho, hl)), Some((oo, ol))) = (table(b"head"), table(b"OS/2")) {
+			if hl >= 20 && ol >= 78 {
+				let upm = be16(&at(ho, 20)?, 18).max(1) as f32;
+				let o = at(oo, 78)?;
+				let s16 = |i: usize| i16::from_be_bytes([o[i], o[i + 1]]) as f32 / upm;
+				face.weight = be16(&o, 4) as u16;
+				face.typo = be16(&o, 62) & 0x80 != 0;
+				face.metrics = [be16(&o, 74) as f32 / upm, be16(&o, 76) as f32 / upm, s16(68), -s16(70), s16(72)];
+			}
 		}
+		out.push(face);
 	}
 	Ok(())
 }
@@ -140,7 +158,7 @@ fn face_of_name_table(t: &[u8], p: &Path) -> Option<Face> {
 	full.dedup();
 	let local = pick(4).unwrap_or_else(|| format!("{} {}", pick(1).unwrap_or_default(), pick(2).unwrap_or_default()).trim().to_string());
 	// 굵게 · 기울임은 이름 2(모양)로 가린다 — PowerPoint(GDI)가 한 가족 안에서 보통 · 굵게 · 기울임을 이것으로 고른다
-	Some(Face { file: p.to_string_lossy().into(), family, full, local, bold: style.contains("bold"), italic: style.contains("italic") || style.contains("oblique") })
+	Some(Face { file: p.to_string_lossy().into(), family, full, local, bold: style.contains("bold"), italic: style.contains("italic") || style.contains("oblique"), weight: 0, metrics: [0.0; 5], typo: false })
 }
 
 fn be16(b: &[u8], i: usize) -> usize {
@@ -301,6 +319,8 @@ mod tests {
 		let mg: Vec<_> = faces.iter().filter(|f| f.family.iter().any(|n| n == "맑은 고딕")).collect();
 		assert!(mg.iter().any(|f| !f.bold && f.local == "Malgun Gothic"), "보통");
 		assert!(mg.iter().any(|f| f.bold && f.local == "Malgun Gothic Bold"), "굵게");
+		let r = mg.iter().find(|f| f.local == "Malgun Gothic").unwrap();
+		assert!((r.metrics[0] - 2229.0 / 2048.0).abs() < 1e-4 && (r.metrics[1] - 495.0 / 2048.0).abs() < 1e-4 && r.weight == 400, "세로 지표 {:?}", r.metrics);
 		for f in faces.iter().filter(|f| f.family.iter().any(|n| n.starts_with("에스코어 드림 5"))) {
 			println!("{:?} → local({}) bold={}", f.family, f.local, f.bold);
 		}

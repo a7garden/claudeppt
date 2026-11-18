@@ -3,6 +3,7 @@
 // 목차
 //   fontIndex      이 PC 에 깔린 글꼴 (Rust font_index) — 한 번 읽어 두고, 새로 깔면 다시 읽는다
 //   installedNames 내보내기가 「깔린 글꼴인가」를 가릴 때 쓰는 이름 모음 (가족 · 전체 이름, 모든 나라말)
+//   faceResolver   글꼴 이름 → 깔린 글꼴(보통 판)과 굵은 판이 있는지. 가져오기가 줄 자리 · 굵게 흉내를 PowerPoint 와 맞출 때 쓴다
 //   linkFonts      덱이 쓰는 글꼴 이름마다 깔린 글꼴을 찾아 theme.css 에 별칭(@font-face)을 쓴다. 못 찾은 이름을 돌려준다
 //   askClaude      못 찾은 글꼴을 Claude 가 웹에서 찾고(받을 주소만), 앱이 받아 깔고 다시 잇는다
 //
@@ -56,6 +57,23 @@ async function usedFonts(dir: string, deck: Deck, css: string): Promise<{ used: 
 	return { used, declared };
 }
 const esc = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+
+/** 이름으로 깔린 글꼴을 찾는다 — linkFonts 와 같은 규칙(가족 이름 먼저, 없으면 전체 이름 한 판).
+ *  regular 는 보통 판(없으면 처음 찾은 판), bold 는 진짜 굵은 판이 있는지 — 없으면 「굵게」는 흉내 굵게가 된다 */
+export async function faceResolver(): Promise<(name: string) => { regular: FontFace; bold: boolean } | null> {
+	const faces = await fontIndex();
+	const memo = new Map<string, { regular: FontFace; bold: boolean } | null>();
+	return (name) => {
+		const k = norm(name);
+		if (memo.has(k)) return memo.get(k)!;
+		const group = faces.filter((f) => f.family.some((n) => norm(n) === k));
+		const one = group.length ? null : faces.find((f) => f.full.some((n) => norm(n) === k));
+		const regular = one || group.find((f) => !f.bold && !f.italic) || group[0];
+		const r = regular ? { regular, bold: !one && group.some((f) => f.bold && !f.italic) } : null;
+		memo.set(k, r);
+		return r;
+	};
+}
 
 /** 덱이 쓰는 글꼴을 이 PC 의 글꼴로 잇는다. theme.css 의 앱 구획만 고쳐 쓰고, 바뀐 게 없으면 쓰지 않는다. 못 찾은 이름을 돌려준다. */
 export async function linkFonts(dir: string, deck: Deck): Promise<{ missing: string[]; changed: boolean }> {

@@ -12,6 +12,7 @@
 import JSZip from "jszip";
 import { api } from "./api";
 import { type Deck, FORMAT, embedFont, escapeHtml, newId, slideHtml, themeCss, writeDeck } from "./deck";
+import { faceResolver } from "./fonts";
 import type { Settings } from "./settings";
 
 type El = Element;
@@ -37,6 +38,8 @@ interface Ctx {
 	defaults: { title: TextDefaults; body: TextDefaults[]; other: TextDefaults };
 	warnings: Set<string>;
 	slideNo: number;
+	/** 글꼴 이름 → 깔린 글꼴. 못 찾으면 null — 그 글의 줄 자리 · 굵게는 웹뷰 기본대로 둔다 */
+	face: Awaited<ReturnType<typeof faceResolver>>;
 }
 /** spc = 자간(1/100 pt). 한글 PPT 는 대부분 음수 자간을 준다 — 빼면 글이 넓어져 원본과 다른 자리에서 줄이 바뀐다 */
 interface TextDefaults { size?: number; color?: string; bold?: boolean; font?: string; align?: string; spc?: number }
@@ -237,7 +240,7 @@ function textHtml(txBody: El, ctx: Ctx, inh: TextDefaults[]): { html: string; an
 	const ins = ["lIns", "tIns", "rIns", "bIns"].map((a, i) => num(bodyPr?.getAttribute(a), i % 2 ? 45720 : 91440) * ctx.k);
 	const scale = num(path(bodyPr, "a:normAutofit")?.getAttribute("fontScale"), 100000) / 100000;
 	const lst = kid(txBody, "a:lstStyle");
-	const ps: string[] = [];
+	const ps: { pst: string[]; inner: string; g: LineGeo | null; bef: number; aft: number }[] = [];
 	const autoNum: number[] = [];
 	for (const p of kids(txBody, "a:p")) {
 		const pPr = kid(p, "a:pPr");
@@ -254,6 +257,8 @@ function textHtml(txBody: El, ctx: Ctx, inh: TextDefaults[]): { html: string; an
 		const spcBef = path(pPr, "a:spcBef", "a:spcPts")?.getAttribute("val");
 		const spcAft = path(pPr, "a:spcAft", "a:spcPts")?.getAttribute("val");
 		let firstSize = base.size || 18;
+		let firstFam: string[] = [];
+		let firstName: string | null = null;
 		const runs: string[] = [];
 		for (const r of p.children) {
 			if (r.tagName === "a:br") { runs.push("<br>"); continue; }
@@ -270,13 +275,29 @@ function textHtml(txBody: El, ctx: Ctx, inh: TextDefaults[]): { html: string; an
 			const latin = fontName(path(rPr, "a:latin")?.getAttribute("typeface"), ctx);
 			const ea = fontName(path(rPr, "a:ea")?.getAttribute("typeface"), ctx);
 			const fam = [latin, ea, fontName(base.font, ctx)].filter(Boolean).map((f) => `'${f}'`);
-			const st = [`font-size:${r1(size * PT * ctx.k)}px`];
-			if (bold) st.push("font-weight:700");
+			const primary = latin || ea || fontName(base.font, ctx);
+			if (!firstFam.length) { firstFam = fam; firstName = primary; }
+			const px = size * PT * ctx.k;
+			const st = [`font-size:${r1(px)}px`];
+			let spcPx = ((rPr?.getAttribute("spc") != null ? num(rPr.getAttribute("spc")) : base.spc || 0) / 100) * PT * ctx.k;
+			if (bold) {
+				st.push("font-weight:700");
+				// 굵은 판이 없는 글꼴의 「굵게」는 PowerPoint 도 웹뷰도 흉내 낸다. 그런데 PowerPoint 는 글자마다 폭을 조금(≈0.025em) 넓히고,
+				// 큰 글자(≈31px 이상)는 획을 두껍게 하지 않는다. 웹뷰는 크기에 비례해 획을 불린다 — 그대로 두면 제목이 원본보다 뚱뚱하고 좁다.
+				// 2026.11.18 : 에스코어 드림 4 · 5 를 10~36pt 로 PowerPoint 와 견주어 정했다 (17 · 18pt 는 PowerPoint 쪽이 더 굵어 덜 맞는다)
+				const f = primary ? ctx.face(primary) : null;
+				if (f && !f.bold && f.regular.weight > 0 && f.regular.weight < 600) {
+					spcPx += 0.025 * px;
+					if (px >= 31) st.push("font-synthesis-weight:none");
+				}
+			}
 			if (italic) st.push("font-style:italic");
-			const spc = rPr?.getAttribute("spc") != null ? num(rPr.getAttribute("spc")) : base.spc || 0;
-			if (spc) st.push(`letter-spacing:${r1((spc / 100) * PT * ctx.k)}px`);
+			if (spcPx) st.push(`letter-spacing:${r1(spcPx)}px`);
 			if (u || strike) st.push(`text-decoration:${[u && "underline", strike && "line-through"].filter(Boolean).join(" ")}`);
 			if (color) st.push(`color:${color}`);
+			// 글자 강조 표시(형광펜) — 「STEP 1」 같은 이름표가 이것으로 초록 바탕을 깐다. 빼면 흰 글자가 흰 바탕에 묻힌다
+			const mark = colorOf(kid(rPr, "a:highlight"), ctx);
+			if (mark) st.push(`background-color:${mark}`);
 			if (fam.length) st.push(`font-family:${fam.join(",")},var(--font)`);
 			const sup = num(rPr?.getAttribute("baseline"));
 			if (sup) st.push(`vertical-align:${sup > 0 ? "super" : "sub"};font-size:${r1(size * 0.65 * PT * ctx.k)}px`);
@@ -287,10 +308,17 @@ function textHtml(txBody: El, ctx: Ctx, inh: TextDefaults[]): { html: string; an
 		const bu = kid(pPr, "a:buChar") || kid(lstLvl, "a:buChar");
 		const an = kid(pPr, "a:buAutoNum") || kid(lstLvl, "a:buAutoNum");
 		const none = kid(pPr, "a:buNone");
+		// 글머리의 색 · 글꼴 · 크기 — 문단 서식에 없으면 목록 서식. 빼면 회색 글머리가 글자색으로, Arial 글머리가 본문 글꼴로 그려진다
+		const buClr = colorOf(kid(pPr, "a:buClr") || kid(lstLvl, "a:buClr"), ctx);
+		let buFont = (kid(pPr, "a:buFont") || kid(lstLvl, "a:buFont"))?.getAttribute("typeface") || "";
+		const buSz = num((kid(pPr, "a:buSzPct") || kid(lstLvl, "a:buSzPct"))?.getAttribute("val"), 100000) / 100000;
 		if (!none && (bu || an) && runs.length) {
 			if (an) { autoNum[lvl] = (autoNum[lvl] || num(an.getAttribute("startAt"), 1) - 1) + 1; bullet = `${autoNum[lvl]}.`; }
 			else bullet = bu!.getAttribute("char") || "•";
-			if (bullet === "Ø" || bullet === "§" || bullet === "ü") bullet = "•";
+			// Wingdings 글머리는 그 글꼴의 그림 글자다(「ü」= ✓). 웹뷰에서 Wingdings 로 그리면 글꼴이 없을 때 「ü」가 그대로 나오므로 같은 모양의 유니코드 글자로 바꾼다
+			const wing = /wingdings/i.test(buFont) ? ({ "ü": "✓", "Ø": "➢", "§": "▪", "n": "■", "l": "●", "q": "❑", "v": "❖", "Ÿ": "•", "à": "→", "è": "➔", "ð": "➪", "o": "□" } as Record<string, string>)[bullet] : undefined;
+			if (wing) { bullet = wing; buFont = ""; }
+			else if (bullet === "Ø" || bullet === "§" || bullet === "ü") bullet = "•";
 		}
 		// 빈 문단의 높이는 문단 끝 서식(endParaRPr)의 크기다 — PowerPoint 가 빈 줄을 그 크기로 띄운다
 		if (!runs.length) {
@@ -302,12 +330,56 @@ function textHtml(txBody: El, ctx: Ctx, inh: TextDefaults[]): { html: string; an
 		// (2026.11.18 16px 글이 줄마다 29px 씩 벌어져 칸을 넘쳤다)
 		const pst = [`text-align:${align}`, `margin:0`, `padding-left:${r1(marL)}px`, `text-indent:${r1(indent)}px`, `font-size:${r1(pxSize)}px`];
 		if (lnPct) pst.push(`line-height:${num(lnPct) / 100000 * 1.2}`);
-		if (spcBef) pst.push(`margin-top:${r1(num(spcBef) / 100 * PT * ctx.k)}px`);
-		if (spcAft) pst.push(`margin-bottom:${r1(num(spcAft) / 100 * PT * ctx.k)}px`);
-		if (!runs.length) { ps.push(`<p style="${pst.join(";")};min-height:1em"></p>`); continue; }
-		ps.push(`<p style="${pst.join(";")}">${bullet ? `<span style="display:inline-block;min-width:${r1(Math.max(0, -indent))}px;font-size:${r1(pxSize)}px">${escapeHtml(bullet)}</span>` : ""}${runs.join("")}</p>`);
+		// 문단의 바탕 글꼴을 첫 조각 글꼴로 — 안 주면 덱 기본 글꼴의 위아래 높이가 줄마다 섞여 줄 거리가 조금씩 벌어진다
+		const pFam = firstFam.length ? firstFam : base.font ? [`'${fontName(base.font, ctx)}'`] : [];
+		if (pFam.length) pst.push(`font-family:${pFam.join(",")},var(--font)`);
+		const g = lineGeo(firstName || fontName(base.font, ctx), lnPct ? num(lnPct) / 100000 : 1, pxSize, ctx);
+		const bef = spcBef ? (num(spcBef) / 100) * PT * ctx.k : 0, aft = spcAft ? (num(spcAft) / 100) * PT * ctx.k : 0;
+		if (!runs.length) { pst.push("min-height:1em"); ps.push({ pst, inner: "", g, bef, aft }); continue; }
+		// 줄 높이 0 — 글머리 글꼴(Arial 등)의 위아래 높이가 본문 글꼴과 달라 줄마다 1~2px 씩 벌어지는 것을 막는다. PowerPoint 는 글머리로 줄 높이를 바꾸지 않는다
+		const buSt = [`display:inline-block`, `line-height:0`, `min-width:${r1(Math.max(0, -indent))}px`, `font-size:${r1(pxSize * buSz)}px`, `text-indent:0`];
+		if (buClr) buSt.push(`color:${buClr}`);
+		if (buFont && !buFont.startsWith("+")) buSt.push(`font-family:'${buFont}',var(--font)`);
+		ps.push({ pst, inner: `${bullet ? `<span style="${buSt.join(";")}">${escapeHtml(bullet)}</span>` : ""}${runs.join("")}`, g, bef, aft });
 	}
-	return { html: ps.join(""), anchor, ins };
+	// 줄 자리를 PowerPoint 에 맞춘다 (lineGeo) — 첫 문단 위 · 문단 사이 · 마지막 문단 아래 여백만 고친다. 한 문단 안의 줄 거리는 둘이 같다.
+	// 여백(레이아웃)으로 고쳐야 글 덩어리 높이도 같아져, 가운데 · 아래 맞춤 글상자에서도 자리가 맞는다
+	const html = ps.map((p, k) => {
+		const prev = ps[k - 1];
+		let top = p.bef, bottom = p.aft;
+		if (p.g && k === 0) top += p.g.ppt - p.g.web;
+		if (p.g && prev?.g) top += p.g.pitch - (prev.g.pitch - prev.g.web) - p.g.web;
+		if (p.g && k === ps.length - 1) bottom += p.g.below - (p.g.pitch - p.g.web);
+		if (Math.abs(top) >= 0.1) p.pst.push(`margin-top:${r1(top)}px`);
+		if (Math.abs(bottom) >= 0.1) p.pst.push(`margin-bottom:${r1(bottom)}px`);
+		return `<p style="${p.pst.join(";")}">${p.inner}</p>`;
+	});
+	return { html: html.join(""), anchor, ins };
+}
+
+/** 한 문단의 줄 자리(px). pitch = 줄 거리, web = 웹뷰가 줄 안에 두는 기준선, ppt = PowerPoint 가 글상자 첫 줄에 두는 기준선,
+ *  below = PowerPoint 가 마지막 줄 기준선 아래에 두는 높이.
+ *
+ *  줄 거리는 둘 다 「줄 간격 × 1.2em」으로 같다. 다른 것은 기준선을 어디에 두느냐다.
+ *  - 웹뷰: 남는 줄 높이를 글자 위아래로 반씩 나눈다. 글자 높이는 글꼴의 win(또는 typo) 위 · 아래 높이를 px 로 반올림한 값이다
+ *  - PowerPoint (2026.11.18 에스코어 드림 4 · 5 · 맑은 고딕 · 페이퍼로지 를 줄 간격 70~200% · 위/가운데/아래 맞춤으로 그려 잰 값):
+ *      첫 줄 기준선  100%  : 1.2em × win 위 / (win 위 + win 아래)    — 글꼴마다 다르다
+ *                   > 100%: 0.907em × 줄 간격                        — 글꼴과 상관없다
+ *                   < 100%: 100% 자리에서 1.14em × 줄인 몫만큼 올린다. 단 0.907em × 줄 간격 보다 위로는 안 간다
+ *      다음 줄       앞 기준선 + 줄 거리
+ *      마지막 줄 아래: 1.2em − 100% 의 첫 줄 기준선                  — 줄 간격과 상관없다
+ *  글꼴을 못 찾았으면(지표가 없으면) null — 웹뷰 기본대로 둔다 */
+interface LineGeo { pitch: number; web: number; ppt: number; below: number }
+function lineGeo(name: string | null, pct: number, px: number, ctx: Ctx): LineGeo | null {
+	const f = name ? ctx.face(name)?.regular : null;
+	if (!f || !(f.metrics[0] > 0)) return null;
+	const [wa, wd, ta, td] = f.metrics;
+	const b1 = (1.2 * wa) / (wa + wd);
+	const ppt = (pct === 1 ? b1 : pct > 1 ? 0.907 * pct : Math.max(0.907 * pct, b1 - 1.14 * (1 - pct))) * px;
+	const [ca, cd] = f.typo ? [ta, td] : [wa, wd];
+	const a = Math.round(ca * px), d = Math.round(cd * px);
+	const pitch = 1.2 * pct * px;
+	return { pitch, web: (pitch - (a + d)) / 2 + a, ppt, below: (1.2 - b1) * px };
 }
 
 // ── 도형 그림 (사각형 · 둥근 사각형 · 타원 밖의 프리셋) ──
@@ -357,6 +429,33 @@ async function mediaPath(ctx: Ctx, zipPath: string): Promise<string | null> {
 	await api.writeBytes(ctx.dir, rel, await f.async("uint8array"));
 	ctx.media.set(zipPath, "../" + rel);
 	return "../" + rel;
+}
+
+/** 「투명한 색 설정」(a:clrChange) — 그 색의 점을 투명하게 한 그림을 따로 쓴다. 빼면 흰 바탕 그림이 뒤의 도형 · 그림을 가린다.
+ *  PowerPoint 도 딱 그 색만이 아니라 아주 가까운 색까지 지운다 — JPEG 의 흰 바탕은 255 가 아닌 점이 섞여 있다 */
+async function keyedOut(ctx: Ctx, zipPath: string, src: string, from: string | null): Promise<string | null> {
+	if (!from || !/^#[0-9a-f]{6}$/i.test(from)) return null;
+	const key = `${zipPath}#${from}`;
+	if (ctx.media.has(key)) return ctx.media.get(key)!;
+	try {
+		const bytes = await ctx.zip.file(zipPath)!.async("uint8array");
+		const bmp = await createImageBitmap(new Blob([bytes as BlobPart]));
+		const c = new OffscreenCanvas(bmp.width, bmp.height);
+		const g = c.getContext("2d")!;
+		g.drawImage(bmp, 0, 0);
+		const im = g.getImageData(0, 0, bmp.width, bmp.height), d = im.data;
+		const [r, gg, b] = [1, 3, 5].map((i) => parseInt(from.slice(i, i + 2), 16));
+		const TOL = 6;
+		for (let i = 0; i < d.length; i += 4) if (Math.abs(d[i] - r) <= TOL && Math.abs(d[i + 1] - gg) <= TOL && Math.abs(d[i + 2] - b) <= TOL) d[i + 3] = 0;
+		g.putImageData(im, 0, 0);
+		const png = new Uint8Array(await (await c.convertToBlob({ type: "image/png" })).arrayBuffer());
+		const rel = `assets/${src.split("/").pop()!.replace(/\.[^.]+$/, "")}-key${from.slice(1).toLowerCase()}.png`;
+		await api.writeBytes(ctx.dir, rel, png);
+		ctx.media.set(key, "../" + rel);
+		return "../" + rel;
+	} catch {
+		return null;
+	}
 }
 
 // ── 도형 하나 → HTML ──
@@ -424,8 +523,10 @@ async function shapeHtml(el: El, ctx: Ctx, rel: Record<string, string>, tx: Tx, 
 		const blip = path(el, "p:blipFill", "a:blip");
 		const svgBlip = blip?.getElementsByTagName("asvg:svgBlip")[0];
 		const rid = svgBlip?.getAttribute("r:embed") || blip?.getAttribute("r:embed");
-		const src = rid && rel[rid] ? await mediaPath(ctx, rel[rid]) : null;
+		let src = rid && rel[rid] ? await mediaPath(ctx, rel[rid]) : null;
 		if (!src) return `<div style="${posCss(box)};border:1px dashed #b9b9b9"></div>`;
+		const change = kid(blip, "a:clrChange");
+		if (change && !svgBlip) src = (await keyedOut(ctx, rel[rid!], src, colorOf(kid(change, "a:clrFrom"), ctx))) || src;
 		const crop = path(el, "p:blipFill", "a:srcRect");
 		let img = `<img src="${src}" alt="" style="${posCss(box)};object-fit:fill">`;
 		if (crop && ["l", "t", "r", "b"].some((a) => crop.getAttribute(a))) {
@@ -460,8 +561,24 @@ async function shapeHtml(el: El, ctx: Ctx, rel: Record<string, string>, tx: Tx, 
 					const tb = kid(tc, "a:txBody");
 					const t = tb ? textHtml(tb, ctx, [{ size: 14, color: "#000000" }]).html : "";
 					const span = [tc.getAttribute("gridSpan") ? ` colspan="${tc.getAttribute("gridSpan")}"` : "", tc.getAttribute("rowSpan") ? ` rowspan="${tc.getAttribute("rowSpan")}"` : ""].join("");
+					// 칸 여백 · 세로 맞춤 · 테두리는 원본 칸 서식대로 — 여백을 어림값으로 두면 행 높이가 칸마다 1~2px 씩 어긋나 표 아래쪽이 크게 밀린다.
+					// 여백 기본값은 OOXML 기본(좌우 0.1인치 · 위아래 0.05인치), 세로 맞춤 기본은 위. 칸에 선이 없으면 표 서식 대신 옅은 회색 선을 둔다
+					const va = ({ ctr: "middle", b: "bottom" } as Record<string, string>)[tcPr?.getAttribute("anchor") || ""] || "top";
+					const edge = (n: string): [string, number] => {
+						const ln = kid(tcPr, n);
+						if (!ln) return ["1px solid #c8c8c8", 1];
+						if (kid(ln, "a:noFill")) return ["none", 0];
+						const c = colorOf(kid(ln, "a:solidFill"), ctx), w = r1(num(ln.getAttribute("w"), 12700) * ctx.k);
+						return c ? [`${w}px solid ${c}`, w] : ["1px solid #c8c8c8", 1];
+					};
+					const [eL, eR, eT, eB] = ["a:lnL", "a:lnR", "a:lnT", "a:lnB"].map(edge);
+					const border = `border-left:${eL[0]};border-right:${eR[0]};border-top:${eT[0]};border-bottom:${eB[0]}`;
+					// PowerPoint 는 칸 선을 경계 위에 그릴 뿐 행 높이에 넣지 않는다. 웹(border-collapse)은 선 두께 절반씩을 칸 크기에 넣으므로
+					// 그만큼 여백에서 뺀다 — 안 빼면 행마다 선 두께만큼 길어져 표 아래쪽이 10px 넘게 밀린다 (2026.11.18 9쪽 표)
+					const mar = (a: string, d: number, e: [string, number]) => r1(Math.max(0, num(tcPr?.getAttribute(a), d) * ctx.k - e[1] / 2));
 					// 줄 간격 1.2 = PowerPoint 의 「한 줄」. 안 주면 덱 기본(.slide 1.45)을 물려받아 칸 글이 넘친다
-					return `<td${span} style="border:1px solid #c8c8c8;padding:4px 8px;vertical-align:middle;line-height:1.2${f && f !== "none" ? `;background:${f}` : ""}">${t}</td>`;
+					// 문단을 flex 세로 줄에 담는다 — 칸(블록) 안에서는 문단 사이 여백이 겹쳐(collapse) 줄 자리 고침(lineGeo)이 먹지 않는다
+					return `<td${span} style="${border};padding:${mar("marT", 45720, eT)}px ${mar("marR", 91440, eR)}px ${mar("marB", 45720, eB)}px ${mar("marL", 91440, eL)}px;vertical-align:${va};line-height:1.2${f && f !== "none" ? `;background:${f}` : ""}"><div style="display:flex;flex-direction:column">${t}</div></td>`;
 				});
 				return `<tr style="height:${r1(h)}px">${cells.join("")}</tr>`;
 			});
@@ -529,6 +646,7 @@ export async function importPptx(bytes: Uint8Array, src: string, dir: string, ti
 	const warnings = new Set<string>();
 	const media = new Map<string, string>();
 	let themeFont = "";
+	const face = await faceResolver();
 
 	for (let i = 0; i < order.length; i++) {
 		progress(i, order.length);
@@ -551,7 +669,7 @@ export async function importPptx(bytes: Uint8Array, src: string, dir: string, ti
 		for (const a of cm?.attributes || []) clrMap[a.name] = a.value;
 		const ovr = slide.getElementsByTagName("a:overrideClrMapping")[0];
 		for (const a of ovr?.attributes || []) clrMap[a.name] = a.value;
-		const ctx: Ctx = { zip, k, theme, clrMap, dir, media, defaults: { title: {}, body: [], other: {} }, warnings, slideNo: i + 1 };
+		const ctx: Ctx = { zip, k, theme, clrMap, dir, media, defaults: { title: {}, body: [], other: {} }, warnings, slideNo: i + 1, face };
 
 		const txStyles = master?.getElementsByTagName("p:txStyles")[0];
 		const lvls = (st: El | null) => Array.from({ length: 9 }, (_, n) => textDefaultsOf(kid(st, `a:lvl${n + 1}pPr`), ctx));
@@ -584,9 +702,12 @@ export async function importPptx(bytes: Uint8Array, src: string, dir: string, ti
 			const src = rr[bg.blip] ? await mediaPath(ctx, rr[bg.blip]) : null;
 			if (src) bgCss = `url('${src}') center/cover no-repeat`;
 		}
-		const showMaster = slide.documentElement.getAttribute("showMasterSp") !== "0" && layout?.documentElement.getAttribute("showMasterSp") !== "0";
+		// 쪽의 showMasterSp="0" 은 레이아웃 · 마스터 도형을 모두 숨기고, 레이아웃의 showMasterSp="0" 은 마스터 도형만 숨긴다.
+		// 쪽 쪽 값을 마스터에만 걸면 숨겨 둔 레이아웃 그림이 웹에만 깔린다 (2026.11.18)
+		const showLayout = slide.documentElement.getAttribute("showMasterSp") !== "0";
+		const showMaster = showLayout && layout?.documentElement.getAttribute("showMasterSp") !== "0";
 		if (showMaster && masterTree) for (const c of masterTree.children) parts.push(await shapeHtml(c, ctx, mRel, (b) => b, layer, false));
-		if (layoutTree) for (const c of layoutTree.children) parts.push(await shapeHtml(c, ctx, lRel, (b) => b, layer, false));
+		if (showLayout && layoutTree) for (const c of layoutTree.children) parts.push(await shapeHtml(c, ctx, lRel, (b) => b, layer, false));
 		const sTree = tree(slide);
 		for (const c of sTree?.children || []) parts.push(await shapeHtml(c, ctx, sRel, (b) => b, layer, true));
 

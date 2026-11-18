@@ -55,6 +55,7 @@ function toRuns(runs: any[], f: FontCtx) {
 				options: {
 					fontSize: PT(r.size), bold: fc.bold, italic: r.italic, color: r.color, fontFace: fc.face,
 					charSpacing: r.spacing ? PT(r.spacing) : undefined,
+					highlight: r.highlight || undefined,
 					underline: r.underline ? { style: "sng" } : undefined, strike: r.strike ? "sngStrike" : undefined,
 					transparency: r.alpha != null && r.alpha < 1 ? Math.round((1 - r.alpha) * 100) : undefined,
 					breakLine: !!next?.br,
@@ -148,7 +149,10 @@ export async function buildPptx(deck: Deck, projectId: string, progress: (i: num
 						fill: c.fill ? { color: c.fill } : undefined, align: c.align === "center" ? "center" : c.align === "right" ? "right" : "left",
 						colspan: c.colspan > 1 ? c.colspan : undefined, rowspan: c.rowspan > 1 ? c.rowspan : undefined,
 						border: c.border && c.bw ? [{ type: "solid", pt: PT(c.bw), color: c.border }, { type: "solid", pt: PT(c.bw), color: c.border }, { type: "solid", pt: PT(c.bw), color: c.border }, { type: "solid", pt: PT(c.bw), color: c.border }] : undefined,
-						margin: c.pad ? c.pad.map((v: number) => PT(v)) : 3,
+						// pptxgenjs 는 윗여백이 1 보다 작으면 네 값을 모두 인치로, 아니면 pt 로 읽는다 — 윗여백이 1pt 아래인 칸(원본 여백 0)에서
+						// 나머지 4pt 가 4인치가 되어 표가 무너졌다 (2026.11.18). 그래서 윗여백에 맞춰 단위를 골라 넘긴다
+						// 웹 칸 크기에는 테두리 두께 절반이 들어 있고 PowerPoint 칸에는 없다 — 그 절반을 여백에 돌려 줘야 행 높이 · 글 자리가 같다
+						margin: c.pad ? ((pad: number[]) => (IN(pad[0]) < 1 ? pad.map(IN) : pad.map(PT)))(c.pad.map((v: number) => v + (c.bw || 0) / 2)) : 3,
 					},
 				})));
 				slide.addTable(rows, { x: IN(it.x), y: IN(it.y), w: IN(it.w), colW: it.colW.map(IN), rowH: it.rowH.map(IN) } as any);

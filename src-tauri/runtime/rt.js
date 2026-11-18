@@ -368,6 +368,8 @@
 						spacing: parseFloat(s.letterSpacing) || 0,
 						underline: s.textDecorationLine.includes("underline"), strike: s.textDecorationLine.includes("line-through"),
 						color: c ? c.hex : "000000", alpha: c ? c.alpha : 1, font: fontOf(s),
+						// 글 조각(인라인)의 바탕색 = PowerPoint 의 글자 강조 표시. 문단 · 상자 바탕은 상자가 따로 그린다
+						highlight: s.display.startsWith("inline") && n.parentElement !== el ? color(s.backgroundColor)?.hex || null : null,
 					};
 					let start = 0, soft = false;
 					for (let i = 0; i < raw.length; i++) {
@@ -412,6 +414,18 @@
 		if (rs.backgroundImage !== "none" || pseudoOn(root, "::before") || pseudoOn(root, "::after")) {
 			try { items.push({ type: "image", x: 0, y: 0, w: S.width, h: S.height, data: await bake(root, { x: 0, y: 0, w: S.width, h: S.height }, false) }); } catch {}
 		}
+		// 조상이 넘친 부분을 자르면(overflow) 굽는 상자도 그만큼 줄인다 — 잘라 쓴 그림(PPT 의 그림 자르기)이 PPTX 에서 원본 크기로 튀어나왔다 (2026.11.18)
+		const clipped = (el, box) => {
+			let x0 = box.x, y0 = box.y, x1 = box.x + box.w, y1 = box.y + box.h;
+			for (let a = el.parentElement; a && a !== root && a !== document.body; a = a.parentElement) {
+				const o = css(a);
+				if (o.overflowX === "visible" && o.overflowY === "visible") continue;
+				const c = R(a.getBoundingClientRect());
+				if (o.overflowX !== "visible") { x0 = Math.max(x0, c.x); x1 = Math.min(x1, c.x + c.w); }
+				if (o.overflowY !== "visible") { y0 = Math.max(y0, c.y); y1 = Math.min(y1, c.y + c.h); }
+			}
+			return x1 - x0 < 0.5 || y1 - y0 < 0.5 ? null : { x: x0, y: y0, w: x1 - x0, h: y1 - y0 };
+		};
 		const visit = async (el) => {
 			for (const ch of el.children) {
 				if (!(ch instanceof Element) || ch.tagName === "SCRIPT" || ch.tagName === "STYLE" || !visible(ch)) continue;
@@ -419,7 +433,8 @@
 				if (r.w < 0.5 || r.h < 0.5) continue;
 				// 통째로 굽기 — 그 요소와 자식이 한 장의 그림이 된다
 				if (needsDeep(ch, s)) {
-					const pad = overflowOf(s), box = { x: r.x - pad, y: r.y - pad, w: r.w + pad * 2, h: r.h + pad * 2 };
+					const pad = overflowOf(s), box = clipped(ch, { x: r.x - pad, y: r.y - pad, w: r.w + pad * 2, h: r.h + pad * 2 });
+					if (!box) continue;
 					try { items.push({ type: "image", ...box, data: await bake(ch, box, true), alt: ch.getAttribute("alt") || "" }); } catch (e) { fails.push(`${ch.tagName} ${String(e)}`); }
 					continue;
 				}
@@ -460,7 +475,10 @@
 						const pa = blocks[0] ? css(blocks[0]).textAlign : cs.textAlign;
 						return { runs, text: td.innerText.trim(), size: parseFloat(cs.fontSize), bold: +cs.fontWeight >= 600, color: c ? c.hex : "000000", fill: b ? b.hex : null, align: pa, valign: va, font: fontOf(cs), colspan: td.colSpan, rowspan: td.rowSpan, border: color(cs.borderBottomColor)?.hex || null, bw: parseFloat(cs.borderBottomWidth) || 0, pad: [cs.paddingTop, cs.paddingRight, cs.paddingBottom, cs.paddingLeft].map(parseFloat) };
 					}));
-					const colW = [...(ch.rows[0]?.cells || [])].map((td) => td.getBoundingClientRect().width);
+					// 열 너비는 모든 칸의 좌우 경계에서 구한다 — 첫 행에 합친 칸(colspan)이 있으면 첫 행 칸 수가 열 수보다 적어 열이 통째로 밀린다 (2026.11.18)
+					const edges = [...new Set([...ch.rows].flatMap((tr) => [...tr.cells].flatMap((td) => { const b = td.getBoundingClientRect(); return [Math.round(b.left * 2) / 2, Math.round(b.right * 2) / 2]; })))].sort((x, y) => x - y)
+						.filter((x, i, a) => i === 0 || x - a[i - 1] > 2);
+					const colW = edges.slice(1).map((x, i) => x - edges[i]);
 					const rowH = [...ch.rows].map((tr) => tr.getBoundingClientRect().height);
 					items.push({ type: "table", ...r, rows, colW, rowH });
 					continue;
