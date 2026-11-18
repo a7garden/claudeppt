@@ -39,6 +39,8 @@ export const api = {
 	toolsDetect: () => invoke<Tool[]>("tools_detect"),
 	imageGenerate: (spec: { provider: string; prompt: string; out: string; apiKey?: string; model?: string; size?: string }) => invoke<string>("image_generate", { spec }),
 	fonts: () => invoke<string[]>("fonts_list"),
+	/** 글꼴의 한글 등 다른 이름 → 웹뷰가 알아보는 영어 이름 */
+	fontAliases: () => invoke<Record<string, string>>("font_aliases"),
 	pptSnapshot: (pptx: string, outDir: string, width = 1280, height = 720) => invoke<number>("ppt_snapshot", { pptx, outDir, width, height }),
 };
 

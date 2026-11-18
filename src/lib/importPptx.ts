@@ -220,12 +220,17 @@ function textDefaultsOf(lvl: El | null, ctx: Ctx): TextDefaults {
 
 function fontName(f: string | undefined | null, ctx: Ctx) {
 	if (!f) return null;
-	if (f === "+mj-lt") return ctx.theme.major;
-	if (f === "+mn-lt") return ctx.theme.minor;
-	if (f === "+mj-ea") return ctx.theme.majorEa || ctx.theme.major;
-	if (f === "+mn-ea") return ctx.theme.minorEa || ctx.theme.minor;
-	return f;
+	if (f === "+mj-lt") f = ctx.theme.major;
+	else if (f === "+mn-lt") f = ctx.theme.minor;
+	else if (f === "+mj-ea") f = ctx.theme.majorEa || ctx.theme.major;
+	else if (f === "+mn-ea") f = ctx.theme.minorEa || ctx.theme.minor;
+	return f ? webFont(f) : null;
 }
+
+// 웹뷰는 글꼴의 한글 이름(「에스코어 드림 5 Medium」)을 못 알아보고 영어 이름(「S-Core Dream 5 Medium」)만 알아본다.
+// PowerPoint 는 한글 이름으로 저장하므로, 그대로 두면 그 글꼴을 쓴 글이 모두 기본 글꼴로 보인다. 가져오기 시작 때 한 번 읽는다.
+let aliases: Record<string, string> = {};
+const webFont = (f: string) => aliases[f] || f;
 
 function textHtml(txBody: El, ctx: Ctx, inh: TextDefaults[]): { html: string; anchor: string; ins: number[] } {
 	const bodyPr = kid(txBody, "a:bodyPr");
@@ -508,6 +513,7 @@ export async function importPptx(bytes: Uint8Array, src: string, dir: string, ti
 	const presRels = await rels(zip, "ppt/presentation.xml");
 	const order = [...pres.getElementsByTagName("p:sldId")].map((e) => presRels[e.getAttribute("r:id")!]).filter(Boolean);
 
+	aliases = await api.fontAliases().catch(() => ({}));
 	await api.vcsInit(dir);
 	await embedFont(dir);
 	const deck: Deck = { format: FORMAT, title, size: { w: W, h: H }, slides: [], theme: "theme.css", source: { kind: "pptx", file: "source/original.pptx" }, created: new Date().toISOString(), updated: new Date().toISOString() };
@@ -531,7 +537,7 @@ export async function importPptx(bytes: Uint8Array, src: string, dir: string, ti
 		const master = masterPath ? await xml(zip, masterPath) : null;
 		const mRel = masterPath ? await rels(zip, masterPath) : {};
 		const theme = masterPath ? await readTheme(zip, masterPath) : { colors: {}, major: "", minor: "", majorEa: "", minorEa: "" };
-		themeFont ||= theme.minorEa || theme.minor;
+		themeFont ||= webFont(theme.minorEa || theme.minor);
 		const cm = master?.getElementsByTagName("p:clrMap")[0];
 		const clrMap: Record<string, string> = {};
 		for (const a of cm?.attributes || []) clrMap[a.name] = a.value;

@@ -73,6 +73,7 @@ pub fn run() {
 			imagegen::image_generate,
 			pptsnap::ppt_snapshot,
 			fonts::fonts_list,
+			fonts::font_aliases,
 		])
 		.run(tauri::generate_context!())
 		.expect("앱을 띄우지 못했다");
