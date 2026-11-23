@@ -43,6 +43,9 @@ The exporter measures the rendered DOM and rebuilds it in PowerPoint:
 # Requests with pins
 A request may carry pins: comments the person placed on a slide, each with the slide id, a point (x, y in slide pixels) and the element found at that point. A pin can also be a drawn mark — a freehand stroke, an arrow or a box — that shows the area or direction meant. Address every pin; the point or mark tells you where on the slide the comment applies.
 
+# Sketches
+A request may attach a sketch picture (.claudeppt/attach/sketch-*.png): a rough drawing in blue ink, either over a faded picture of the slide or on blank paper. Read it before editing. Boxes are regions (cards, images, panels), lines are dividers or lines of text, and handwritten words are the intended content or labels. Follow the arrangement, order and rough proportions; ignore wobbly lines and keep the deck's own style and type. If the drawing is ambiguous, make the most plausible reading and say in one line how you read it.
+
 # Replies
 Keep the reply to 1–3 short lines: what you changed, and a question only if something is truly ambiguous. The app already shows which files changed.`;
 

@@ -6,7 +6,8 @@ import { useSettings } from "./settings";
 import { useDeck } from "./store";
 import { tNow } from "./i18n";
 
-async function freeDir(name: string) {
+/** 서재 안에서 아직 없는 폴더 이름 — 같은 이름이 있으면 뒤에 번호를 붙인다 */
+export async function freeDir(name: string) {
 	const lib = useSettings.getState().s.library;
 	let n = safeName(name), i = 2;
 	const base = n;
@@ -28,22 +29,41 @@ export async function startNew(brief: string) {
 	if (brief.trim()) useDeck.getState().send(brief.trim());
 }
 
+/** PPTX 하나를 서재에 새 덱으로 들인다 — 첫 판을 남기고, PowerPoint 가 있으면 원본 쪽 그림을 뒤에서 뽑는다.
+ *  화면의 가져오기(importFile)와 바깥 CLI(remote.ts)가 함께 쓴다. 덱을 열지는 않는다 */
+export async function importDeck(path: string, step: (i: number, n: number) => void) {
+	const name = path.split(/[\\/]/).pop()!.replace(/\.pptx$/i, "");
+	const dir = await freeDir(name);
+	const bytes = new Uint8Array(await api.absReadBytes(path));
+	const { deck, warnings } = await importPptx(bytes, path, dir, name, useSettings.getState().s, step);
+	// 첫 판은 여기서 남긴다 — 바로 열지 않으면 openProject 의 첫 판 남기기가 늦어져, 아래 「원본 쪽 그림」이 첫 판 이름을 가져간다
+	await api.commit(dir, "PPTX 를 가져온다");
+	// 원본 쪽 그림 — PowerPoint 가 있으면 뒤에서 뽑는다. 없으면 조용히 넘어간다
+	api.pptSnapshot(join(dir, "source", "original.pptx"), join(dir, "source", "pages"), deck.size.w, deck.size.h).then(async (pages) => {
+		if (!pages) return;
+		// Claude 턴이 도는 중이면 끝나기를 기다린다 — 반쯤 고친 파일이 「원본 쪽 그림」 판에 섞이고 deck.json 을 덮어쓰지 않게
+		while (useDeck.getState().running) await new Promise((r) => setTimeout(r, 1000));
+		const d = await readDeck(dir);
+		d.source = { ...(d.source || { kind: "pptx" }), pages };
+		await writeDeck(dir, d);
+		await api.commit(dir, "원본 쪽 그림을 남긴다");
+		if (useDeck.getState().dir === dir) useDeck.getState().refreshVersions();
+	}, () => {});
+	return { dir, name, deck, warnings };
+}
+
 /** PPTX 가져오기는 화면을 막지 않는다 — 오른쪽 아래 작은 진행 막대(jobs)만 띄우고, 그동안 다른 프로젝트를 보거나 고칠 수 있다.
  *  끝났을 때 아무 프로젝트도 열려 있지 않으면 바로 열고, 무언가 작업 중이면 화면을 빼앗지 않고 알림의 「열기」로 둔다. */
 export async function importFile(path: string) {
 	const st = useDeck.getState();
 	const name = path.split(/[\\/]/).pop()!.replace(/\.pptx$/i, "");
-	const dir = await freeDir(name);
 	const id = "imp" + Date.now().toString(36);
 	const step = (i: number, n: number) => useDeck.setState((s) => ({
 		jobs: s.jobs.some((j) => j.id === id) ? s.jobs.map((j) => (j.id === id ? { ...j, i, n } : j)) : [...s.jobs, { id, label: name, i, n }],
 	}));
 	step(0, 0);
 	try {
-		const bytes = new Uint8Array(await api.absReadBytes(path));
-		const { deck: imported, warnings } = await importPptx(bytes, path, dir, name, useSettings.getState().s, step);
-		// 첫 판은 여기서 남긴다 — 바로 열지 않으면 openProject 의 첫 판 남기기가 늦어져, 아래 「원본 쪽 그림」이 첫 판 이름을 가져간다
-		await api.commit(dir, "PPTX 를 가져온다");
+		const { dir, warnings } = await importDeck(path, step);
 		const ko = useSettings.getState().s.lang === "ko";
 		const names: Record<string, [string, string]> = { emf: ["EMF 그림", "EMF images"], chart: ["차트", "charts"], object: ["개체", "objects"], custGeom: ["자유형 도형", "freeform shapes"] };
 		const differ = warnings.length ? (ko ? "원본과 다를 수 있음 — " : "May differ from original — ") + warnings.map((w) => names[w]?.[ko ? 0 : 1] || w).join(" · ") : "";
@@ -53,17 +73,6 @@ export async function importFile(path: string) {
 		} else {
 			st.notify(`${name} · ${tNow("imported")}${differ ? " · " + differ : ""}`, "ok", { action: { label: tNow("open"), run: () => useDeck.getState().openProject(dir) } });
 		}
-		// 원본 쪽 그림 — PowerPoint 가 있으면 뒤에서 뽑는다. 없으면 조용히 넘어간다
-		api.pptSnapshot(join(dir, "source", "original.pptx"), join(dir, "source", "pages"), imported.size.w, imported.size.h).then(async (pages) => {
-			if (!pages) return;
-			// Claude 턴이 도는 중이면 끝나기를 기다린다 — 반쯤 고친 파일이 「원본 쪽 그림」 판에 섞이고 deck.json 을 덮어쓰지 않게
-			while (useDeck.getState().running) await new Promise((r) => setTimeout(r, 1000));
-			const deck = await readDeck(dir);
-			deck.source = { ...(deck.source || { kind: "pptx" }), pages };
-			await writeDeck(dir, deck);
-			await api.commit(dir, "원본 쪽 그림을 남긴다");
-			useDeck.getState().refreshVersions();
-		}, () => {});
 	} catch (e) {
 		st.notify(`${name} · ${String(e)}`, "err");
 	} finally {

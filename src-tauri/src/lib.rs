@@ -4,11 +4,15 @@
 //   AppState            열린 프로젝트(id → 폴더) · 감시기 · 실행 중인 Claude
 //   deck:// 프로토콜     슬라이드 HTML 에 런타임(rt.js)을 끼워 내준다 · <id>@<커밋> 이면 그 판의 파일을 git 에서 꺼낸다
 //   명령                 fs · project · vcs · claude · image · ppt 모듈에 있다
+//   바깥 제어            control.rs — 앱 밖 Claude Code 가 CLI(cli.rs · 같은 실행 파일에 인자를 주어 부른다)로 앱을 부리는 통로
 
+pub mod cli;
 mod claude;
+mod control;
 mod fonts;
 mod fsx;
 mod imagegen;
+mod metafile;
 mod project;
 mod pptsnap;
 mod vcs;
@@ -39,6 +43,14 @@ pub fn run() {
 		.plugin(tauri_plugin_updater::Builder::new().build())
 		.plugin(tauri_plugin_process::init())
 		.manage(AppState::default())
+		.manage(control::Control::new())
+		.setup(|app| {
+			// 통로를 못 열어도 앱은 그대로 쓴다 — 바깥 제어만 안 된다
+			if let Err(e) = control::start(app.handle()) {
+				eprintln!("제어 통로를 열지 못했다: {e}");
+			}
+			Ok(())
+		})
 		.register_asynchronous_uri_scheme_protocol("deck", |ctx, req, responder| {
 			let app = ctx.app_handle().clone();
 			std::thread::spawn(move || responder.respond(serve(&app, req.uri().path())));
@@ -73,11 +85,22 @@ pub fn run() {
 			imagegen::tools_detect,
 			imagegen::image_generate,
 			pptsnap::ppt_snapshot,
+			metafile::metafile_png,
 			fonts::font_index,
 			fonts::font_install,
+			control::remote_ready,
+			control::remote_reply,
+			control::remote_info,
+			control::remote_set_enabled,
+			control::skill_install,
 		])
-		.run(tauri::generate_context!())
-		.expect("앱을 띄우지 못했다");
+		.build(tauri::generate_context!())
+		.expect("앱을 띄우지 못했다")
+		.run(|_, e| {
+			if let tauri::RunEvent::Exit = e {
+				control::forget();
+			}
+		});
 }
 
 /// deck://localhost/<id>[@<커밋>]/<경로>

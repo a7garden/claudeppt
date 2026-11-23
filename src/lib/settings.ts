@@ -13,6 +13,8 @@ export interface Settings {
 	image: { provider: ImageProvider; openaiKey: string; geminiKey: string; openaiModel: string; geminiModel: string; style: string };
 	shape: { font: string; radius: number; stroke: number; shadow: "none" | "soft"; accent: string; ink: string; paper: string; icon: "line" | "solid" };
 	update: { auto: boolean };
+	/** 앱 밖 Claude Code 가 CLI 로 이 앱을 부리는 것을 받을지 (control.rs · remote.ts) */
+	remote: { enabled: boolean };
 }
 
 export const DEFAULTS: Settings = {
@@ -25,6 +27,7 @@ export const DEFAULTS: Settings = {
 	image: { provider: "svg", openaiKey: "", geminiKey: "", openaiModel: "gpt-image-1", geminiModel: "gemini-2.5-flash-image", style: "" },
 	shape: { font: "Pretendard", radius: 10, stroke: 1.5, shadow: "none", accent: "#E5482D", ink: "#16181D", paper: "#FFFFFF", icon: "line" },
 	update: { auto: true },
+	remote: { enabled: true },
 };
 
 const merge = (v: any): Settings => ({
@@ -34,6 +37,7 @@ const merge = (v: any): Settings => ({
 	image: { ...DEFAULTS.image, ...(v?.image || {}) },
 	shape: { ...DEFAULTS.shape, ...(v?.shape || {}) },
 	update: { ...DEFAULTS.update, ...(v?.update || {}) },
+	remote: { ...DEFAULTS.remote, ...(v?.remote || {}) },
 });
 
 interface Store {

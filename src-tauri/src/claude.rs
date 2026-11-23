@@ -159,6 +159,8 @@ pub async fn claude_run(app: AppHandle, state: State<'_, AppState>, spec: RunSpe
 	}
 	let status = child.wait().await.map_err(err)?;
 	let stderr = err_task.await.unwrap_or_default();
+	// 시스템 프롬프트를 덱 폴더에 남기지 않는다 — claude 는 시작할 때 한 번 읽고 끝이다
+	let _ = std::fs::remove_file(&sys_file);
 	app.state::<AppState>().runs.lock().unwrap().remove(&turn);
 	Ok(Done { turn, code: status.code().unwrap_or(-1), stderr })
 }

@@ -1,15 +1,16 @@
 // 설정 — 오른쪽에서 펴는 판. 왼쪽 낱말 머리로 갈래를 고르고, 오른쪽은 「이름 · 값」 줄.
+// 갈래: 일반 · Claude · 그림 · 도형 · 바깥 연결(앱 밖 Claude Code 의 CLI · 스킬) · 업데이트
 import { getVersion } from "@tauri-apps/api/app";
+import { listen } from "@tauri-apps/api/event";
 import { open } from "@tauri-apps/plugin-dialog";
 import { useEffect, useState } from "react";
-import { api, type Tool } from "../lib/api";
+import { api, type RemoteInfo, type Tool } from "../lib/api";
 import { type Key, useT } from "../lib/i18n";
-import { BASE_PROMPT } from "../lib/prompt";
 import { type ImageProvider, type Settings as S, useSettings } from "../lib/settings";
 import { useDeck } from "../lib/store";
 import { useUpdate } from "../lib/updater";
 
-type Tab = "general" | "claude" | "image" | "shapes" | "update";
+type Tab = "general" | "claude" | "image" | "shapes" | "connect" | "update";
 
 function Seg<T extends string | number>({ value, options, onChange }: { value: T; options: { v: T; label: string }[]; onChange: (v: T) => void }) {
 	return (
@@ -26,8 +27,8 @@ function Row({ k, children }: { k: string; children: React.ReactNode }) {
 export default function Settings({ onClose }: { onClose: () => void }) {
 	const t = useT();
 	const [tab, setTab] = useState<Tab>("general");
-	const tabs: Tab[] = ["general", "claude", "image", "shapes", "update"];
-	const names: Record<Tab, Key> = { general: "general", claude: "claude", image: "image", shapes: "shapes", update: "update" };
+	const tabs: Tab[] = ["general", "claude", "image", "shapes", "connect", "update"];
+	const names: Record<Tab, Key> = { general: "general", claude: "claude", image: "image", shapes: "shapes", connect: "connect", update: "update" };
 	return (
 		<div className="settings" role="dialog" aria-label={t("settings")}>
 			<nav>
@@ -40,6 +41,7 @@ export default function Settings({ onClose }: { onClose: () => void }) {
 				{tab === "claude" && <Claude />}
 				{tab === "image" && <Images />}
 				{tab === "shapes" && <Shapes />}
+				{tab === "connect" && <Connect />}
 				{tab === "update" && <Update />}
 			</div>
 		</div>
@@ -92,7 +94,8 @@ function Claude() {
 			<div className="row" style={{ alignItems: "start" }}>
 				<div className="k">{t("prompt")}</div>
 				<div className="v" style={{ flexDirection: "column", alignItems: "stretch" }}>
-					<textarea className="field" rows={16} value={c.prompt || BASE_PROMPT} onChange={(e) => put({ prompt: e.target.value === BASE_PROMPT ? "" : e.target.value })} />
+					{/* 앱 기본 프롬프트는 화면에 보이지 않는다 — 비워 두면 기본, 쓰면 그 글로 갈아 끼운다 */}
+					<textarea className="field" rows={16} placeholder={t("promptDefault")} value={c.prompt} onChange={(e) => put({ prompt: e.target.value })} />
 					<div style={{ display: "flex", justifyContent: "space-between" }}>
 						<span className="note">{c.prompt ? "custom" : "default"}</span>
 						{c.prompt && <button className="ghost" onClick={() => put({ prompt: "" })}>default</button>}
@@ -218,6 +221,73 @@ function Specimen({ sh }: { sh: S["shape"] }) {
 			</div>
 			<div style={{ position: "absolute", right: "6%", bottom: "14%", width: 120, height: 8, borderRadius: 4, background: sh.accent }} />
 		</div>
+	);
+}
+
+/** 바깥 연결 — 앱 밖 Claude Code 가 스킬 「claudeppt」와 CLI 로 이 앱을 부린다 (control.rs · cli.rs · remote.ts).
+ *  스킬은 실행 파일에 담겨 있어 앱을 새 판으로 올리면 깔린 스킬과 어긋난다 — 그때 「다시 깔기」 */
+function Connect() {
+	const t = useT();
+	const { s, set } = useSettings();
+	const notify = useDeck((x) => x.notify);
+	const [info, setInfo] = useState<RemoteInfo | null>(null);
+	const [busy, setBusy] = useState(false);
+	const load = () => api.remoteInfo().then(setInfo, () => {});
+	useEffect(() => {
+		load();
+		// 바깥 명령이 끝날 때마다 최근 명령을 다시 읽는다
+		const un = listen("remote-log", () => load());
+		return () => { un.then((f) => f()); };
+	}, []);
+	useEffect(() => { load(); }, [s.remote.enabled]);
+	if (!info) return null;
+	const sk = info.skill;
+	const exe = sk.exe.replace(/\//g, "\\");
+	const install = async () => {
+		setBusy(true);
+		try { await api.skillInstall(); await load(); notify(`${t("skill")} · ${t("skillCurrent")}`); }
+		catch (e) { notify(String(e), "err"); }
+		finally { setBusy(false); }
+	};
+	const name = (dir: string) => dir.split(/[\\/]/).pop() || dir;
+	return (
+		<>
+			<Row k={t("remoteControl")}>
+				<Seg value={s.remote.enabled ? 1 : 0} options={[{ v: 1, label: t("remoteOn") }, { v: 0, label: t("remoteOff") }]} onChange={(v) => set((x) => ({ ...x, remote: { enabled: !!v } }))} />
+				<span className="note">{s.remote.enabled ? `127.0.0.1:${info.port}` : t("remoteOffNote")}</span>
+			</Row>
+			<Row k={t("skill")}>
+				<span className={"note" + (sk.current ? " ok" : "")} style={sk.installed && !sk.current ? { color: "var(--err)" } : undefined}>
+					{!sk.installed ? t("skillMissing") : sk.current ? t("skillCurrent") : t("skillStale")}
+				</span>
+				<button className={sk.current ? "ghost" : "send"} style={{ marginLeft: "auto" }} disabled={busy} onClick={install}>{sk.installed ? t("reinstall") : t("install")}</button>
+				{sk.installed && <button className="ghost" onClick={() => api.reveal(sk.dir)}>{t("folder")} ↗</button>}
+			</Row>
+			{sk.installed && !sk.current && sk.linked && sk.linked !== sk.exe && (
+				<Row k="">
+					<span className="note" style={{ whiteSpace: "normal", wordBreak: "break-all" }} title={`${sk.linked} → ${sk.exe}`}>{sk.linked}<br />→ {sk.exe}</span>
+				</Row>
+			)}
+			<Row k={t("howTo")}><span style={{ whiteSpace: "normal", lineHeight: 1.55 }}>{t("howToText")}</span></Row>
+			<Row k={t("cliPath")}>
+				<span className="mono" style={{ fontSize: 12, flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }} title={exe}>{exe}</span>
+				<button className="ghost" onClick={() => navigator.clipboard.writeText(`"${exe}" help`).then(() => notify(t("copy")), () => {})}>{t("copy")}</button>
+			</Row>
+			<div className="row" style={{ alignItems: "start" }}>
+				<div className="k">{t("recentCli")}</div>
+				<div className="v" style={{ flexDirection: "column", alignItems: "stretch", gap: 4 }}>
+					{!info.recent.length && <span className="note">{t("noRecent")}</span>}
+					{[...info.recent].reverse().slice(0, 12).map((r, i) => (
+						<div key={i} style={{ display: "grid", gridTemplateColumns: "62px 60px 1fr auto", gap: 8, alignItems: "baseline", fontSize: 12 }} title={r.error || r.dir}>
+							<span className="mono" style={{ color: "var(--faint)" }}>{r.at}</span>
+							<span className="mono">{r.cmd}</span>
+							<span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", color: r.ok ? "var(--dim)" : "var(--err)" }}>{r.ok ? name(r.dir) : r.error}</span>
+							<span className="mono" style={{ color: "var(--faint)" }}>{r.ms < 1000 ? `${r.ms}ms` : `${(r.ms / 1000).toFixed(1)}s`}</span>
+						</div>
+					))}
+				</div>
+			</div>
+		</>
 	);
 }
 

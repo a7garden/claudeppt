@@ -382,8 +382,47 @@ function lineGeo(name: string | null, pct: number, px: number, ctx: Ctx): LineGe
 	return { pitch, web: (pitch - (a + d)) / 2 + a, ppt, below: (1.2 - b1) * px };
 }
 
+// ── 선 · 연결선 ──
+const LINE_PRST = /^(line|straightConnector1|bentConnector[2-5]|curvedConnector[2-5])$/;
+/** 화살촉 크기는 선 두께의 배수 — 작게 2 · 보통 3 · 크게 5 (w 는 폭, len 은 길이). 2026.11.23 : 늘 5배로 그려 원본보다 컸다 */
+const ARROW: Record<string, number> = { sm: 2, med: 3, lg: 5 };
+/** 연결선 한 줄. 꺾인 연결선(bentConnector)은 PowerPoint 와 같이 가로 → 세로 → 가로로 꺾는다 (adj1 = 꺾는 자리, 기본 가운데).
+ *  2026.11.23 : 꺾인 연결선을 대각선 직선으로 그렸다 */
+function connectorSvg(box: Box, line: { w: number; c: string; dash: boolean }, spPr: El | null, prst = path(spPr, "a:prstGeom")?.getAttribute("prst") || "line"): string {
+	const ln = path(spPr, "a:ln");
+	const { w, h } = box;
+	let pts: number[][];
+	if (prst === "bentConnector2") pts = [[0, 0], [w, 0], [w, h]];
+	else if (/^(bent|curved)Connector[3-5]$/.test(prst)) {
+		const gd = path(spPr, "a:prstGeom", "a:avLst", "a:gd")?.getAttribute("fmla");
+		const a = gd?.startsWith("val ") ? +gd.slice(4) : 50000;
+		const mx = w * (Number.isFinite(a) ? a : 50000) / 100000;
+		pts = [[0, 0], [mx, 0], [mx, h], [w, h]];
+	} else pts = [[0, 0], [w, h]];
+	// 뒤집기는 상자 안에서 좌우 · 위아래로 거울
+	pts = pts.map(([x, y]) => [box.flipH ? w - x : x, box.flipV ? h - y : y]);
+	const end = (name: string, at: "start" | "end") => {
+		const e = path(ln, name), type = e?.getAttribute("type");
+		if (!e || !type || type === "none") return { def: "", ref: "" };
+		const id = "m" + Math.random().toString(36).slice(2, 7);
+		const aw = ARROW[e.getAttribute("w") || "med"] ?? 3, al = ARROW[e.getAttribute("len") || "med"] ?? 3;
+		return {
+			def: `<marker id="${id}" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="${al}" markerHeight="${aw}" preserveAspectRatio="none" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="${line.c}"/></marker>`,
+			ref: ` marker-${at}="url(#${id})"`,
+		};
+	};
+	const hd = end("a:headEnd", "start"), tl = end("a:tailEnd", "end");
+	const defs = hd.def || tl.def ? `<defs>${hd.def}${tl.def}</defs>` : "";
+	const stroke = `fill="none" stroke="${line.c}" stroke-width="${r1(line.w)}"${line.dash ? ' stroke-dasharray="6 4"' : ""}${tl.ref}${hd.ref}`;
+	const body = pts.length === 2
+		? `<line x1="${r1(pts[0][0])}" y1="${r1(pts[0][1])}" x2="${r1(pts[1][0])}" y2="${r1(pts[1][1])}" ${stroke}/>`
+		: `<polyline points="${pts.map((p) => p.map(r1).join(",")).join(" ")}" stroke-linejoin="miter" ${stroke}/>`;
+	return `<svg style="position:absolute;left:${r1(box.x)}px;top:${r1(box.y)}px;overflow:visible" width="${r1(Math.max(w, 1))}" height="${r1(Math.max(h, 1))}">${defs}${body}</svg>`;
+}
+
 // ── 도형 그림 (사각형 · 둥근 사각형 · 타원 밖의 프리셋) ──
-function presetSvg(prst: string, w: number, h: number, fill: string, line: { w: number; c: string; dash: boolean } | null): string | null {
+/** adj — 원본 도형의 조절점(avLst 의 첫 gd, 100000 분율). 없으면 각 도형의 PowerPoint 기본값을 쓴다 */
+function presetSvg(prst: string, w: number, h: number, fill: string, line: { w: number; c: string; dash: boolean } | null, adj?: number): string | null {
 	const s = line ? `stroke="${line.c}" stroke-width="${r1(line.w)}"${line.dash ? ' stroke-dasharray="6 4"' : ""}` : "";
 	const f = fill === "none" ? "none" : fill;
 	const P = (pts: number[][]) => `<polygon points="${pts.map((p) => p.map(r1).join(",")).join(" ")}" fill="${f}" ${s}/>`;
@@ -409,7 +448,12 @@ function presetSvg(prst: string, w: number, h: number, fill: string, line: { w: 
 			for (let i = 0; i < 10; i++) { const r = i % 2 ? 0.38 : 0.5, an = -Math.PI / 2 + (i * Math.PI) / 5; pts.push([w / 2 + Math.cos(an) * w * r, h / 2 + Math.sin(an) * h * r]); }
 			body = P(pts); break;
 		}
-		case "donut": body = `<circle cx="${w / 2}" cy="${h / 2}" r="${a * 0.375}" fill="none" stroke="${f}" stroke-width="${a * 0.25}"/>`; break;
+		case "donut": {
+			// 링 두께는 adj(기본 25000 = 짧은 변의 25%). 2026.11.23 : 기본값으로만 그려 얇은 링(adj 5759)이 꽉 찬 원이 되고, 같은 색 글자가 링에 묻혔다
+			const t = a * Math.min(50000, Math.max(0, adj ?? 25000)) / 100000;
+			body = `<circle cx="${w / 2}" cy="${h / 2}" r="${a / 2 - t / 2}" fill="none" stroke="${f}" stroke-width="${t}"/>`;
+			break;
+		}
 		case "flowChartProcess": return null;
 		case "flowChartDecision": body = P([[w / 2, 0], [w, h / 2], [w / 2, h], [0, h / 2]]); break;
 		case "flowChartTerminator": return null;
@@ -424,7 +468,20 @@ async function mediaPath(ctx: Ctx, zipPath: string): Promise<string | null> {
 	if (!f) return null;
 	const name = zipPath.split("/").pop()!.toLowerCase();
 	const ext = name.split(".").pop();
-	if (ext === "emf" || ext === "wmf") { ctx.warnings.add("emf"); return null; }
+	if (ext === "emf" || ext === "wmf") {
+		// 웹뷰는 EMF · WMF 를 그리지 못한다 — 원본은 source/ 에 두고 PNG 로 바꿔 쓴다. 못 바꾸면 빈 상자로 남긴다
+		const raw = `source/media/${name}`, png = `assets/${name.replace(/\.[^.]+$/, "")}.png`;
+		try {
+			await api.writeBytes(ctx.dir, raw, await f.async("uint8array"));
+			await api.metafilePng(ctx.dir, raw, png);
+		} catch (e) {
+			console.warn("emf", name, e);
+			ctx.warnings.add("emf");
+			return null;
+		}
+		ctx.media.set(zipPath, "../" + png);
+		return "../" + png;
+	}
 	const rel = `assets/${name}`;
 	await api.writeBytes(ctx.dir, rel, await f.async("uint8array"));
 	ctx.media.set(zipPath, "../" + rel);
@@ -484,6 +541,11 @@ async function shapeHtml(el: El, ctx: Ctx, rel: Record<string, string>, tx: Tx, 
 		let box = xfrmOf(kid(spPr, "a:xfrm"), ctx, tx) || info.ph?.box || null;
 		if (!box) return "";
 		const prst = path(spPr, "a:prstGeom")?.getAttribute("prst") || (kid(spPr, "a:custGeom") ? "custom" : "rect");
+		// 선 · 연결선 모양의 도형 — 글이 없으면 연결선과 같이 그린다. 2026.11.23 : 상자 테두리로 그려 점선이 실선이 되고 화살촉이 빠졌다
+		if (LINE_PRST.test(prst) && !(kid(el, "p:txBody")?.textContent || "").trim()) {
+			const line = lineOf(spPr, ctx, style);
+			return line ? connectorSvg(box, line, spPr, prst) : "";
+		}
 		const fill = fillOf(spPr, ctx, style) || (info.ph?.body ? fillOf(info.ph.body, ctx, null) : null);
 		const line = lineOf(spPr, ctx, style);
 		const st = [posCss(box)];
@@ -499,7 +561,8 @@ async function shapeHtml(el: El, ctx: Ctx, rel: Record<string, string>, tx: Tx, 
 			}
 			if (prst === "custom") ctx.warnings.add("custGeom");
 		} else {
-			svg = presetSvg(prst, box.w, box.h, fill || "none", line);
+			const gd = path(spPr, "a:prstGeom", "a:avLst", "a:gd")?.getAttribute("fmla");
+			svg = presetSvg(prst, box.w, box.h, fill || "none", line, ((v) => (Number.isFinite(v) ? v : undefined))(gd?.startsWith("val ") ? +gd.slice(4) : NaN));
 			if (!svg) { if (solid) st.push(`background:${solid}`); if (line) st.push(`border:${r1(line.w)}px solid ${line.c}`); }
 		}
 		const txBody = kid(el, "p:txBody");
@@ -539,13 +602,9 @@ async function shapeHtml(el: El, ctx: Ctx, rel: Record<string, string>, tx: Tx, 
 	if (tag === "p:cxnSp") {
 		const box = xfrmOf(path(el, "p:spPr", "a:xfrm"), ctx, tx);
 		if (!box) return "";
-		const line = lineOf(kid(el, "p:spPr"), ctx, kid(el, "p:style")) || { w: 1, c: "#000", dash: false };
-		const [x1, y1, x2, y2] = [box.flipH ? box.w : 0, box.flipV ? box.h : 0, box.flipH ? 0 : box.w, box.flipV ? 0 : box.h];
-		const ln = path(el, "p:spPr", "a:ln");
-		const head = path(ln, "a:headEnd")?.getAttribute("type"), tail = path(ln, "a:tailEnd")?.getAttribute("type");
-		const id = "m" + Math.random().toString(36).slice(2, 7);
-		const marker = (head && head !== "none") || (tail && tail !== "none") ? `<defs><marker id="${id}" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="5" markerHeight="5" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="${line.c}"/></marker></defs>` : "";
-		return `<svg style="position:absolute;left:${r1(box.x)}px;top:${r1(box.y)}px;overflow:visible" width="${r1(Math.max(box.w, 1))}" height="${r1(Math.max(box.h, 1))}">${marker}<line x1="${r1(x1)}" y1="${r1(y1)}" x2="${r1(x2)}" y2="${r1(y2)}" stroke="${line.c}" stroke-width="${r1(line.w)}"${line.dash ? ' stroke-dasharray="6 4"' : ""}${tail && tail !== "none" ? ` marker-end="url(#${id})"` : ""}${head && head !== "none" ? ` marker-start="url(#${id})"` : ""}/></svg>`;
+		const spPr = kid(el, "p:spPr");
+		const line = lineOf(spPr, ctx, kid(el, "p:style")) || { w: 1, c: "#000", dash: false };
+		return connectorSvg(box, line, spPr);
 	}
 	if (tag === "p:graphicFrame") {
 		const box = xfrmOf(kid(el, "p:xfrm"), ctx, tx);

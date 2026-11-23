@@ -3,6 +3,14 @@ import { invoke } from "@tauri-apps/api/core";
 
 export interface Commit { n: number; hash: string; short: string; date: string; subject: string; tags: string[] }
 export interface LibItem { dir: string; deck: any; modified: number }
+/** 설정 「바깥 연결」 — 통로 · 최근 바깥 명령 · 스킬 상태 (control.rs remote_info) */
+export interface RemoteInfo {
+	enabled: boolean;
+	port: number;
+	control: string;
+	recent: { at: string; cmd: string; dir: string; ok: boolean; error: string | null; ms: number }[];
+	skill: { dir: string; installed: boolean; current: boolean; exe: string; linked: string | null };
+}
 export interface Tool { name: string; path: string | null; version: string }
 /** 깔린 글꼴 하나. family = 가족 이름(나라말마다) · full = 전체 이름들 · local = @font-face local() 에 쓸 영어 전체 이름 */
 /** metrics = [winAscent, winDescent, typoAscender, typoDescender, typoLineGap] (em 비율) · typo = USE_TYPO_METRICS */
@@ -44,6 +52,10 @@ export const api = {
 	imageGenerate: (spec: { provider: string; prompt: string; out: string; apiKey?: string; model?: string; size?: string }) => invoke<string>("image_generate", { spec }),
 	fontIndex: () => invoke<FontFace[]>("font_index"),
 	fontInstall: (urls: string[]) => invoke<{ url: string; files: string[]; error: string | null }[]>("font_install", { urls }),
+	remoteInfo: () => invoke<RemoteInfo>("remote_info"),
+	skillInstall: () => invoke<RemoteInfo["skill"]>("skill_install"),
+	/** dir 안 EMF · WMF 를 긴 변 max 픽셀 PNG 로 바꾼다 (Windows GDI+) — "<너비>x<높이>" */
+	metafilePng: (dir: string, src: string, out: string, max = 1600) => invoke<string>("metafile_png", { dir, src, out, max }),
 	pptSnapshot: (pptx: string, outDir: string, width = 1280, height = 720) => invoke<number>("ppt_snapshot", { pptx, outDir, width, height }),
 };
 

@@ -1,7 +1,6 @@
 // 처음 화면 — 위에 주제 한 줄(쓰면 바로 Claude 가 짓기 시작) · 가져오기 · 열기, 그 아래 최근 덱을 첫 쪽 미리보기 카드로 깐다.
-// 창 어디에 놓아도 PPTX · CPPT · 프로젝트 폴더를 연다.
+// 창에 끌어 놓기는 DropZone(App 에 하나)이 받는다.
 // 2026.11.18 : 최근 목록을 오른쪽 글자 줄에서 화면 대부분을 쓰는 카드로 바꿨다 — 가장 잦은 일이 지난 덱을 여는 것이고, 덱은 모양으로 알아본다.
-import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { open } from "@tauri-apps/plugin-dialog";
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { api, deckUrl, type LibItem } from "../lib/api";
@@ -9,19 +8,6 @@ import { openAny, startNew } from "../lib/flows";
 import { useT } from "../lib/i18n";
 import { useSettings } from "../lib/settings";
 import { useDeck } from "../lib/store";
-
-export function useFileDrop(onPaths: (p: string[]) => void) {
-	const [over, setOver] = useState(false);
-	useEffect(() => {
-		const un = getCurrentWebview().onDragDropEvent((e) => {
-			if (e.payload.type === "enter" || e.payload.type === "over") setOver(true);
-			else if (e.payload.type === "leave") setOver(false);
-			else if (e.payload.type === "drop") { setOver(false); onPaths(e.payload.paths); }
-		});
-		return () => { un.then((f) => f()); };
-	}, [onPaths]);
-	return over;
-}
 
 export default function Home() {
 	const t = useT();
@@ -44,7 +30,6 @@ export default function Home() {
 		})();
 	}, [s.library, s.recent]);
 
-	const over = useFileDrop((paths) => { if (paths[0]) openAny(paths[0]); });
 
 	const go = async () => {
 		if (working) return;
@@ -110,7 +95,6 @@ export default function Home() {
 					</div>
 				)}
 			</section>
-			{over && <div className="dropzone">{t("drop")}</div>}
 		</main>
 	);
 }

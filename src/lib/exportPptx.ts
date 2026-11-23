@@ -1,5 +1,7 @@
 // 웹 슬라이드 → PPTX. 쪽마다 화면 밖 iframe 에 1:1 로 그려 런타임(rt.js extract)이 잰 좌표로 PowerPoint 도형을 만든다.
 // 상자 → 도형 · 글자 묶음 → 글상자 · 표 → 표 · 그림/SVG → 그림. 96px = 1in.
+// 한 요소(카드 · 행 · 목록 칸)에서 나온 도형은 다 만든 뒤 PowerPoint 그룹으로 묶는다 (groupSlides).
+import JSZip from "jszip";
 import PptxGenJS from "pptxgenjs";
 import type { Deck } from "./deck";
 import { installedNames } from "./fonts";
@@ -81,6 +83,8 @@ export async function buildPptx(deck: Deck, projectId: string, progress: (i: num
 	pptx.defineLayout({ name: "DECK", width: IN(deck.size.w), height: IN(deck.size.h) });
 	pptx.layout = "DECK";
 	pptx.title = deck.title;
+	// 쪽마다 만든 도형의 묶음 사슬 · 묶음 이름 — exact 는 그림 한 장 위 투명 글이라 묶지 않는다(null)
+	const plan: ({ chains: number[][]; names: Record<number, string> } | null)[] = [];
 
 	for (let i = 0; i < deck.slides.length; i++) {
 		progress(i, deck.slides.length);
@@ -101,6 +105,7 @@ export async function buildPptx(deck: Deck, projectId: string, progress: (i: num
 			let snap: any;
 			try { snap = await ask(win, { t: "snapshot", scale: 2 }, 60000); } finally { dispose(); }
 			if (snap.error) throw new Error(`${i + 1}쪽: ${snap.error}`);
+			plan.push(null);
 			slide.addImage({ data: snap.data.replace(/^data:/, ""), x: 0, y: 0, w: IN(deck.size.w), h: IN(deck.size.h) });
 			if (ref.notes) slide.addNotes(ref.notes);
 			for (const it of data.items) {
@@ -111,7 +116,11 @@ export async function buildPptx(deck: Deck, projectId: string, progress: (i: num
 		}
 		if (data.background) slide.background = { color: data.background.hex };
 		if (ref.notes) slide.addNotes(ref.notes);
+		const chains: number[][] = [];
+		plan.push({ chains, names: data.groups || {} });
 		for (const it of data.items) {
+			// 아래 다섯 갈래는 도형을 꼭 하나씩 만든다 — 슬라이드 XML 의 도형 순서와 이 사슬 순서가 맞아야 묶을 수 있다
+			if (["box", "line", "image", "text", "table"].includes(it.type)) chains.push(it.g || []);
 			if (it.type === "box") {
 				const isRound = it.round;
 				const shape = isRound ? pptx.ShapeType.ellipse : it.radius > 0.5 ? pptx.ShapeType.roundRect : pptx.ShapeType.rect;
@@ -160,6 +169,103 @@ export async function buildPptx(deck: Deck, projectId: string, progress: (i: num
 		}
 	}
 	progress(deck.slides.length, deck.slides.length);
-	const out = (await pptx.write({ outputType: "uint8array" })) as Uint8Array;
+	const raw = (await pptx.write({ outputType: "uint8array" })) as Uint8Array;
+	// 묶기가 어긋나도 내보내기는 살린다 — 묶지 않은 파일이 묶다 깨진 파일보다 낫다
+	const out = await groupSlides(raw, plan).catch((e) => { console.warn("group", e); return raw; });
 	return { data: out, missingFonts: [...fonts.missing] };
+}
+
+// ── 그룹 묶기 ──────────────────────────────────────────────────────────
+// pptxgenjs 는 그룹을 만들지 못한다. 다 쓴 PPTX 의 슬라이드 XML 에서 도형을 <p:grpSp> 로 감싼다.
+// 묶음 기준: 같은 요소에서 나온 도형이 둘 이상이면 그 요소가 그룹이 된다. 단
+//   · 쪽 전체를 감싸는 요소는 묶지 않는다 — 모든 도형이 한 그룹이면 하나만 고르기가 늘 두 번 클릭이 된다
+//   · 자식 하나만 감싼 겉 요소(같은 도형을 담은 묶음)는 안쪽 하나로 합친다 — 그룹 안에 그룹만 하나 든 껍데기를 만들지 않는다
+
+const NS_P = "http://schemas.openxmlformats.org/presentationml/2006/main";
+const NS_A = "http://schemas.openxmlformats.org/drawingml/2006/main";
+
+type GNode = { id: number; kids: (GNode | number)[] };
+
+/** 도형마다의 사슬(겉 → 안 요소 번호) → 묶음 나무. 잎은 도형 순번 */
+function groupTree(chains: number[][]): (GNode | number)[] {
+	const count = new Map<number, number>();
+	for (const c of chains) for (const id of c) count.set(id, (count.get(id) || 0) + 1);
+	const top: (GNode | number)[] = [];
+	chains.forEach((chain, i) => {
+		let list = top, prev = chains.length;
+		for (const id of chain) {
+			const n = count.get(id)!;
+			if (n < 2 || n >= prev) continue;
+			prev = n;
+			// 한 요소의 도형은 줄지어 나오므로 같은 묶음은 늘 목록 끝에 있다
+			const last = list[list.length - 1];
+			let g = typeof last === "object" && last.id === id ? last : null;
+			if (!g) { g = { id, kids: [] }; list.push(g); }
+			list = g.kids;
+		}
+		list.push(i);
+	});
+	return top;
+}
+
+const kid = (el: Element, name: string) => [...el.children].find((c) => c.localName === name);
+/** 도형 하나의 자리(EMU) — sp · pic · cxnSp 는 spPr, 표는 xfrm, 그룹은 grpSpPr */
+function boundsOf(el: Element) {
+	const pr = el.localName === "graphicFrame" ? el : kid(el, el.localName === "grpSp" ? "grpSpPr" : "spPr");
+	const xf = pr && kid(pr, "xfrm");
+	const off = xf && kid(xf, "off"), ext = xf && kid(xf, "ext");
+	if (!off || !ext) return null;
+	const x = +off.getAttribute("x")!, y = +off.getAttribute("y")!;
+	return { x, y, r: x + +ext.getAttribute("cx")!, b: y + +ext.getAttribute("cy")! };
+}
+
+async function groupSlides(data: Uint8Array, plan: ({ chains: number[][]; names: Record<number, string> } | null)[]): Promise<Uint8Array> {
+	if (!plan.some((p) => p && p.chains.some((c) => c.length))) return data;
+	const zip = await JSZip.loadAsync(data);
+	let changed = false;
+	for (let i = 0; i < plan.length; i++) {
+		const p = plan[i];
+		if (!p) continue;
+		const tree = groupTree(p.chains);
+		if (!tree.some((n) => typeof n === "object")) continue;
+		const path = `ppt/slides/slide${i + 1}.xml`;
+		const file = zip.file(path);
+		if (!file) continue;
+		const doc = new DOMParser().parseFromString(await file.async("string"), "application/xml");
+		const tbl = doc.getElementsByTagNameNS(NS_P, "spTree")[0];
+		if (!tbl || doc.getElementsByTagName("parsererror").length) continue;
+		const shapes = [...tbl.children].filter((c) => c.localName !== "nvGrpSpPr" && c.localName !== "grpSpPr");
+		// 도형 수가 사슬 수와 다르면 어느 도형이 어느 요소인지 모른다 — 그 쪽은 묶지 않는다
+		if (shapes.length !== p.chains.length) { console.warn(`group: ${i + 1}쪽 도형 ${shapes.length} ≠ ${p.chains.length}`); continue; }
+		let nextId = Math.max(0, ...[...doc.getElementsByTagNameNS(NS_P, "cNvPr")].map((e) => +e.getAttribute("id")! || 0)) + 1;
+		const mk = (name: string, ns = NS_P) => doc.createElementNS(ns, (ns === NS_P ? "p:" : "a:") + name);
+		const build = (n: GNode | number): Element => {
+			if (typeof n === "number") return shapes[n];
+			const kids = n.kids.map(build);
+			const bs = kids.map(boundsOf).filter(Boolean) as { x: number; y: number; r: number; b: number }[];
+			const x = Math.min(...bs.map((b) => b.x)), y = Math.min(...bs.map((b) => b.y));
+			const cx = Math.max(...bs.map((b) => b.r)) - x, cy = Math.max(...bs.map((b) => b.b)) - y;
+			const g = mk("grpSp");
+			const nv = mk("nvGrpSpPr"), c = mk("cNvPr");
+			c.setAttribute("id", String(nextId++));
+			c.setAttribute("name", p.names[n.id] || `Group ${n.id}`);
+			nv.append(c, mk("cNvGrpSpPr"), mk("nvPr"));
+			// 자식 좌표계를 바깥과 같게(chOff = off · chExt = ext) — 자식 도형 좌표를 고치지 않아도 제자리다
+			const pr = mk("grpSpPr"), xf = mk("xfrm", NS_A);
+			const pt = (name: string, a: string, b: string, va: number, vb: number) => { const e = mk(name, NS_A); e.setAttribute(a, String(va)); e.setAttribute(b, String(vb)); return e; };
+			xf.append(pt("off", "x", "y", x, y), pt("ext", "cx", "cy", cx, cy), pt("chOff", "x", "y", x, y), pt("chExt", "cx", "cy", cx, cy));
+			pr.append(xf);
+			g.append(nv, pr, ...kids);
+			return g;
+		};
+		// 겹침 순서를 지키려고 묶음은 그 첫 도형 자리에 넣는다 — 도형은 줄지어 있으므로 사이에 다른 도형이 끼지 않는다
+		// extLst 는 spTree 맨 끝이어야 한다 — 그 앞에 넣는다
+		const tail = kid(tbl, "extLst") || null;
+		for (const n of tree) tbl.insertBefore(build(n), tail);
+		// 도형 번호를 처음부터 다시 매긴다 — pptxgenjs 는 표(graphicFrame) 번호를 도형 번호와 겹쳐 쓴다 (2026.11.23 실측 · 58쪽 중 7쪽)
+		[...doc.getElementsByTagNameNS(NS_P, "cNvPr")].forEach((e, k) => e.setAttribute("id", String(k + 1)));
+		zip.file(path, new XMLSerializer().serializeToString(doc));
+		changed = true;
+	}
+	return changed ? zip.generateAsync({ type: "uint8array", compression: "DEFLATE" }) : data;
 }

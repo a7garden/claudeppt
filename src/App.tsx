@@ -1,10 +1,12 @@
 import { useEffect, useState } from "react";
 import { ContextMenu, useDefaultMenu } from "./components/ContextMenu";
+import DropZone from "./components/DropZone";
 import Home from "./components/Home";
 import Settings from "./components/Settings";
 import TitleBar from "./components/TitleBar";
 import Workspace from "./components/Workspace";
 import { useT } from "./lib/i18n";
+import { startRemote } from "./lib/remote";
 import { useSettings } from "./lib/settings";
 import { useDeck } from "./lib/store";
 import { useAutoUpdate, useUpdate } from "./lib/updater";
@@ -34,10 +36,23 @@ export default function App() {
 	useEffect(() => { document.documentElement.lang = lang; }, [lang]);
 	useTheme();
 	useAutoUpdate(loaded);
+	// 앱 밖 Claude Code 의 CLI 명령을 받기 시작한다 — 서재 경로 · 도형 설정을 읽은 뒤라야 새 덱을 만든다
+	useEffect(() => { if (loaded) startRemote().catch((e) => console.error("제어 통로", e)); }, [loaded]);
 	useEffect(() => {
 		const k = (e: KeyboardEvent) => {
 			if (e.ctrlKey && e.key === ",") { e.preventDefault(); setSettings((v) => !v); }
 			if (e.key === "Escape" && settings) setSettings(false);
+			// 되돌리기 · 다시 하기 — 글 칸 안에서는 그 칸의 되돌리기를 쓴다
+			const z = e.key.toLowerCase();
+			if (e.ctrlKey && !e.altKey && (z === "z" || z === "y") && !settings) {
+				const a = document.activeElement as HTMLElement | null;
+				if (a && (a.tagName === "INPUT" || a.tagName === "TEXTAREA" || a.isContentEditable)) return;
+				const d = useDeck.getState();
+				// 긋는 도구일 때 Ctrl+Z 는 마지막 표시 지우기다 (Workspace Stage) — 파일 되돌리기와 겹쳐 돌지 않게
+				if (d.mode === "pin") return;
+				e.preventDefault();
+				if (z === "y" || e.shiftKey) d.redo(); else d.undo();
+			}
 		};
 		addEventListener("keydown", k);
 		return () => removeEventListener("keydown", k);
@@ -52,6 +67,7 @@ export default function App() {
 			{settings && <Settings onClose={() => setSettings(false)} />}
 			<Toasts />
 			<ContextMenu />
+			<DropZone />
 		</div>
 	);
 }

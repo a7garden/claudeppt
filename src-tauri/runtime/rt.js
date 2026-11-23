@@ -99,6 +99,14 @@
 		post({ t: "menu", x: e.clientX, y: e.clientY, path: pathOf(el), tag: el.tagName.toLowerCase(), text: el === root ? "" : label(el) });
 	});
 	addEventListener("keydown", (e) => {
+		// 되돌리기 · 다시 하기는 앱이 한다 (손으로 고친 것을 파일째 되쓴다). 글자를 고치는 중이면 그 글의 되돌리기를 쓴다
+		if (e.ctrlKey && !e.altKey && ["z", "y"].includes(e.key.toLowerCase()) && !document.activeElement?.isContentEditable) {
+			// 아직 파일에 쓰지 않은 방향키 이동이 있으면 먼저 쓴다 — 안 그러면 되돌린 뒤에 늦게 쓰여 되돌림을 덮는다
+			if (sel?.__nudge) { clearTimeout(sel.__nudge); sel.__nudge = null; post({ t: "patch", path: pathOf(sel), style: { left: sel.style.left, top: sel.style.top } }); }
+			post({ t: e.key.toLowerCase() === "y" || e.shiftKey ? "redo" : "undo" });
+			e.preventDefault();
+			return;
+		}
 		// 고른 요소가 없으면(보기만 하는 중) 넘김 키는 쪽을 넘긴다 — 고르기 도구가 늘 켜져 있어도 방향키로 쪽을 넘길 수 있게
 		if ((mode !== "edit" || !sel) && !document.activeElement?.isContentEditable && ["ArrowDown", "ArrowUp", "ArrowLeft", "ArrowRight", "PageDown", "PageUp", "Home", "End"].includes(e.key) && !e.ctrlKey && !e.altKey) {
 			post({ t: "key", key: e.key });
@@ -210,7 +218,11 @@
 	const URLS = /url\(\s*["']?([^"')]+)["']?\s*\)/g;
 	const inlineUrls = async (v, base = location.href) => {
 		let out = v;
-		for (const m of [...v.matchAll(URLS)]) out = out.replace(m[0], `url("${await toData(new URL(m[1], base).href)}")`);
+		for (const m of [...v.matchAll(URLS)]) {
+			// url(#이름) 은 같은 문서 안 참조(화살촉 marker · 그라데이션 · 자르기)다 — 받아 넣으면 이 쪽 HTML 전체가 되어 구운 그림에서 화살촉이 사라졌다 (2026.11.23)
+			if (m[1].startsWith("#")) continue;
+			out = out.replace(m[0], `url("${await toData(new URL(m[1], base).href)}")`);
+		}
 		return out;
 	};
 	let fontCssP = null;
@@ -431,7 +443,7 @@
 		const bg = color(rs.backgroundColor) || color(css(document.body).backgroundColor);
 		// 슬라이드 바탕에 그림 · 그라데이션 · 장식이 있으면 바탕을 구워 맨 아래에 깐다
 		if (rs.backgroundImage !== "none" || pseudoOn(root, "::before") || pseudoOn(root, "::after")) {
-			try { items.push({ type: "image", x: 0, y: 0, w: S.width, h: S.height, data: await bake(root, { x: 0, y: 0, w: S.width, h: S.height }, false) }); } catch {}
+			try { items.push({ type: "image", x: 0, y: 0, w: S.width, h: S.height, data: await bake(root, { x: 0, y: 0, w: S.width, h: S.height }, false), baked: "background", tag: "section" }); } catch {}
 		}
 		// 조상이 넘친 부분을 자르면(overflow) 굽는 상자도 그만큼 줄인다 — 잘라 쓴 그림(PPT 의 그림 자르기)이 PPTX 에서 원본 크기로 튀어나왔다 (2026.11.18)
 		const clipped = (el, box) => {
@@ -445,96 +457,110 @@
 			}
 			return x1 - x0 < 0.5 || y1 - y0 < 0.5 ? null : { x: x0, y: y0, w: x1 - x0, h: y1 - y0 };
 		};
-		const visit = async (el) => {
+		// 묶음 — 도형마다 그것을 낳은 요소와 그 조상 요소의 번호(g)를 단다. 내보낼 때 같은 요소에서 나온 도형 둘 이상을
+		// PowerPoint 그룹으로 묶는다 (exportPptx.ts groupSlides). 카드 하나가 상자 · 제목 · 본문으로 흩어지면 옮길 때 하나씩 끌어야 했다
+		const groups = {};
+		let gid = 0;
+		const visit = async (el, chain) => {
 			for (const ch of el.children) {
 				if (!(ch instanceof Element) || ch.tagName === "SCRIPT" || ch.tagName === "STYLE" || !visible(ch)) continue;
-				const s = css(ch), r = R(ch.getBoundingClientRect()), op = opacityOf(ch);
-				if (r.w < 0.5 || r.h < 0.5) continue;
-				// 통째로 굽기 — 그 요소와 자식이 한 장의 그림이 된다
-				if (needsDeep(ch, s)) {
-					const pad = overflowOf(s), box = clipped(ch, { x: r.x - pad, y: r.y - pad, w: r.w + pad * 2, h: r.h + pad * 2 });
-					if (!box) continue;
-					try { items.push({ type: "image", ...box, data: await bake(ch, box, true), alt: ch.getAttribute("alt") || "" }); } catch (e) { fails.push(`${ch.tagName} ${String(e)}`); }
-					continue;
-				}
-				// 바탕 · 테두리만 굽기 — 글자 · 자식은 그 위에 그대로 편집할 수 있게 남는다
-				const shallow = needsShallow(ch, s);
-				if (shallow) {
-					const pad = overflowOf(s), box = { x: r.x - pad, y: r.y - pad, w: r.w + pad * 2, h: r.h + pad * 2 };
-					try { items.push({ type: "image", ...box, data: await bake(ch, box, false) }); } catch (e) { fails.push(`${ch.tagName} ${String(e)}`); }
-				}
-				// 상자
-				const fill = color(s.backgroundColor);
-				const bw = parseFloat(s.borderTopWidth) || 0, bc = color(s.borderTopColor);
-				const sides = ["Top", "Right", "Bottom", "Left"].map((k) => (parseFloat(s["border" + k + "Width"]) || 0) > 0 && s["border" + k + "Style"] !== "none");
-				const full = sides.every(Boolean);
-				if (!shallow && (fill || (full && bc && bw))) {
-					items.push({ type: "box", ...r, fill: fill ? { ...fill, alpha: fill.alpha * op } : null, line: full && bc && bw ? { ...bc, w: bw, dash: s.borderTopStyle } : null, radius: parseFloat(s.borderTopLeftRadius) || 0, round: s.borderTopLeftRadius.includes("%") && parseFloat(s.borderTopLeftRadius) >= 50 });
-				}
-				// 한 변만 그은 선 (구분선 · 밑줄 강조)
-				if (!shallow && !full) {
-					["Top", "Right", "Bottom", "Left"].forEach((k, i) => {
-						if (!sides[i]) return;
-						const w = parseFloat(s["border" + k + "Width"]), c = color(s["border" + k + "Color"]);
-						if (!c) return;
-						const L = { Top: [r.x, r.y + w / 2, r.x + r.w, r.y + w / 2], Bottom: [r.x, r.y + r.h - w / 2, r.x + r.w, r.y + r.h - w / 2], Left: [r.x + w / 2, r.y, r.x + w / 2, r.y + r.h], Right: [r.x + r.w - w / 2, r.y, r.x + r.w - w / 2, r.y + r.h] }[k];
-						items.push({ type: "line", x1: L[0], y1: L[1], x2: L[2], y2: L[3], color: c.hex, w, dash: s["border" + k + "Style"] });
-					});
-				}
-				// 표
-				if (ch.tagName === "TABLE") {
-					const rows = [...ch.rows].map((tr) => [...tr.cells].map((td) => {
-						const cs = css(td), c = color(cs.color), b = color(cs.backgroundColor) || color(css(tr).backgroundColor);
-						// 칸 글자는 안쪽 span 마다 서식이 달라 조각(run)으로 넘긴다. 문단(p · div)이 나뉘면 줄을 바꾼다
-						const runs = [];
-						const blocks = [...td.querySelectorAll("p, div, li")].filter((e) => !e.querySelector("p, div, li") && (e.innerText || "").trim());
-						if (blocks.length) blocks.forEach((bl, k) => { if (k) runs.push({ text: "\n", br: true }); runs.push(...runsOf(bl)); });
-						else runs.push(...runsOf(td));
-						const va = { top: "top", bottom: "bottom" }[cs.verticalAlign] || "middle";
-						const pa = blocks[0] ? css(blocks[0]).textAlign : cs.textAlign;
-						return { runs, text: td.innerText.trim(), size: parseFloat(cs.fontSize), bold: +cs.fontWeight >= 600, color: c ? c.hex : "000000", fill: b ? b.hex : null, align: pa, valign: va, font: fontOf(cs), colspan: td.colSpan, rowspan: td.rowSpan, border: color(cs.borderBottomColor)?.hex || null, bw: parseFloat(cs.borderBottomWidth) || 0, pad: [cs.paddingTop, cs.paddingRight, cs.paddingBottom, cs.paddingLeft].map(parseFloat) };
-					}));
-					// 열 너비는 모든 칸의 좌우 경계에서 구한다 — 첫 행에 합친 칸(colspan)이 있으면 첫 행 칸 수가 열 수보다 적어 열이 통째로 밀린다 (2026.11.18)
-					const edges = [...new Set([...ch.rows].flatMap((tr) => [...tr.cells].flatMap((td) => { const b = td.getBoundingClientRect(); return [Math.round(b.left * 2) / 2, Math.round(b.right * 2) / 2]; })))].sort((x, y) => x - y)
-						.filter((x, i, a) => i === 0 || x - a[i - 1] > 2);
-					const colW = edges.slice(1).map((x, i) => x - edges[i]);
-					const rowH = [...ch.rows].map((tr) => tr.getBoundingClientRect().height);
-					items.push({ type: "table", ...r, rows, colW, rowH });
-					continue;
-				}
-				// 글자
-				if (isTextBlock(ch) && hasInlineOnly(ch)) {
-					const pl = parseFloat(s.paddingLeft) + (parseFloat(s.borderLeftWidth) || 0), pr = parseFloat(s.paddingRight) + (parseFloat(s.borderRightWidth) || 0);
-					const pt = parseFloat(s.paddingTop) + (parseFloat(s.borderTopWidth) || 0), pb = parseFloat(s.paddingBottom) + (parseFloat(s.borderBottomWidth) || 0);
-					const runs = runsOf(ch);
-					if (runs.length) {
-						const flex = s.display.includes("flex") || s.display.includes("grid");
-						const valign = flex ? ({ center: "middle", "flex-end": "bottom", end: "bottom" }[s.alignItems] || "top") : s.verticalAlign === "middle" ? "middle" : "top";
-						let align = s.textAlign;
-						if (flex && (s.justifyContent === "center")) align = "center";
-						if (flex && ["flex-end", "end", "right"].includes(s.justifyContent)) align = "right";
-						// 줄 높이는 늘 px 로 넘긴다 — normal 을 PowerPoint 기본 줄 간격에 맡기면 글꼴마다 어긋난다
-						const fb = firstBaseline(ch);
-						const lhRaw = parseFloat(s.lineHeight);
-						const fm = fontMetrics(fb ? fb.s : s);
-						const lh = isNaN(lhRaw) ? fm.asc + fm.desc : lhRaw;
-						const top = r.y + pt;
-						items.push({ type: "text", x: r.x + pl, y: top, w: r.w - pl - pr, h: r.h - pt - pb, runs, align: align === "start" ? "left" : align === "end" ? "right" : align, valign, lineHeight: lh, baseline: fb ? fb.y - S.top - top : null, size0: fb ? fb.size : parseFloat(s.fontSize), alpha: op });
-					}
-					continue;
-				}
-				// 블록 자식과 섞인 맨 글자 — 글자 조각마다 따로
-				for (const n of ch.childNodes) {
-					if (n.nodeType !== 3 || !n.nodeValue.trim()) continue;
-					const range = document.createRange(); range.selectNodeContents(n);
-					const rr = R(range.getBoundingClientRect()), c = color(s.color);
-					items.push({ type: "text", ...rr, runs: [{ text: n.nodeValue.trim(), size: parseFloat(s.fontSize), bold: +s.fontWeight >= 600, italic: s.fontStyle === "italic", color: c ? c.hex : "000000", font: fontOf(s) }], align: "left", valign: "top" });
-				}
-				await visit(ch);
+				const me = [...chain, ++gid];
+				// 그룹 이름 — PowerPoint 「선택 창」에서 알아보게 이름표 · 첫 줄 글 · class 순으로 고른다 (div 만으로는 어느 묶음인지 모른다)
+				const line = (ch.innerText || "").trim().split(/\r?\n/)[0].trim();
+				groups[gid] = ch.dataset?.name || ch.getAttribute("aria-label") || ch.id || (line && (line.length > 24 ? line.slice(0, 24) + "…" : line)) || (typeof ch.className === "string" && ch.className.trim().split(/\s+/)[0]) || ch.tagName.toLowerCase();
+				const start = items.length;
+				await one(ch, me);
+				// 자손이 먼저 자기 번호를 달았으므로 아직 비어 있는 것이 이 요소가 낳은 도형이다
+				for (let k = start; k < items.length; k++) if (!items[k].g) items[k].g = me;
 			}
 		};
-		await visit(root);
-		return { w: S.width, h: S.height, background: bg, items, fails };
+		const one = async (ch, me) => {
+			const s = css(ch), r = R(ch.getBoundingClientRect()), op = opacityOf(ch);
+			if (r.w < 0.5 || r.h < 0.5) return;
+			// 통째로 굽기 — 그 요소와 자식이 한 장의 그림이 된다
+			if (needsDeep(ch, s)) {
+				const pad = overflowOf(s), box = clipped(ch, { x: r.x - pad, y: r.y - pad, w: r.w + pad * 2, h: r.h + pad * 2 });
+				if (!box) return;
+				try { items.push({ type: "image", ...box, data: await bake(ch, box, true), alt: ch.getAttribute("alt") || "", baked: "whole", tag: ch.tagName.toLowerCase() }); } catch (e) { fails.push(`${ch.tagName} ${String(e)}`); }
+				return;
+			}
+			// 바탕 · 테두리만 굽기 — 글자 · 자식은 그 위에 그대로 편집할 수 있게 남는다
+			const shallow = needsShallow(ch, s);
+			if (shallow) {
+				const pad = overflowOf(s), box = { x: r.x - pad, y: r.y - pad, w: r.w + pad * 2, h: r.h + pad * 2 };
+				try { items.push({ type: "image", ...box, data: await bake(ch, box, false), baked: "background", tag: ch.tagName.toLowerCase() }); } catch (e) { fails.push(`${ch.tagName} ${String(e)}`); }
+			}
+			// 상자
+			const fill = color(s.backgroundColor);
+			const bw = parseFloat(s.borderTopWidth) || 0, bc = color(s.borderTopColor);
+			const sides = ["Top", "Right", "Bottom", "Left"].map((k) => (parseFloat(s["border" + k + "Width"]) || 0) > 0 && s["border" + k + "Style"] !== "none");
+			const full = sides.every(Boolean);
+			if (!shallow && (fill || (full && bc && bw))) {
+				items.push({ type: "box", ...r, fill: fill ? { ...fill, alpha: fill.alpha * op } : null, line: full && bc && bw ? { ...bc, w: bw, dash: s.borderTopStyle } : null, radius: parseFloat(s.borderTopLeftRadius) || 0, round: s.borderTopLeftRadius.includes("%") && parseFloat(s.borderTopLeftRadius) >= 50 });
+			}
+			// 한 변만 그은 선 (구분선 · 밑줄 강조)
+			if (!shallow && !full) {
+				["Top", "Right", "Bottom", "Left"].forEach((k, i) => {
+					if (!sides[i]) return;
+					const w = parseFloat(s["border" + k + "Width"]), c = color(s["border" + k + "Color"]);
+					if (!c) return;
+					const L = { Top: [r.x, r.y + w / 2, r.x + r.w, r.y + w / 2], Bottom: [r.x, r.y + r.h - w / 2, r.x + r.w, r.y + r.h - w / 2], Left: [r.x + w / 2, r.y, r.x + w / 2, r.y + r.h], Right: [r.x + r.w - w / 2, r.y, r.x + r.w - w / 2, r.y + r.h] }[k];
+					items.push({ type: "line", x1: L[0], y1: L[1], x2: L[2], y2: L[3], color: c.hex, w, dash: s["border" + k + "Style"] });
+				});
+			}
+			// 표
+			if (ch.tagName === "TABLE") {
+				const rows = [...ch.rows].map((tr) => [...tr.cells].map((td) => {
+					const cs = css(td), c = color(cs.color), b = color(cs.backgroundColor) || color(css(tr).backgroundColor);
+					// 칸 글자는 안쪽 span 마다 서식이 달라 조각(run)으로 넘긴다. 문단(p · div)이 나뉘면 줄을 바꾼다
+					const runs = [];
+					const blocks = [...td.querySelectorAll("p, div, li")].filter((e) => !e.querySelector("p, div, li") && (e.innerText || "").trim());
+					if (blocks.length) blocks.forEach((bl, k) => { if (k) runs.push({ text: "\n", br: true }); runs.push(...runsOf(bl)); });
+					else runs.push(...runsOf(td));
+					const va = { top: "top", bottom: "bottom" }[cs.verticalAlign] || "middle";
+					const pa = blocks[0] ? css(blocks[0]).textAlign : cs.textAlign;
+					return { runs, text: td.innerText.trim(), size: parseFloat(cs.fontSize), bold: +cs.fontWeight >= 600, color: c ? c.hex : "000000", fill: b ? b.hex : null, align: pa, valign: va, font: fontOf(cs), colspan: td.colSpan, rowspan: td.rowSpan, border: color(cs.borderBottomColor)?.hex || null, bw: parseFloat(cs.borderBottomWidth) || 0, pad: [cs.paddingTop, cs.paddingRight, cs.paddingBottom, cs.paddingLeft].map(parseFloat) };
+				}));
+				// 열 너비는 모든 칸의 좌우 경계에서 구한다 — 첫 행에 합친 칸(colspan)이 있으면 첫 행 칸 수가 열 수보다 적어 열이 통째로 밀린다 (2026.11.18)
+				const edges = [...new Set([...ch.rows].flatMap((tr) => [...tr.cells].flatMap((td) => { const b = td.getBoundingClientRect(); return [Math.round(b.left * 2) / 2, Math.round(b.right * 2) / 2]; })))].sort((x, y) => x - y)
+					.filter((x, i, a) => i === 0 || x - a[i - 1] > 2);
+				const colW = edges.slice(1).map((x, i) => x - edges[i]);
+				const rowH = [...ch.rows].map((tr) => tr.getBoundingClientRect().height);
+				items.push({ type: "table", ...r, rows, colW, rowH });
+				return;
+			}
+			// 글자
+			if (isTextBlock(ch) && hasInlineOnly(ch)) {
+				const pl = parseFloat(s.paddingLeft) + (parseFloat(s.borderLeftWidth) || 0), pr = parseFloat(s.paddingRight) + (parseFloat(s.borderRightWidth) || 0);
+				const pt = parseFloat(s.paddingTop) + (parseFloat(s.borderTopWidth) || 0), pb = parseFloat(s.paddingBottom) + (parseFloat(s.borderBottomWidth) || 0);
+				const runs = runsOf(ch);
+				if (runs.length) {
+					const flex = s.display.includes("flex") || s.display.includes("grid");
+					const valign = flex ? ({ center: "middle", "flex-end": "bottom", end: "bottom" }[s.alignItems] || "top") : s.verticalAlign === "middle" ? "middle" : "top";
+					let align = s.textAlign;
+					if (flex && (s.justifyContent === "center")) align = "center";
+					if (flex && ["flex-end", "end", "right"].includes(s.justifyContent)) align = "right";
+					// 줄 높이는 늘 px 로 넘긴다 — normal 을 PowerPoint 기본 줄 간격에 맡기면 글꼴마다 어긋난다
+					const fb = firstBaseline(ch);
+					const lhRaw = parseFloat(s.lineHeight);
+					const fm = fontMetrics(fb ? fb.s : s);
+					const lh = isNaN(lhRaw) ? fm.asc + fm.desc : lhRaw;
+					const top = r.y + pt;
+					items.push({ type: "text", x: r.x + pl, y: top, w: r.w - pl - pr, h: r.h - pt - pb, runs, align: align === "start" ? "left" : align === "end" ? "right" : align, valign, lineHeight: lh, baseline: fb ? fb.y - S.top - top : null, size0: fb ? fb.size : parseFloat(s.fontSize), alpha: op });
+				}
+				return;
+			}
+			// 블록 자식과 섞인 맨 글자 — 글자 조각마다 따로
+			for (const n of ch.childNodes) {
+				if (n.nodeType !== 3 || !n.nodeValue.trim()) continue;
+				const range = document.createRange(); range.selectNodeContents(n);
+				const rr = R(range.getBoundingClientRect()), c = color(s.color);
+				items.push({ type: "text", ...rr, runs: [{ text: n.nodeValue.trim(), size: parseFloat(s.fontSize), bold: +s.fontWeight >= 600, italic: s.fontStyle === "italic", color: c ? c.hex : "000000", font: fontOf(s) }], align: "left", valign: "top" });
+			}
+			await visit(ch, me);
+		};
+		await visit(root, []);
+		return { w: S.width, h: S.height, background: bg, items, fails, groups };
 	}
 
 	// 시험 도구(tools/cdp.mjs)가 슬라이드 안에서 굽기 · 뽑기를 바로 부를 수 있게

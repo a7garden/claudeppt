@@ -9,7 +9,7 @@
 //   쪽 손보기            addSlide · duplicateSlide · moveSlide · removeSlide — 쪽 목록 · 우클릭 메뉴가 같이 쓴다
 //   대화                 send → claude 한 턴 → 그림 채우기 → 한 판으로 남김 → .claudeppt/talk.json
 //   직접 편집            applyDirect → 원본 HTML 에 되쓰고 잠시 뒤 한 판으로 남김
-//   판 · 릴리즈          refreshVersions · preview · restore · release
+//   판 · 릴리즈          refreshVersions · preview · restore · release (릴리즈 본체는 파일 끝 makeRelease — 바깥 CLI 도 쓴다)
 //   비교 검사            check — 내보낸 PPTX 를 PowerPoint 가 그린 모양과 웹을 픽셀로 견준다 (check.ts) · fixDiff
 import { listen } from "@tauri-apps/api/event";
 import { create } from "zustand";
@@ -61,7 +61,7 @@ interface S {
 	flow: boolean;
 	/** 무대 도구 — 고르기(보면서 바로 고치기) · 펜 · 화살표 · 상자. mode 는 이것에서 나온다(고르기 → edit, 나머지 → pin).
 	 *  2026.11.18 : 보기 · 표시 · 편집 세 모드를 도구 하나로 합쳤다 — 보다가 고치려면 매번 모드를 바꿔야 했다 */
-	tool: Tool | "select";
+	tool: Tool | "select" | "sketch";
 	/** 요청칸에 넣어 달라는 글 — 커서 자리에 끼우거나(whole 아님) 칸 전체를 바꾼다. k 는 같은 글을 거듭 보내도 다시 넣게 하는 표식 */
 	insertReq: { text: string; whole?: boolean; k: number } | null;
 	pins: Pin[];
@@ -84,7 +84,7 @@ interface S {
 	closeProject: () => Promise<void>;
 	setCurrent: (i: number) => void;
 	setFlow: (on: boolean) => void;
-	setTool: (t: Tool | "select") => void;
+	setTool: (t: Tool | "select" | "sketch") => void;
 	mentionSlide: (no: number) => void;
 	refill: (text: string) => void;
 	addSlide: (at: number) => Promise<void>;
@@ -97,6 +97,9 @@ interface S {
 	send: (text: string, attachments?: string[]) => Promise<void>;
 	stop: () => void;
 	applyDirect: (slideId: string, path: number[] | null, op: Op) => Promise<void>;
+	/** 손으로 고친 것(끌기 · 방향키 이동 · 글 고치기 · 지우기)을 한 걸음 되돌린다 (Ctrl+Z) · 다시 한다 (Ctrl+Y) */
+	undo: () => Promise<void>;
+	redo: () => Promise<void>;
 	refreshVersions: () => Promise<void>;
 	setPreview: (c: Commit | null) => void;
 	restore: (c: Commit) => Promise<void>;
@@ -116,6 +119,45 @@ let unlisten: (() => void)[] = [];
 /** 이 앱을 켜 둔 동안 글꼴을 물어본 프로젝트 — 열 때마다 같은 것을 다시 묻지 않는다 */
 const fontAsked = new Set<string>();
 let directTimer: ReturnType<typeof setTimeout> | undefined;
+// 되돌리기 — 손으로 고치기 전의 슬라이드 파일 글을 쌓는다. 파일을 통째로 되쓰면 감시가 쪽을 다시 그린다.
+// Claude 턴 · 판 되돌리기 · 다른 덱 열기 때 비운다 — 그 뒤에 옛 글을 되쓰면 Claude 가 고친 것이 함께 사라진다.
+// Claude 의 턴 자체는 「판」으로 되돌린다
+type Snap = { file: string; text: string };
+let undoStack: Snap[] = [];
+let redoStack: Snap[] = [];
+const UNDO_MAX = 100;
+const clearUndo = () => { undoStack = []; redoStack = []; };
+// 손 편집 · 되돌리기는 한 줄로 차례대로 돈다 — 방향키 이동을 쓰는 중에 Ctrl+Z 가 같은 파일을 읽고 쓰면 하나가 다른 것을 덮는다
+let queue: Promise<unknown> = Promise.resolve();
+const serial = (f: () => Promise<void>) => { const r = queue.then(f, f); queue = r.catch(() => {}); return r; };
+
+/** 손으로 고친 것은 몇 번이고 이어서 하므로 잠잠해지면 한 판으로 묶는다. 그새 턴이 돌면 끝난 뒤로 미룬다 */
+function directCommit(dir: string, get: () => S) {
+	clearTimeout(directTimer);
+	const flush = async () => {
+		if (get().dir !== dir) return;
+		if (get().running) { directTimer = setTimeout(flush, 2000); return; }
+		await api.commit(dir, tNow("direct")).catch(() => null);
+		get().refreshVersions();
+	};
+	directTimer = setTimeout(flush, 4000);
+}
+
+/** from 에서 하나 꺼내 그 파일을 되쓰고, 지금 글은 to 에 쌓는다 — undo · redo 가 같은 길을 반대로 쓴다 */
+async function step(get: () => S, from: Snap[], to: Snap[]) {
+	const { dir, deck } = get();
+	if (!dir || !deck || get().preview) return;
+	if (get().running) return get().notify(tNow("working"), "err");
+	const snap = from.pop();
+	if (!snap) return;
+	const now = await api.readText(dir, snap.file).catch(() => null);
+	await api.writeText(dir, snap.file, snap.text);
+	if (now != null) to.push({ file: snap.file, text: now });
+	// 되돌린 쪽이 다른 쪽이면 그 쪽으로 간다 — 보이지 않는 곳에서 바뀌면 되돌렸는지 알 수 없다
+	const i = deck.slides.findIndex((x) => x.file === snap.file);
+	if (i >= 0 && i !== get().current) get().setCurrent(i);
+	directCommit(dir, get);
+}
 
 const persistPins = (dir: string, pins: Pin[]) => api.writeText(dir, ".claudeppt/pins.json", JSON.stringify(pins, null, 1)).catch(() => {});
 const persistTalk = (dir: string, turns: Turn[], sessionId: string | null) =>
@@ -164,20 +206,13 @@ export const useDeck = create<S>()((set, get) => ({
 		const pins = await readJson<Pin[]>(dir, ".claudeppt/pins.json", []);
 		const talk = await readJson<{ sessionId: string | null; turns: Turn[] }>(dir, ".claudeppt/talk.json", { sessionId: null, turns: [] });
 		const releases = await readJson<Release[]>(dir, "releases/releases.json", []);
+		clearUndo();
 		set({ dir, id, deck, rev: {}, current: 0, mode: "edit", tool: "select", pins, turns: talk.turns, sessionId: talk.sessionId, versions: [], releases, preview: null, report: await readReport(dir), compare: false });
 		useSettings.getState().remember(dir);
 		// 처음 여는 프로젝트(가져오기 직후)면 첫 판을 남긴다
 		const log = await api.log(dir, 1);
 		if (!log.length) await api.commit(dir, deck.source?.kind === "pptx" ? "PPTX 를 가져온다" : "새로 만든다");
 		await get().refreshVersions();
-		// 글꼴 잇기 — 화면을 막지 않고 뒤에서 한다 (깔린 글꼴을 처음 읽을 때 몇 초 걸린다)
-		linkFonts(dir, deck).then(({ missing }) => {
-			if (get().dir !== dir || !missing.length || fontAsked.has(dir)) return;
-			fontAsked.add(dir);
-			const list = missing.slice(0, 4).join(" · ") + (missing.length > 4 ? ` 외 ${missing.length - 4}개` : "");
-			get().notify(`글꼴 ${missing.length}개를 찾지 못했습니다 — ${list}. Claude 에게 글꼴 설정을 맡길까요?`, "ok", { action: { label: "맡기기", run: () => get().fixFonts(missing) } });
-		}, () => {});
-
 		unlisten.push(
 			await listen<{ id: string; paths: string[] }>("deck-fs", async (e) => {
 				if (e.payload.id !== get().id) return;
@@ -223,6 +258,22 @@ export const useDeck = create<S>()((set, get) => ({
 				}
 			}),
 		);
+		// 글꼴 잇기 — 화면을 막지 않고 뒤에서 한다 (깔린 글꼴을 처음 읽을 때 몇 초 걸린다).
+		// 폴더 감시 사건을 받기 시작한 뒤에 돌린다. 2026.11.20 : 전에는 받기 전에 돌려, 글꼴 목록을 이미 읽어 둔 두 번째 가져오기에서
+		// theme.css 를 먼저 고쳐 버렸다 — 그 사건을 놓친 쪽들이 대체 글꼴로 남아 「목차」가 두 줄로 꺾였다.
+		// 고쳤으면 쪽을 다시 띄운다 — 새 @font-face 를 CSS 다시 읽기만으로는 이미 그린 글자에 늦게 입히는 일이 있어 확실히 한다
+		linkFonts(dir, deck).then(({ missing, changed }) => {
+			if (get().dir !== dir) return;
+			if (changed) {
+				const now = Date.now(), rev = { ...get().rev };
+				for (const s of get().deck?.slides || []) rev[s.id] = now;
+				set({ rev });
+			}
+			if (!missing.length || fontAsked.has(dir)) return;
+			fontAsked.add(dir);
+			const list = missing.slice(0, 4).join(" · ") + (missing.length > 4 ? ` 외 ${missing.length - 4}개` : "");
+			get().notify(`글꼴 ${missing.length}개를 찾지 못했습니다 — ${list}. Claude 에게 글꼴 설정을 맡길까요?`, "ok", { action: { label: "맡기기", run: () => get().fixFonts(missing) } });
+		}, () => {});
 	},
 
 	closeProject: async () => {
@@ -243,12 +294,14 @@ export const useDeck = create<S>()((set, get) => ({
 
 	setTool: (tool) => {
 		const mode: Mode = tool === "select" ? "edit" : "pin";
-		// 긋기는 한 쪽 무대에서만 한다 — 이어 보기의 작은 쪽에 그으면 자리가 거칠다
-		set(tool === "select" ? { tool, mode } : { tool, mode, flow: false });
+		// 2026.11.20 : 이어 보기에서도 긋는다 — 여러 쪽을 훑으며 의견을 다는 일이 잦고, 이어 보기의 쪽은 무대 너비만큼 커서 자리가 거칠지 않다.
+		//              (전에는 긋는 도구를 고르면 한 쪽 보기로 돌아갔다)
+		// 스케치는 한 쪽 보기에서만 그린다 — 판이 쪽 하나를 덮어 쓰므로 이어 보기면 접는다
+		if (tool === "sketch" && get().flow) get().setFlow(false);
+		set({ tool, mode });
 		for (const w of get().frames) tell(w, { t: "mode", mode });
 	},
 	setFlow: (flow) => {
-		if (flow && get().tool !== "select") get().setTool("select");
 		set({ flow });
 		try { localStorage.setItem("claudeppt.flow", flow ? "1" : "0"); } catch {}
 	},
@@ -317,6 +370,7 @@ export const useDeck = create<S>()((set, get) => ({
 		const { dir, deck, pins, running, current } = get();
 		if (!deck || running) return;
 		if (!text.trim() && !pins.length) return;
+		clearUndo();
 		const s = useSettings.getState().s;
 		// 직접 편집이 남아 있으면 먼저 판으로 — Claude 의 판과 섞이지 않게
 		clearTimeout(directTimer);
@@ -376,23 +430,24 @@ export const useDeck = create<S>()((set, get) => ({
 		api.claudeStop(r);
 	},
 
-	applyDirect: async (slideId, path, op) => {
+	applyDirect: (slideId, path, op) => serial(async () => {
 		const { dir, deck } = get();
 		const ref = deck?.slides.find((s) => s.id === slideId);
 		if (!ref) return;
 		// Claude 가 파일을 고치는 중에는 화면의 요소 번호 길이 원본과 어긋날 수 있다 — 받지 않는다
 		if (get().running) return get().notify(tNow("working"), "err");
-		await applyOp(dir, ref.file, path, op);
-		clearTimeout(directTimer);
-		// 손으로 고친 것은 몇 번이고 이어서 하므로 잠잠해지면 한 판으로 묶는다. 그새 턴이 돌면 끝난 뒤로 미룬다
-		const flush = async () => {
-			if (get().dir !== dir) return;
-			if (get().running) { directTimer = setTimeout(flush, 2000); return; }
-			await api.commit(dir, tNow("direct")).catch(() => null);
-			get().refreshVersions();
-		};
-		directTimer = setTimeout(flush, 4000);
-	},
+		const before = await api.readText(dir, ref.file).catch(() => null);
+		if (!(await applyOp(dir, ref.file, path, op))) return;
+		if (before != null) {
+			undoStack.push({ file: ref.file, text: before });
+			if (undoStack.length > UNDO_MAX) undoStack.shift();
+			redoStack = [];
+		}
+		directCommit(dir, get);
+	}),
+
+	undo: () => serial(() => step(get, undoStack, redoStack)),
+	redo: () => serial(() => step(get, redoStack, undoStack)),
 
 	refreshVersions: async () => {
 		const { dir } = get();
@@ -405,6 +460,7 @@ export const useDeck = create<S>()((set, get) => ({
 	restore: async (c) => {
 		const { dir } = get();
 		set({ busy: tNow("restore") });
+		clearUndo();
 		try {
 			await api.restore(dir, c.hash, `v${c.n} 으로 되돌린다`);
 			set({ preview: null, deck: await readDeck(dir) });
@@ -437,25 +493,10 @@ export const useDeck = create<S>()((set, get) => ({
 		if (!deck) return;
 		set({ busy: tNow("release") });
 		try {
-			await api.commit(dir, tNow("direct")).catch(() => null);
-			const log = await api.log(dir);
-			const head = log[0];
-			// 번호는 git 태그에서 — releases.json 이 지워지거나 어긋나도 같은 r<k> 를 두 번 달지 않는다
-			const used = log.flatMap((c) => c.tags).map((t) => Number(/^r(\d+)$/.exec(t)?.[1] || 0));
-			const k = Math.max(0, ...used, ...get().releases.map((r) => +r.tag.slice(1) || 0)) + 1;
-			const tag = `r${k}`;
-			// 릴리즈가 가리키는 것은 내용 판(head)이다. 릴리즈 판은 PPTX 와 기록만 더한다
-			const file = `releases/${tag}-v${head.n}.pptx`;
-			const b = await buildPptx(deck, id, (i, n) => set({ busy: `${tNow("release")} ${i}/${n}` }));
-			await api.writeBytes(dir, file, b.data);
-			const rel: Release = { name: name.trim() || tag, tag, n: head.n, hash: head.hash, file, notes: notes.trim(), at: new Date().toISOString() };
-			const releases = [...get().releases, rel];
-			await api.writeText(dir, "releases/releases.json", JSON.stringify(releases, null, 2) + "\n");
-			await api.commit(dir, `릴리즈 ${tag} — ${rel.name}`);
-			await api.tag(dir, tag);
-			set({ releases });
+			const rel = await makeRelease(dir, id, deck, get().releases, name, notes, (i, n) => set({ busy: `${tNow("release")} ${i}/${n}` }));
+			set({ releases: [...get().releases, rel] });
 			await get().refreshVersions();
-			get().notify(`${tag} · ${rel.name}`, "ok");
+			get().notify(`${rel.tag} · ${rel.name}`, "ok");
 		} catch (e) {
 			get().notify(String(e), "err");
 		} finally {
@@ -532,3 +573,24 @@ export const useDeck = create<S>()((set, get) => ({
 		set({ deck });
 	},
 }));
+
+/** 릴리즈 하나 — 남은 변경을 판으로 남기고, PPTX 를 releases/ 에 굽고, 기록 · 태그를 단다.
+ *  앱의 「릴리즈」 단추와 바깥 CLI(remote.ts)가 함께 쓴다. prev 는 지금까지의 releases.json */
+export async function makeRelease(dir: string, id: string, deck: Deck, prev: Release[], name: string, notes: string, progress: (i: number, n: number) => void): Promise<Release> {
+	await api.commit(dir, tNow("direct")).catch(() => null);
+	const log = await api.log(dir);
+	const head = log[0];
+	// 번호는 git 태그에서 — releases.json 이 지워지거나 어긋나도 같은 r<k> 를 두 번 달지 않는다
+	const used = log.flatMap((c) => c.tags).map((t) => Number(/^r(\d+)$/.exec(t)?.[1] || 0));
+	const k = Math.max(0, ...used, ...prev.map((r) => +r.tag.slice(1) || 0)) + 1;
+	const tag = `r${k}`;
+	// 릴리즈가 가리키는 것은 내용 판(head)이다. 릴리즈 판은 PPTX 와 기록만 더한다
+	const file = `releases/${tag}-v${head.n}.pptx`;
+	const b = await buildPptx(deck, id, progress);
+	await api.writeBytes(dir, file, b.data);
+	const rel: Release = { name: name.trim() || tag, tag, n: head.n, hash: head.hash, file, notes: notes.trim(), at: new Date().toISOString() };
+	await api.writeText(dir, "releases/releases.json", JSON.stringify([...prev, rel], null, 2) + "\n");
+	await api.commit(dir, `릴리즈 ${tag} — ${rel.name}`);
+	await api.tag(dir, tag);
+	return rel;
+}
