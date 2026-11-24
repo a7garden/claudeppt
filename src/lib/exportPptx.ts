@@ -69,8 +69,18 @@ function toRuns(runs: any[], f: FontCtx) {
 		.filter(Boolean) as any[];
 }
 
-/** data 는 날바이트 — base64 로 싸면 큰 덱에서 메모리가 몇 벌로 불어난다 (가져오기와 같은 까닭) */
-export interface Built { data: Uint8Array; missingFonts: string[] }
+/** 편집할 수 없는 그림으로 굳은 요소 하나 — 슬라이드 좌표(px) */
+export interface Locked { x: number; y: number; w: number; h: number; tag: string }
+
+/** 원래 그림인 요소 — 통째로 구워도 잃는 것이 없다 */
+const PICTURE_TAGS = new Set(["img", "svg", "canvas", "video", "picture"]);
+
+/**
+ * data 는 날바이트 — base64 로 싸면 큰 덱에서 메모리가 몇 벌로 불어난다 (가져오기와 같은 까닭).
+ * locked 는 쪽마다 자식까지 통째로 그림이 된 요소(변형 · 필터 · 글자 그림자 · 목록 글머리 …).
+ * 비교 검사가 이것을 따로 센다 — 그림이 되면 PowerPoint 그림과 웹이 똑같아 차이 0% 로 통과하지만, 글자 · 도형은 더 고치지 못한다.
+ */
+export interface Built { data: Uint8Array; missingFonts: string[]; locked: Locked[][] }
 
 /**
  * exact=true 면 쪽마다 웹을 2배로 구운 그림 한 장을 깔고, 그 위에 같은 자리의 글상자를 투명하게 얹는다.
@@ -85,6 +95,7 @@ export async function buildPptx(deck: Deck, projectId: string, progress: (i: num
 	pptx.title = deck.title;
 	// 쪽마다 만든 도형의 묶음 사슬 · 묶음 이름 — exact 는 그림 한 장 위 투명 글이라 묶지 않는다(null)
 	const plan: ({ chains: number[][]; names: Record<number, string> } | null)[] = [];
+	const locked: Locked[][] = [];
 
 	for (let i = 0; i < deck.slides.length; i++) {
 		progress(i, deck.slides.length);
@@ -99,6 +110,9 @@ export async function buildPptx(deck: Deck, projectId: string, progress: (i: num
 		}
 		if (res.error) throw new Error(`${i + 1}쪽: ${res.error}`);
 		const data = res.data;
+		locked.push(data.items
+			.filter((it: any) => it.type === "image" && it.baked === "whole" && !PICTURE_TAGS.has(it.tag))
+			.map((it: any) => ({ x: Math.round(it.x), y: Math.round(it.y), w: Math.round(it.w), h: Math.round(it.h), tag: it.tag })));
 		const slide = pptx.addSlide();
 		if (exact) {
 			const { win, dispose } = await offscreen(projectId, ref.file, deck.size.w, deck.size.h);
@@ -124,11 +138,19 @@ export async function buildPptx(deck: Deck, projectId: string, progress: (i: num
 			if (it.type === "box") {
 				const isRound = it.round;
 				const shape = isRound ? pptx.ShapeType.ellipse : it.radius > 0.5 ? pptx.ShapeType.roundRect : pptx.ShapeType.rect;
+				// 선은 PowerPoint 가 도형 테두리 가운데에 긋는다 — CSS border(안쪽)와 같은 자리가 되게 도형을 선 두께 반만큼 줄인다.
+				// 2026.11.24 : 줄이지 않아 테두리 있는 상자가 PPTX 에서 선 두께만큼 커졌다
+				const g = it.line ? it.line.w / 2 : 0;
 				slide.addShape(shape, {
-					x: IN(it.x), y: IN(it.y), w: IN(it.w), h: IN(it.h),
+					x: IN(it.x + g), y: IN(it.y + g), w: IN(Math.max(0, it.w - g * 2)), h: IN(Math.max(0, it.h - g * 2)),
 					fill: it.fill ? { color: it.fill.hex, transparency: Math.round((1 - it.fill.alpha) * 100) } : { type: "none" },
 					line: it.line ? { color: it.line.hex, width: PT(it.line.w), dashType: dashOf(it.line.dash), transparency: Math.round((1 - it.line.alpha) * 100) } : { type: "none" },
-					rectRadius: !isRound && it.radius > 0.5 ? IN(Math.min(it.radius, Math.min(it.w, it.h) / 2)) : undefined,
+					rectRadius: !isRound && it.radius > 0.5 ? IN(Math.max(0, Math.min(it.radius, Math.min(it.w, it.h) / 2) - g)) : undefined,
+					// 바깥 그림자 — 거리 · 방향은 x · y 어긋남에서, 흐림은 CSS blur 그대로 (가져오기가 blurRad 를 그대로 blur 로 썼다)
+					shadow: it.shadow ? {
+						type: "outer", color: it.shadow.hex, opacity: it.shadow.alpha, blur: PT(it.shadow.blur),
+						offset: PT(Math.hypot(it.shadow.x, it.shadow.y)), angle: Math.round(((Math.atan2(it.shadow.y, it.shadow.x) * 180) / Math.PI + 360) % 360),
+					} : undefined,
 				} as any);
 			} else if (it.type === "line") {
 				slide.addShape(pptx.ShapeType.line, {
@@ -172,7 +194,7 @@ export async function buildPptx(deck: Deck, projectId: string, progress: (i: num
 	const raw = (await pptx.write({ outputType: "uint8array" })) as Uint8Array;
 	// 묶기가 어긋나도 내보내기는 살린다 — 묶지 않은 파일이 묶다 깨진 파일보다 낫다
 	const out = await groupSlides(raw, plan).catch((e) => { console.warn("group", e); return raw; });
-	return { data: out, missingFonts: [...fonts.missing] };
+	return { data: out, missingFonts: [...fonts.missing], locked };
 }
 
 // ── 그룹 묶기 ──────────────────────────────────────────────────────────

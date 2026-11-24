@@ -10,22 +10,25 @@
 //   대화                 send → claude 한 턴 → 그림 채우기 → 한 판으로 남김 → .claudeppt/talk.json
 //   직접 편집            applyDirect → 원본 HTML 에 되쓰고 잠시 뒤 한 판으로 남김
 //   판 · 릴리즈          refreshVersions · preview · restore · release (릴리즈 본체는 파일 끝 makeRelease — 바깥 CLI 도 쓴다)
-//   비교 검사            check — 내보낸 PPTX 를 PowerPoint 가 그린 모양과 웹을 픽셀로 견준다 (check.ts) · fixDiff
+//   판 비교              startCompare · closeCompare · restoreSlide — 고른 판과 지금을 쪽마다 견주고 한 쪽만 되돌린다 (versions.ts)
+//   판 멘션              mentionVersion · send 의 @v<n> — 그 판 파일을 펼쳐 Claude 가 참고로 읽는다 (versions.ts versionContext)
+//   내보낸 PPTX 확인     verifyPptx — 내보내기 · 릴리즈 뒤 PowerPoint 가 그린 모양을 웹과 견주어 다를 때만 알린다 (check.ts) · fixDiff
 import { listen } from "@tauri-apps/api/event";
 import { create } from "zustand";
 import { api, type Commit } from "./api";
 import { type Deck, newId, readDeck, slideHtml, writeDeck } from "./deck";
 import { applyOp, type Op } from "./edits";
-import { buildPptx } from "./exportPptx";
-import { type Report, SAME, readReport, runCheck } from "./check";
+import { type Built, buildPptx } from "./exportPptx";
+import { type Report, SAME, needsFix, runCheck } from "./check";
 import { tell } from "./frames";
 import { tNow } from "./i18n";
 import { askClaude, linkFonts } from "./fonts";
 import { fillGenerated } from "./imagegen";
 import { markedPictures, type Shape, type Tool } from "./markup";
-import { type Mention, mentionsIn } from "./mention";
+import { type Mention, type VersionMention, mentionsIn, versionMentionsIn } from "./mention";
 import { type PinNote, systemPrompt, turnPrompt } from "./prompt";
 import { useSettings } from "./settings";
+import { type VersionDiff, diffVersion, restoreSlide as restoreSlideFile, versionContext } from "./versions";
 
 /** 핀 하나 — shape 가 있으면 그어 놓은 표시(펜 · 화살표 · 상자)이고 x, y 는 그 번호 표식 자리다 (markup.ts) */
 export interface Pin { id: string; slide: string; x: number; y: number; text: string; target?: PinNote["target"]; shape?: Shape; at: number }
@@ -37,6 +40,8 @@ export interface Turn {
 	pins: PinNote[];
 	/** 요청 글의 @쪽 멘션을 보낼 때 푼 것 — 쪽 순서가 나중에 바뀌어도 같은 쪽을 가리킨다 */
 	mentions?: Mention[];
+	/** 요청 글의 @v<n> 판 멘션 — 지난 대화에서 그 판을 열 수 있게 커밋을 남긴다 */
+	versionMentions?: VersionMention[];
 	reply: string;
 	tools: ToolUse[];
 	status: "running" | "done" | "failed" | "stopped";
@@ -71,14 +76,17 @@ interface S {
 	versions: Commit[];
 	releases: Release[];
 	preview: Commit | null;
+	/** 되돌릴 수 있는 걸음 수 · 다시 할 수 있는 걸음 수 — 제목 줄 단추가 켜고 끈다 */
+	hist: { u: number; r: number };
 	busy: string | null;
 	/** busy 와 달리 화면을 막지 않는 일. 프로젝트를 닫아도 남는다 */
 	jobs: Job[];
 	toast: { text: string; kind: "ok" | "err"; action?: { label: string; run: () => void }; sticky?: boolean } | null;
 	frames: Set<Window>;
-	report: Report | null;
-	compare: boolean;
-	compareMask: boolean;
+	/** 판 비교 — 고른 판(base)과 지금. 켜져 있으면 무대가 비교 렌즈, 쪽 목록이 바뀐 쪽을 보인다 */
+	vdiff: VersionDiff | null;
+	/** 비교 렌즈에 바뀐 곳(빨간 덧칠)을 그린다 */
+	vdiffMask: boolean;
 
 	openProject: (dir: string) => Promise<void>;
 	closeProject: () => Promise<void>;
@@ -110,9 +118,14 @@ interface S {
 	/** 못 찾은 글꼴을 Claude 에게 맡긴다 — 사용자가 알림의 「맡기기」를 눌렀을 때만 부른다 */
 	fixFonts: (missing: string[]) => Promise<void>;
 	saveDeck: (deck: Deck) => Promise<void>;
-	check: () => Promise<void>;
-	setCompare: (on: boolean) => void;
-	fixDiff: () => void;
+	/** 고른 판과 지금을 견준다. base 가 없으면 직전 판 */
+	startCompare: (base?: Commit) => Promise<void>;
+	closeCompare: () => void;
+	/** 비교 중인 판에서 이 쪽만 되돌린다 (지금 없는 쪽이면 되살린다) — 한 판으로 남긴다 */
+	restoreSlide: (slideId: string) => Promise<void>;
+	/** 요청칸에 @v<n> 을 넣는다 */
+	mentionVersion: (n: number) => void;
+	fixDiff: (report: Report) => void;
 }
 
 let unlisten: (() => void)[] = [];
@@ -126,10 +139,51 @@ type Snap = { file: string; text: string };
 let undoStack: Snap[] = [];
 let redoStack: Snap[] = [];
 const UNDO_MAX = 100;
-const clearUndo = () => { undoStack = []; redoStack = []; };
+// 쌓임은 모듈 변수라 화면이 모른다 — 바뀔 때마다 걸음 수를 상태로 알린다
+const syncHist = () => useDeck.setState({ hist: { u: undoStack.length, r: redoStack.length } });
+const clearUndo = () => { undoStack = []; redoStack = []; syncHist(); };
 // 손 편집 · 되돌리기는 한 줄로 차례대로 돈다 — 방향키 이동을 쓰는 중에 Ctrl+Z 가 같은 파일을 읽고 쓰면 하나가 다른 것을 덮는다
 let queue: Promise<unknown> = Promise.resolve();
 const serial = (f: () => Promise<void>) => { const r = queue.then(f, f); queue = r.catch(() => {}); return r; };
+
+let compareTimer: ReturnType<typeof setTimeout> | undefined;
+/** 비교 중에 파일이 바뀌면(Claude 턴 · 손 편집 · 되돌리기) 잠잠해진 뒤 다시 견준다 */
+function refreshCompare(get: () => S, set: (p: Partial<S>) => void) {
+	clearTimeout(compareTimer);
+	compareTimer = setTimeout(async () => {
+		const { dir, id, deck, vdiff } = get();
+		if (!deck || !vdiff) return;
+		const next = await diffVersion(dir, id, deck, vdiff.base).catch(() => null);
+		if (next && get().vdiff?.base.hash === vdiff.base.hash) set({ vdiff: next });
+	}, 800);
+}
+
+/**
+ * 내보낸 PPTX 를 PowerPoint 로 그려 웹과 견준다 — 화면을 막지 않는 뒤 일(jobs)로. 같으면 한 줄, 다르거나 그림으로 굳은 곳이 있으면
+ * 그 쪽 번호와 「차이 고치기」를 알린다. PowerPoint 가 없는 PC 에서는 확인하지 못했다고만 알린다.
+ * 2026.11.24 : 무대의 「비교」(PowerPoint 대조 렌즈)를 걷고 여기로 옮겼다 — 사용자가 바라는 것은 늘 「완전히 같다」라서, 켜서 볼 화면보다 내보낼 때 저절로 확인하는 편이 맞다.
+ */
+function verifyPptx(get: () => S, deck: Deck, built: Built) {
+	const { dir, id, versions } = get();
+	const job = "verify" + Date.now().toString(36);
+	const note = (n: string) => useDeck.setState((st) => ({
+		jobs: st.jobs.some((j) => j.id === job) ? st.jobs.map((j) => (j.id === job ? { ...j, note: n } : j)) : [...st.jobs, { id: job, label: tNow("verifying"), i: 0, n: 0, note: n }],
+	}));
+	note("PowerPoint");
+	runCheck(dir, id, deck, versions[0]?.n ?? 0, note, built)
+		.then((report) => {
+			if (get().dir !== dir) return;
+			const bad = report.slides.filter(needsFix);
+			if (!bad.length) return get().notify(tNow("pptxSame"), "ok");
+			// 모양이 다른 쪽이 먼저다. 그림으로 굳은 곳만 있으면(돌린 배지처럼 일부러 쓴 효과일 수 있다) 알리기만 하고 붉게 칠하지 않는다
+			const differ = bad.filter((x) => x.score > SAME).map((x) => x.no);
+			const stiff = bad.filter((x) => x.locked?.length).map((x) => x.no);
+			const msg = [differ.length ? `${tNow("pptxDiffers")} ${differ.join(" · ")}` : "", stiff.length ? `${tNow("lockedSlides")} ${stiff.join(" · ")}` : ""].filter(Boolean).join(" — ");
+			get().notify(msg, differ.length ? "err" : "ok", { action: { label: tNow("fixDiff"), run: () => get().fixDiff(report) } });
+		})
+		.catch((e) => { if (get().dir === dir) get().notify(`${tNow("pptxNoCheck")} — ${String(e)}`, "err"); })
+		.finally(() => { useDeck.setState((st) => ({ jobs: st.jobs.filter((j) => j.id !== job) })); });
+}
 
 /** 손으로 고친 것은 몇 번이고 이어서 하므로 잠잠해지면 한 판으로 묶는다. 그새 턴이 돌면 끝난 뒤로 미룬다 */
 function directCommit(dir: string, get: () => S) {
@@ -153,6 +207,7 @@ async function step(get: () => S, from: Snap[], to: Snap[]) {
 	const now = await api.readText(dir, snap.file).catch(() => null);
 	await api.writeText(dir, snap.file, snap.text);
 	if (now != null) to.push({ file: snap.file, text: now });
+	syncHist();
 	// 되돌린 쪽이 다른 쪽이면 그 쪽으로 간다 — 보이지 않는 곳에서 바뀌면 되돌렸는지 알 수 없다
 	const i = deck.slides.findIndex((x) => x.file === snap.file);
 	if (i >= 0 && i !== get().current) get().setCurrent(i);
@@ -190,13 +245,13 @@ export const useDeck = create<S>()((set, get) => ({
 	versions: [],
 	releases: [],
 	preview: null,
+	hist: { u: 0, r: 0 },
 	busy: null,
 	jobs: [],
 	toast: null,
 	frames: new Set(),
-	report: null,
-	compare: false,
-	compareMask: true,
+	vdiff: null,
+	vdiffMask: true,
 
 	openProject: async (dir) => {
 		await get().closeProject();
@@ -207,7 +262,7 @@ export const useDeck = create<S>()((set, get) => ({
 		const talk = await readJson<{ sessionId: string | null; turns: Turn[] }>(dir, ".claudeppt/talk.json", { sessionId: null, turns: [] });
 		const releases = await readJson<Release[]>(dir, "releases/releases.json", []);
 		clearUndo();
-		set({ dir, id, deck, rev: {}, current: 0, mode: "edit", tool: "select", pins, turns: talk.turns, sessionId: talk.sessionId, versions: [], releases, preview: null, report: await readReport(dir), compare: false });
+		set({ dir, id, deck, rev: {}, current: 0, mode: "edit", tool: "select", pins, turns: talk.turns, sessionId: talk.sessionId, versions: [], releases, preview: null, vdiff: null });
 		useSettings.getState().remember(dir);
 		// 처음 여는 프로젝트(가져오기 직후)면 첫 판을 남긴다
 		const log = await api.log(dir, 1);
@@ -233,6 +288,7 @@ export const useDeck = create<S>()((set, get) => ({
 				if (all) for (const s of deck.slides) rev[s.id] = now;
 				if (paths.some((p) => p.endsWith(".css"))) for (const w of get().frames) tell(w, { t: "css" });
 				set({ rev });
+				if (get().vdiff) refreshCompare(get, set);
 			}),
 		);
 		unlisten.push(
@@ -287,7 +343,7 @@ export const useDeck = create<S>()((set, get) => ({
 		unlisten = [];
 		const { id } = get();
 		if (id) await api.close(id).catch(() => {});
-		set({ dir: "", id: "", deck: null, turns: [], pins: [], versions: [], preview: null, running: null, report: null, compare: false });
+		set({ dir: "", id: "", deck: null, turns: [], pins: [], versions: [], preview: null, running: null, vdiff: null });
 	},
 
 	setCurrent: (i) => set({ current: Math.max(0, Math.min(i, (get().deck?.slides.length || 1) - 1)) }),
@@ -379,7 +435,8 @@ export const useDeck = create<S>()((set, get) => ({
 		const notes: PinNote[] = pins.map((p, i) => ({ n: i + 1, slide: p.slide, slideNo: order(p.slide), x: p.x, y: p.y, text: p.text, target: p.target, shape: p.shape }));
 		const cur = deck.slides[current];
 		const mentions = mentionsIn(text, deck);
-		const turn: Turn = { id: "t" + Date.now().toString(36), at: Date.now(), request: text.trim(), pins: notes, mentions, reply: "", tools: [], status: "running" };
+		const versionMentions = versionMentionsIn(text, get().versions);
+		const turn: Turn = { id: "t" + Date.now().toString(36), at: Date.now(), request: text.trim(), pins: notes, mentions, versionMentions, reply: "", tools: [], status: "running" };
 		set({ turns: [...get().turns, turn], running: turn.id, pins: [] });
 		persistPins(dir, []);
 		const patch = (fn: (t: Turn) => Turn) => set({ turns: get().turns.map((t) => (t.id === turn.id ? fn(t) : t)) });
@@ -391,10 +448,16 @@ export const useDeck = create<S>()((set, get) => ({
 				attachments = [...attachments, ...(await markedPictures(dir, get().id, deck, notes).catch(() => []))];
 				patch((t) => ({ ...t, phase: undefined }));
 			}
+			// 판 멘션 — 그 판 파일을 .claudeppt/versions/v<n>/ 에 펼치고 지금과 다른 쪽을 적어 넘긴다. 못 펼친 판은 번호만이라도 알린다
+			const vlines: string[] = [];
+			for (const v of versionMentions) {
+				const c = get().versions.find((x) => x.hash === v.hash);
+				vlines.push(c ? await versionContext(dir, get().id, deck, c).catch((e) => `- @v${v.n}: could not be read (${e})`) : `- @v${v.n}: not found`);
+			}
 			const r = await api.claudeRun({
 				turn: turn.id,
 				dir,
-				prompt: turnPrompt(text, notes, cur ? { id: cur.id, no: current + 1 } : null, attachments, mentions),
+				prompt: turnPrompt(text, notes, cur ? { id: cur.id, no: current + 1 } : null, attachments, mentions, vlines),
 				system: systemPrompt(s, deck),
 				claudePath: s.claude.path,
 				model: s.claude.model,
@@ -442,6 +505,7 @@ export const useDeck = create<S>()((set, get) => ({
 			undoStack.push({ file: ref.file, text: before });
 			if (undoStack.length > UNDO_MAX) undoStack.shift();
 			redoStack = [];
+			syncHist();
 		}
 		directCommit(dir, get);
 	}),
@@ -455,7 +519,7 @@ export const useDeck = create<S>()((set, get) => ({
 		set({ versions: await api.log(dir).catch(() => []) });
 	},
 
-	setPreview: (c) => set({ preview: c && c.hash === get().versions[0]?.hash ? null : c }),
+	setPreview: (c) => set({ preview: c && c.hash === get().versions[0]?.hash ? null : c, ...(c ? { vdiff: null } : {}) }),
 
 	restore: async (c) => {
 		const { dir } = get();
@@ -463,7 +527,7 @@ export const useDeck = create<S>()((set, get) => ({
 		clearUndo();
 		try {
 			await api.restore(dir, c.hash, `v${c.n} 으로 되돌린다`);
-			set({ preview: null, deck: await readDeck(dir) });
+			set({ preview: null, vdiff: null, deck: await readDeck(dir) });
 			await get().refreshVersions();
 		} catch (e) {
 			get().notify(String(e), "err");
@@ -481,6 +545,8 @@ export const useDeck = create<S>()((set, get) => ({
 			await api.absWriteBytes(path, b.data);
 			// 깔리지 않은 글꼴은 PowerPoint 에서 다른 글꼴로 보인다 — 알린다
 			get().notify(path.split(/[\\/]/).pop()! + (b.missingFonts.length ? ` · ${tNow("missingFont")}: ${b.missingFonts.join(", ")}` : ""), b.missingFonts.length ? "err" : "ok");
+			// 「모양 그대로」는 쪽 그림이라 견줄 것이 없다
+			if (!exact) verifyPptx(get, deck, b);
 		} catch (e) {
 			get().notify(String(e), "err");
 		} finally {
@@ -493,10 +559,12 @@ export const useDeck = create<S>()((set, get) => ({
 		if (!deck) return;
 		set({ busy: tNow("release") });
 		try {
-			const rel = await makeRelease(dir, id, deck, get().releases, name, notes, (i, n) => set({ busy: `${tNow("release")} ${i}/${n}` }));
+			let built: Built | null = null;
+			const rel = await makeRelease(dir, id, deck, get().releases, name, notes, (i, n) => set({ busy: `${tNow("release")} ${i}/${n}` }), (b) => { built = b; });
 			set({ releases: [...get().releases, rel] });
 			await get().refreshVersions();
 			get().notify(`${rel.tag} · ${rel.name}`, "ok");
+			if (built) verifyPptx(get, deck, built);
 		} catch (e) {
 			get().notify(String(e), "err");
 		} finally {
@@ -533,36 +601,72 @@ export const useDeck = create<S>()((set, get) => ({
 		}
 	},
 
-	check: async () => {
-		const { dir, id, deck, versions } = get();
-		if (!deck || get().busy) return;
-		set({ busy: tNow("checking") });
+	startCompare: async (base) => {
+		const { dir, id, deck } = get();
+		if (!deck) return;
+		// 손으로 고친 것이 남아 있으면 먼저 판으로 — 「지금」이 판 목록의 맨 위와 같아야 헷갈리지 않는다.
+		// 직전 판은 그 뒤에 고른다 — 먼저 고르면 방금 남긴 판 하나를 건너뛴다
+		clearTimeout(directTimer);
+		if (!get().running) { await api.commit(dir, tNow("direct")).catch(() => null); await get().refreshVersions(); }
+		const versions = get().versions;
+		const c = base ?? versions[1];
+		if (!c || c.hash === versions[0]?.hash) return get().notify(tNow("vsNoBase"), "err");
 		try {
-			const report = await runCheck(dir, id, deck, versions[0]?.n ?? 0, (m) => set({ busy: `${tNow("checking")} · ${m}` }));
-			set({ report, compare: true });
-			const worst = Math.max(0, ...report.slides.map((x) => x.score));
-			const fonts = report.missingFonts.length ? ` · ${tNow("missingFont")}: ${report.missingFonts.join(", ")}` : "";
-			get().notify(`${tNow("diff")} ${worst <= SAME ? "0" : worst.toFixed(2)}%${fonts}`, worst <= SAME && !fonts ? "ok" : "err");
+			const vdiff = await diffVersion(dir, id, deck, c);
+			if (get().dir !== dir) return;
+			set({ vdiff, preview: null });
+			// 지금 쪽이 그대로면 첫 바뀐 쪽으로 간다
+			const cur = deck.slides[get().current];
+			if (cur && !vdiff.slides[cur.id]) {
+				const k = deck.slides.findIndex((x) => vdiff.slides[x.id]);
+				if (k >= 0) get().setCurrent(k);
+			}
 		} catch (e) {
 			get().notify(String(e), "err");
-		} finally {
-			set({ busy: null });
 		}
 	},
 
-	setCompare: (compare) => set({ compare }),
+	closeCompare: () => set({ vdiff: null }),
 
-	// 차이가 남은 쪽의 웹 · PPT · 차이 그림을 붙여 Claude 에게 고치게 한다.
-	// 고칠 곳은 HTML 쪽이다 — PowerPoint 가 같게 그릴 수 있는 꼴(프롬프트 「PPTX export」 절)로 바꾸게 한다
-	fixDiff: () => {
-		const { report, deck } = get();
-		if (!report || !deck) return;
-		const bad = report.slides.filter((x) => x.score > SAME);
+	restoreSlide: async (slideId) => {
+		const { dir, id, deck, vdiff } = get();
+		if (!deck || !vdiff) return;
+		if (get().running) return get().notify(tNow("working"), "err");
+		clearUndo();
+		clearTimeout(directTimer);
+		try {
+			await api.commit(dir, tNow("direct")).catch(() => null);
+			const next = await restoreSlideFile(dir, id, deck, vdiff, slideId);
+			if (next !== deck) await get().saveDeck(next);
+			const no = next.slides.findIndex((x) => x.id === slideId) + 1;
+			await api.commit(dir, `${no}쪽을 v${vdiff.base.n} 으로 되돌린다`);
+			await get().refreshVersions();
+			if (no > 0) get().setCurrent(no - 1);
+			set({ vdiff: await diffVersion(dir, id, get().deck!, vdiff.base) });
+		} catch (e) {
+			get().notify(String(e), "err");
+		}
+	},
+
+	mentionVersion: (n) => set({ insertReq: { text: `@v${n}`, k: Date.now() } }),
+
+	// 고칠 거리가 남은 쪽의 웹 · PPT · 차이 그림과 굳은 요소 자리를 붙여 Claude 에게 고치게 한다.
+	// 고칠 곳은 HTML 쪽이다 — PowerPoint 가 같게 그릴 수 있는 꼴(프롬프트 「PPTX export」 절)로 바꾸게 한다.
+	// 2026.11.24 : 굳은 요소도 함께 넘긴다. 전에는 「그림이 되는 것은 괜찮다」고 해서, 글 덩어리가 통째 그림이 되어도 고치지 않았다
+	fixDiff: (report) => {
+		if (!get().deck) return;
+		const bad = report.slides.filter(needsFix);
 		if (!bad.length) return;
-		const lines = bad.map((x) => `- slide ${x.no} (slides/${x.id}.html): ${x.score}% of pixels differ — web ${x.web}, PowerPoint ${x.ppt}, red mask ${x.diff}`);
+		const lines = bad.map((x) => {
+			const parts = [`- slide ${x.no} (slides/${x.id}.html):`];
+			if (x.score > SAME) parts.push(`${x.score}% of pixels differ — web ${x.web}, PowerPoint ${x.ppt}, red mask ${x.diff}.`);
+			if (x.locked?.length) parts.push(`baked as a non-editable picture (${x.stiff}% of the slide): ${x.locked.map((b) => `<${b.tag}> at x${b.x} y${b.y} ${b.w}×${b.h}px`).join(", ")}.`);
+			return parts.join(" ");
+		});
 		const text = [
-			"The exported PPTX does not look identical to the web slides. For each slide below, Read the web picture, the PowerPoint picture and the red difference mask, find what renders differently in PowerPoint, and change the slide HTML/CSS so the export matches the web exactly while keeping the same look.",
-			"Typical causes: text that wraps or sits at a different height (give text boxes enough width, use explicit line-height, avoid mixing block children with bare text), CSS the exporter cannot draw natively (it is baked as a picture, which is fine), fonts not installed on this PC" + (report.missingFonts.length ? ` (missing: ${report.missingFonts.join(", ")})` : "") + ".",
+			"The exported PPTX is not yet a faithful, editable copy of the web slides. Fix each slide below by changing its HTML/CSS while keeping the same look.",
+			"Pixel differences: Read the web picture, the PowerPoint picture and the red difference mask, and find what renders differently in PowerPoint. Typical causes: text that wraps or sits at a different height (give text boxes enough width, use explicit line-height, avoid mixing block children with bare text), fonts not installed on this PC" + (report.missingFonts.length ? ` (missing: ${report.missingFonts.join(", ")})` : "") + ".",
+			"Baked elements: the element and everything inside it become one flat picture, so its text and shapes cannot be edited in PowerPoint. This happens with transform/rotation, filter, blend modes, clip-path, mask, text-shadow, vertical writing-mode, background-clip:text and list markers. Rewrite them with editable means (flat colors, solid borders, explicit bullet spans, no effect on text containers) when the same look can be kept; if the effect is essential to the design (a rotated badge, a decorative shape), leave it and say so.",
 			...lines,
 		].join("\n");
 		get().send(text);
@@ -576,7 +680,7 @@ export const useDeck = create<S>()((set, get) => ({
 
 /** 릴리즈 하나 — 남은 변경을 판으로 남기고, PPTX 를 releases/ 에 굽고, 기록 · 태그를 단다.
  *  앱의 「릴리즈」 단추와 바깥 CLI(remote.ts)가 함께 쓴다. prev 는 지금까지의 releases.json */
-export async function makeRelease(dir: string, id: string, deck: Deck, prev: Release[], name: string, notes: string, progress: (i: number, n: number) => void): Promise<Release> {
+export async function makeRelease(dir: string, id: string, deck: Deck, prev: Release[], name: string, notes: string, progress: (i: number, n: number) => void, onBuilt?: (b: Built) => void): Promise<Release> {
 	await api.commit(dir, tNow("direct")).catch(() => null);
 	const log = await api.log(dir);
 	const head = log[0];
@@ -588,6 +692,7 @@ export async function makeRelease(dir: string, id: string, deck: Deck, prev: Rel
 	const file = `releases/${tag}-v${head.n}.pptx`;
 	const b = await buildPptx(deck, id, progress);
 	await api.writeBytes(dir, file, b.data);
+	onBuilt?.(b);
 	const rel: Release = { name: name.trim() || tag, tag, n: head.n, hash: head.hash, file, notes: notes.trim(), at: new Date().toISOString() };
 	await api.writeText(dir, "releases/releases.json", JSON.stringify([...prev, rel], null, 2) + "\n");
 	await api.commit(dir, `릴리즈 ${tag} — ${rel.name}`);

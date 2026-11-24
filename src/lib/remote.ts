@@ -2,7 +2,7 @@
 //
 //   status · refresh         열린 덱 · 앱 안 Claude 가 일하는 중인지 / CLI 가 판을 남긴 뒤 판 목록 다시 읽기
 //   open                     덱을 화면에 연다 · 그 쪽으로 간다
-//   new · import             서재에 새 덱 — 앱의 처음 화면 · 가져오기와 같은 길(createDeck · flows.importDeck)
+//   new · import             저장 폴더에 새 덱 — 앱의 처음 화면 · 가져오기와 같은 길(createDeck · flows.importDeck)
 //   export · shot · inspect  웹뷰가 쪽을 그려야 하는 일 — 내보내기와 같은 런타임(rt.js)의 extract · snapshot 을 쓴다
 //   check · release          비교 검사 · 릴리즈 — 앱의 단추와 같은 함수(runCheck · makeRelease)
 //
@@ -15,10 +15,12 @@ import { api, bytesFromB64, join } from "./api";
 import { createDeck, type Deck, readDeck } from "./deck";
 import { buildPptx } from "./exportPptx";
 import { freeDir, importDeck } from "./flows";
+import { linkFonts } from "./fonts";
 import { ask, offscreen } from "./frames";
 import { runCheck } from "./check";
 import { tNow } from "./i18n";
-import { useSettings } from "./settings";
+import { templateRules } from "./prompt";
+import { templateOf, useSettings } from "./settings";
 import { makeRelease, type Release, useDeck } from "./store";
 
 type Args = Record<string, any>;
@@ -31,6 +33,8 @@ async function withDeck<T>(dir: string, fn: (id: string, deck: Deck) => Promise<
 	const deck = await readDeck(dir);
 	const st = useDeck.getState();
 	if (same(st.dir, dir)) return fn(st.id, deck);
+	// 열린 덱은 openProject 가 글꼴을 이었다. 열지 않은 덱도 그리기 전에 잇는다 — 안 그러면 쪽 그림 · 내보내기가 대체 글꼴로 나온다
+	await linkFonts(dir, deck).catch(() => {});
 	const id = await api.open(dir);
 	try {
 		return await fn(id, deck);
@@ -102,11 +106,15 @@ const handlers: Record<string, (a: Args) => Promise<unknown>> = {
 		return status();
 	},
 
-	new: async ({ title, open }) => {
+	new: async ({ title, template, open }) => {
 		const s = useSettings.getState().s;
 		const t = String(title || "").trim() || tNow("untitled");
+		// --template 은 이름(또는 id). 없거나 못 찾으면 「새 덱」 템플릿 — 틀린 이름은 조용히 넘기지 않고 고를 수 있는 이름을 알린다
+		const want = String(template || "").trim();
+		const tpl = want ? s.templates.find((x) => x.name === want || x.id === want) : undefined;
+		if (want && !tpl) throw new Error(`없는 템플릿: ${want} (있는 것: ${s.templates.map((x) => x.name).join(", ")})`);
 		const dir = await freeDir(t);
-		await createDeck(dir, t, s);
+		const deck = await createDeck(dir, t, s, tpl?.id);
 		let opened = false;
 		if (open && !useDeck.getState().running) {
 			await useDeck.getState().openProject(dir);
@@ -114,7 +122,9 @@ const handlers: Record<string, (a: Args) => Promise<unknown>> = {
 		} else {
 			await api.commit(dir, "새로 만든다");
 		}
-		return { dir, title: t, opened };
+		// 바깥 세션은 앱의 시스템 프롬프트를 받지 않는다 — 같은 스타일로 만들게 템플릿 규칙을 돌려준다
+		const used = templateOf(s, deck.template);
+		return { dir, title: t, opened, template: used.name, style: templateRules(used) };
 	},
 
 	import: async ({ path, open }) => {
@@ -191,7 +201,6 @@ const handlers: Record<string, (a: Args) => Promise<unknown>> = {
 				const log = await api.log(dir, 1);
 				let k = 0;
 				const report = await runCheck(dir, id, deck, log[0]?.n ?? 0, () => step(++k, 0));
-				if (same(useDeck.getState().dir, dir)) useDeck.setState({ report, compare: true });
 				return { ...report, slides: report.slides.map((x) => ({ ...x, web: join(dir, x.web), ppt: join(dir, x.ppt), diff: join(dir, x.diff) })) };
 			}),
 		),
@@ -214,7 +223,7 @@ const handlers: Record<string, (a: Args) => Promise<unknown>> = {
 
 let started = false;
 
-/** 설정을 읽은 뒤 한 번 부른다 — 서재 경로 · 도형 설정이 있어야 새 덱을 만든다 */
+/** 설정을 읽은 뒤 한 번 부른다 — 저장 폴더 · 템플릿이 있어야 새 덱을 만든다 */
 export async function startRemote() {
 	if (started) return;
 	started = true;

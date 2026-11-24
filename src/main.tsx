@@ -1,8 +1,9 @@
 import { createRoot } from "react-dom/client";
 import App from "./App";
+import Crash from "./components/Crash";
 import "./styles/app.css";
 
-createRoot(document.getElementById("root")!).render(<App />);
+createRoot(document.getElementById("root")!).render(<Crash><App /></Crash>);
 
 // 개발 실행에서만 — tools/cdp.mjs 로 화면을 시험할 때 상태에 닿는 길
 if (import.meta.env.DEV) {

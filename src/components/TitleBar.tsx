@@ -68,6 +68,7 @@ export default function TitleBar({ onSettings, settingsOpen }: { onSettings: () 
 								{list && <VersionList onClose={() => setList(false)} />}
 								</span>
 							)}
+							<UndoRedo />
 						</>
 					) : (
 						<span className="title" style={{ fontWeight: 600 }}>ClaudePPT</span>
@@ -96,6 +97,25 @@ export default function TitleBar({ onSettings, settingsOpen }: { onSettings: () 
 				</div>
 			</div>
 		</header>
+	);
+}
+
+/** 되돌리기 · 다시 실행 — 손으로 고친 것(끌기 · 방향키 · 글 고치기 · 지우기)만 한 걸음씩. Claude 턴은 판으로 되돌린다.
+ *  2026.11.24 : 단축키(Ctrl+Z · Ctrl+Y)만 있어 있는 줄 몰랐다 — 판 번호 옆에 단추로 둔다 */
+function UndoRedo() {
+	const t = useT();
+	const hist = useDeck((s) => s.hist);
+	// 지난 판을 보는 중 · Claude 가 고치는 중에는 store 가 받지 않는다 — 단추도 끈다
+	const off = useDeck((s) => !!s.preview || !!s.running);
+	return (
+		<span className="undoredo">
+			<button className="tb-btn icon" onClick={() => useDeck.getState().undo()} disabled={off || !hist.u} title={`${t("undo")} (Ctrl+Z)`} aria-label={t("undo")}>
+				<svg width="15" height="15" viewBox="0 0 16 16" aria-hidden><path d="M5.5 3 2.5 6l3 3M2.5 6h7a4 4 0 0 1 0 8H7" fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round" /></svg>
+			</button>
+			<button className="tb-btn icon" onClick={() => useDeck.getState().redo()} disabled={off || !hist.r} title={`${t("redo")} (Ctrl+Y)`} aria-label={t("redo")}>
+				<svg width="15" height="15" viewBox="0 0 16 16" aria-hidden><path d="M10.5 3l3 3-3 3M13.5 6h-7a4 4 0 0 0 0 8H9" fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round" /></svg>
+			</button>
+		</span>
 	);
 }
 
@@ -128,6 +148,9 @@ function VersionList({ onClose }: { onClose: () => void }) {
 						onContextMenu={(e) => openMenu(e, [
 							{ label: `v${c.n} ${t("viewVersion")}`, run: () => pick(c), disabled: c === head },
 							{ label: t("restore"), run: () => restore(c), disabled: c === head || !!running },
+							"-",
+							{ label: t("compareWith"), run: () => { onClose(); useDeck.getState().startCompare(c); }, disabled: c === head },
+							{ label: `${t("mentionVersion")}`, kbd: `@v${c.n}`, run: () => { onClose(); useDeck.getState().mentionVersion(c.n); }, disabled: c === head },
 						])}>
 						<span className="n">v{c.n}</span>
 						<span className="s">{c.subject}</span>

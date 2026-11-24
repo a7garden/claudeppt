@@ -2,8 +2,8 @@
 //
 // 목차
 //   SlideFrame    슬라이드 iframe 하나. 크기를 맞춰 줄이고, 다시 그릴 표식(rev)이 바뀌면 새로 읽는다
-//   Rail          쪽 목록 — 끌어서 순서 바꾸기 · Delete 로 빼기 · 쪽 사이 + 로 빈 쪽 · 비교 차이는 미리보기 테두리로
-//   Stage         무대 — 도구(고르기 · 펜 · 화살표 · 상자) · 직접 편집 메시지 받기 · 지난 판 미리 보기 · 휠로 쪽 넘기기 · 비교 단추
+//   Rail          쪽 목록 — 끌어서 순서 바꾸기 · Delete 로 빼기 · 쪽 사이 + 로 빈 쪽 · 판 비교 중이면 바뀐 쪽 · 새 쪽 표시
+//   Stage         무대 — 도구(고르기 · 펜 · 화살표 · 상자) · 직접 편집 메시지 받기 · 지난 판 미리 보기 · 휠로 쪽 넘기기 · 판 비교 (VersionLens.tsx)
 //   MarkLayer     표시 층 — 그어 놓은 표시를 그리고, 긋는 도구일 때 긋기를 받는다 · StageTools 도구 띠
 //   Flow          이어 보기 — 모든 쪽을 세로로 늘어놓고 스크롤로 넘긴다. 가운데 온 쪽이 지금 쪽이 된다
 //   우클릭 메뉴   slideItems(쪽 목록 · 이어 보기) · Stage 의 무대 메뉴 — 메뉴 틀은 ContextMenu.tsx
@@ -13,10 +13,9 @@ import { type Deck } from "../lib/deck";
 import { ask, onFrame } from "../lib/frames";
 import { useT } from "../lib/i18n";
 import { anchor, bbox, MARK, type Shape, shapePath, tiny, type Tool } from "../lib/markup";
-import { SAME } from "../lib/check";
 import { type Pin, useDeck } from "../lib/store";
 import { type MenuItem, openMenu } from "./ContextMenu";
-import { CompareBar, CompareLens } from "./CompareLens";
+import { VersionBar, VersionLens } from "./VersionLens";
 import { SketchBoard } from "./Sketch";
 import Talk from "./Talk";
 
@@ -50,7 +49,37 @@ export function SlideFrame({ file, rev, width, height, w, h, onWin, revHash }: {
 	);
 }
 
-/** 쪽 넘김 키 — 앱 화면에서 누른 것도, 슬라이드 창이 넘겨준 것(rt.js key)도 여기서 처리한다. 처리했으면 true.
+/** 무대 슬라이드 — 쪽을 넘기거나 다시 그릴 때 새 iframe 을 옛 것 밑에서 읽고, 다 그려진 뒤에 옛 것을 걷는다.
+ *  iframe 하나를 바로 갈아 끼우면 새 문서가 그려지기 전의 빈 흰 바탕이 매번 번쩍인다.
+ *  읽는 중에 또 넘기면 읽던 것은 버리고 마지막 쪽만 읽는다 — 보이는 것은 끝까지 옛 쪽이다 */
+type Layer = { k: string; file: string; rev: number; revHash?: string };
+function SwapFrame({ file, rev, revHash, onWin, ...size }: { file: string; rev: number; revHash?: string; width: number; w: number; h: number; onWin: (win: Window) => void }) {
+	const cur: Layer = { k: `${file}|${rev}|${revHash || ""}`, file, rev, revHash };
+	const [shown, setShown] = useState<Layer | null>(null);
+	const latest = useRef(cur.k);
+	latest.current = cur.k;
+	const layers = shown && shown.k !== cur.k ? [cur, shown] : [cur];
+	return (
+		<>
+			{layers.map((l) => {
+				const top = l !== cur;
+				return (
+					<div key={l.k} style={{ position: "absolute", left: 0, top: 0, zIndex: top ? 1 : 0 }}>
+						<SlideFrame file={l.file} rev={l.rev} revHash={l.revHash} {...size}
+							onWin={top ? undefined : (win) => {
+								if (!win) return; // 걷히는 옛 창이 null 을 알려도 지금 창을 지우지 않는다
+								onWin(win);
+								// load 직후는 아직 첫 그림이 화면에 안 올라왔을 수 있어 두 프레임 기다린다. 그 사이 또 넘겼으면 이 쪽은 버린다
+								requestAnimationFrame(() => requestAnimationFrame(() => { if (latest.current === l.k) setShown(l); }));
+							}} />
+					</div>
+				);
+			})}
+		</>
+	);
+}
+
+/** 쪽 넘김 키 —앱 화면에서 누른 것도, 슬라이드 창이 넘겨준 것(rt.js key)도 여기서 처리한다. 처리했으면 true.
  *  슬라이드 안에서 요소를 고른 동안의 방향키는 rt.js 가 그 요소를 옮기는 데 쓰고 여기로 넘기지 않는다 */
 function navKey(key: string): boolean {
 	const st = useDeck.getState();
@@ -175,10 +204,10 @@ export default function Workspace() {
 			else if (key === "2") setTool("arrow");
 			else if (key === "3") setTool("box");
 			else if (key === "4") setTool("sketch");
-			else if (key === "c") { const st = useDeck.getState(); if (st.report) st.setCompare(!st.compare); else st.check(); }
+			else if (key === "c") { const st = useDeck.getState(); if (st.vdiff) st.closeCompare(); else st.startCompare(); }
 			else if (key === "s") { const st = useDeck.getState(); st.setFlow(!st.flow); }
 			else if (!navKey(e.key)) {
-				if (e.key === "Escape") { if (useDeck.getState().compare) useDeck.getState().setCompare(false); else setTool("select"); }
+				if (e.key === "Escape") { if (useDeck.getState().vdiff) useDeck.getState().closeCompare(); else setTool("select"); }
 				else return;
 			}
 			e.preventDefault();
@@ -224,7 +253,7 @@ function Rail() {
 	const setCurrent = useDeck((s) => s.setCurrent);
 	const pins = useDeck((s) => s.pins);
 	const turns = useDeck((s) => s.turns);
-	const report = useDeck((s) => s.report);
+	const vdiff = useDeck((s) => s.vdiff);
 	const mentionSlide = useDeck((s) => s.mentionSlide);
 	const move = useDeck((s) => s.moveSlide);
 	const addSlide = useDeck((s) => s.addSlide);
@@ -232,7 +261,6 @@ function Rail() {
 	const [drag, setDrag] = useState<number | null>(null);
 	const [dropAt, setDropAt] = useState<number | null>(null);
 	const lastFiles = useMemo(() => new Set(turns[turns.length - 1]?.tools.map((x) => x.file).filter(Boolean)), [turns]);
-	const compareOn = useDeck((s) => s.compare);
 	const listRef = useRef<HTMLDivElement>(null);
 	useEffect(() => { listRef.current?.querySelectorAll(".rail-item")[current]?.scrollIntoView({ block: "nearest" }); }, [current]);
 
@@ -244,11 +272,10 @@ function Rail() {
 			{deck.slides.map((sl, i) => {
 				const n = pins.filter((p) => p.slide === sl.id).length;
 				// 비교 차이는 숫자 대신 미리보기 테두리로 — 숫자는 비교 렌즈를 켰을 때만. 0.1% 차이에 모든 쪽이 빨간 글자로 칠해지면 무엇이 급한지 안 보인다
-				const c = report?.slides.find((x) => x.id === sl.id);
-				// 2026.11.18 : 테두리는 눈에 띄는 차이(1% 이상)에만 — 가져온 덱은 글자 가장자리 차이(0.1~0.9%)로 거의 모든 쪽이 SAME 을 넘는다
-				const drift = !!c && c.score >= (compareOn ? SAME : 1);
+				// 판 비교 중이면 고른 판과 다른 쪽에 점선 테두리 · 그 뒤에 생긴 쪽에 「새」 — 바뀐 쪽만 골라 넘겨 볼 수 있게
+				const vs = !preview ? vdiff?.slides[sl.id] : undefined;
 				return (
-					<div key={sl.id} className={"rail-item" + (i === current ? " on" : "") + (dropAt === i ? " drop-before" : "") + (drift ? " drift" : "")}
+					<div key={sl.id} className={"rail-item" + (i === current ? " on" : "") + (dropAt === i ? " drop-before" : "") + (vs ? " drift" : "")}
 						onDragOver={(e) => { if (drag != null) { e.preventDefault(); setDropAt(i); } }}
 						onDrop={() => { if (drag != null) move(drag, i); setDrag(null); setDropAt(null); }}
 						// 누른 쪽을 지금 쪽으로 — PowerPoint 처럼 메뉴가 가리키는 쪽이 무대에 보인다
@@ -256,11 +283,11 @@ function Rail() {
 						<div className="no">
 							<span>{i + 1}</span>
 							{n > 0 && <span className="pins" title={`${t("pins")} ${n}`} />}
-							{drift && compareOn && <span className="drift">{c!.score < 10 ? c!.score.toFixed(1) : Math.round(c!.score)}%</span>}
+							{vs && <span className="drift">{vs === "added" ? t("vsAdded") : t("vsChangedOne")}</span>}
 							{!preview && <button className="at" onClick={() => mentionSlide(i + 1)} title={`${t("mention")} (@${i + 1})`} aria-label={`${t("mention")} @${i + 1}`}>@</button>}
 						</div>
 						<button className="thumb" draggable={!preview} onDragStart={(e) => { setDrag(i); dragSlide(e, sl.id); }} onDragEnd={() => { setDrag(null); setDropAt(null); }}
-							onClick={() => setCurrent(i)} title={[sl.title || `${i + 1}`, c ? `${t("diff")} ${c.score}%` : "", lastFiles.has(sl.file) ? t("changed") : ""].filter(Boolean).join(" · ")} aria-current={i === current}>
+							onClick={() => setCurrent(i)} title={[sl.title || `${i + 1}`, vs && vdiff ? `v${vdiff.base.n} ${vs === "added" ? t("vsAdded") : t("vsChangedOne")}` : "", lastFiles.has(sl.file) ? t("changed") : ""].filter(Boolean).join(" · ")} aria-current={i === current}>
 							<ThumbFrame file={sl.file} rev={rev[sl.id] || 0} w={deck.size.w} h={deck.size.h} revHash={preview?.hash} />
 							{lastFiles.has(sl.file) && !preview && <span className="fresh" aria-label={t("changed")} />}
 						</button>
@@ -310,8 +337,7 @@ function Stage() {
 	const applyDirect = useDeck((s) => s.applyDirect);
 	const restore = useDeck((s) => s.restore);
 	const setPreview = useDeck((s) => s.setPreview);
-	const compare = useDeck((s) => s.compare && !!s.report && !s.preview);
-	const report = useDeck((s) => s.report);
+	const compare = useDeck((s) => !!s.vdiff && !s.preview);
 	const flowOn = useDeck((s) => s.flow);
 	const setFlow = useDeck((s) => s.setFlow);
 	const tool = useDeck((s) => s.tool);
@@ -397,7 +423,7 @@ function Stage() {
 			{ label: t("toolBox"), kbd: "3", checked: tool === "box", run: () => setTool("box") },
 			{ label: t("sketch"), kbd: "4", checked: tool === "sketch", run: () => setTool("sketch") },
 			{ label: t("flow"), kbd: "S", checked: flowOn, run: () => setFlow(!flowOn) },
-			report ? { label: t("compare"), kbd: "C", checked: st.compare, run: () => st.setCompare(!st.compare) } : { label: t("runCheck"), kbd: "C", run: () => st.check(), disabled: !!st.busy },
+			{ label: t("compare"), kbd: "C", checked: !!st.vdiff, run: () => (st.vdiff ? st.closeCompare() : st.startCompare()), disabled: st.versions.length < 2 },
 			"-",
 			{ label: t("duplicate"), run: () => st.duplicateSlide(i) },
 			{ label: t("removeSlide"), danger: true, run: () => st.removeSlide(i), disabled: n < 2 },
@@ -410,13 +436,15 @@ function Stage() {
 	return (
 		<section className="stage" data-mode={preview ? "view" : mode} aria-label={t("slides")}>
 			<div className="stage-banner">
-				{compare && <CompareBar slide={report?.slides.find((x) => x.id === slide.id)} />}
+				{compare && <VersionBar slideId={slide.id} />}
 				{preview && (
 					<div className="past" role="status">
 						<span className="mono">v{preview.n}</span>
 						<span style={{ maxWidth: 320, overflow: "hidden", textOverflow: "ellipsis" }}>{preview.subject}</span>
 						<span className="dim mono">{preview.date}</span>
 						<button className="primary" onClick={() => restore(preview)}>{t("restore")}</button>
+						<button onClick={() => useDeck.getState().startCompare(preview)}>{t("compareWith")}</button>
+						<button onClick={() => useDeck.getState().mentionVersion(preview.n)} title={t("mentionVersionHint")}>@v{preview.n}</button>
 						<button onClick={() => setPreview(null)}>{t("backToNow")}</button>
 					</div>
 				)}
@@ -426,12 +454,10 @@ function Stage() {
 					<div className="sheet" style={{ left, top, width: deck.size.w * scale, height: deck.size.h * scale }}>
 						<div style={{ width: deck.size.w * scale, height: deck.size.h * scale, overflow: "hidden", position: "relative" }}>
 							<div style={{ position: "absolute", left: 0, top: 0 }}>
-								<SlideFrame key={slide.id + (preview?.hash || "")} file={slide.file} rev={rev[slide.id] || 0} w={deck.size.w} h={deck.size.h} width={deck.size.w * scale} revHash={preview?.hash} onWin={(w) => { win.current = w; }} />
+								<SwapFrame file={slide.file} rev={rev[slide.id] || 0} w={deck.size.w} h={deck.size.h} width={deck.size.w * scale} revHash={preview?.hash} onWin={(w) => { win.current = w; }} />
 							</div>
 						</div>
-						{compare && report?.slides.find((x) => x.id === slide.id) && (
-							<CompareLens slide={report.slides.find((x) => x.id === slide.id)!} w={deck.size.w} h={deck.size.h} scale={scale} />
-						)}
+						{compare && <VersionLens slideId={slide.id} w={deck.size.w} h={deck.size.h} scale={scale} />}
 						{!preview && !compare && (
 							<SlideMarks slideId={slide.id} w={deck.size.w} h={deck.size.h} scale={scale} drawing={mode === "pin" && tool !== "sketch"} active={active} setActive={setActive} onMark={onMark} />
 						)}
@@ -516,14 +542,14 @@ function MarkLayer({ marks, w, h, scale, drawing, active, onMark }: { marks: Pin
 	);
 }
 
-/** 무대 도구 띠 — 슬라이드 위 가장자리에 붙는다. 왼쪽은 도구(고르기 · 펜 · 화살표 · 상자), 오른쪽은 PowerPoint 와 비교.
+/** 무대 도구 띠 — 슬라이드 위 가장자리에 붙는다. 왼쪽은 도구(고르기 · 펜 · 화살표 · 상자), 오른쪽은 판 비교.
  *  슬라이드에서 손이 멀리 가지 않고, 옆 여백(36px)보다 넓은 위아래 여백을 쓴다 */
 function StageTools({ left, top, right, onUndo, canUndo }: { left: number; top: number; right: number; onUndo: () => void; canUndo: boolean }) {
 	const t = useT();
 	const tool = useDeck((s) => s.tool);
 	const setTool = useDeck((s) => s.setTool);
-	const report = useDeck((s) => s.report);
-	const compare = useDeck((s) => s.compare);
+	const compare = useDeck((s) => !!s.vdiff);
+	const canCompare = useDeck((s) => s.versions.length > 1);
 	const busy = useDeck((s) => !!s.busy);
 	const y = top > 50 ? top - 44 : top + 8;
 	const tools: { k: Tool | "select" | "sketch"; key: string; label: string; icon: React.ReactNode }[] = [
@@ -552,10 +578,10 @@ function StageTools({ left, top, right, onUndo, canUndo }: { left: number; top: 
 				)}
 				<span className="hint" key={tool}>{tool === "select" ? t("selectHint") : tool === "sketch" ? t("sketchHint") : t("toolHint")}</span>
 			</div>
-			{/* 비교 — 결과가 있으면 렌즈를 켜고 끄고, 없으면 검사를 돌린다 (C) */}
-			<button className={"stagecheck" + (compare && report ? " on" : "")} style={{ right: `calc(100% - ${right}px)`, top: y }} disabled={busy}
-				onClick={() => { const st = useDeck.getState(); if (st.report) st.setCompare(!st.compare); else st.check(); }} title={`${t("checkHint")} (C)`}>
-				{report ? t("compare") : t("runCheck")}<kbd>C</kbd>
+			{/* 비교 — 직전 판과 지금을 견준다. 다른 판은 띠의 판 고르기 · 판 목록에서 (C) */}
+			<button className={"stagecheck" + (compare ? " on" : "")} style={{ right: `calc(100% - ${right}px)`, top: y }} disabled={busy || !canCompare}
+				onClick={() => { const st = useDeck.getState(); if (st.vdiff) st.closeCompare(); else st.startCompare(); }} title={`${t("compareHint")} (C)`}>
+				{t("compare")}<kbd>C</kbd>
 			</button>
 		</>
 	);

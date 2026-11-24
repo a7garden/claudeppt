@@ -343,9 +343,18 @@
 		s.clipPath !== "none" || (s.maskImage && s.maskImage !== "none") || (s.webkitMaskImage && s.webkitMaskImage !== "none") ||
 		s.textShadow !== "none" || s.writingMode !== "horizontal-tb" || s.backgroundClip === "text" || s.webkitBackgroundClip === "text" ||
 		(s.display === "list-item" && s.listStyleType !== "none");
+	/** 바깥 그림자 하나(안쪽 · 퍼짐 없음) — PowerPoint 도형 그림자로 그대로 옮긴다. 그 밖의 그림자는 null (상자를 굽는다).
+	 *  2026.11.24 : 가져온 PPTX 의 도형 그림자를 box-shadow 로 그리게 되어, 굽지 않고 도형 그림자로 내보낸다 */
+	const simpleShadow = (s) => {
+		if (s.boxShadow === "none" || s.boxShadow.split(/,(?![^(]*\))/).length > 1 || s.boxShadow.includes("inset")) return null;
+		const c = color((/rgba?\([^)]*\)|color\([^)]*\)/.exec(s.boxShadow) || [])[0]);
+		const n = (s.boxShadow.replace(/rgba?\([^)]*\)|color\([^)]*\)/g, "").match(/-?[\d.]+px/g) || []).map(parseFloat);
+		if (!c || n.length < 2 || (n[3] || 0) !== 0) return null;
+		return { x: n[0], y: n[1], blur: n[2] || 0, ...c };
+	};
 	/** 그 요소의 바탕 · 테두리만 구우면 되는가 — PowerPoint 도형으로 같은 모양이 안 나온다 */
 	const needsShallow = (el, s) => {
-		if (s.backgroundImage !== "none" || s.boxShadow !== "none" || (s.outlineStyle !== "none" && parseFloat(s.outlineWidth) > 0)) return true;
+		if (s.backgroundImage !== "none" || (s.boxShadow !== "none" && !simpleShadow(s)) || (s.outlineStyle !== "none" && parseFloat(s.outlineWidth) > 0)) return true;
 		if (pseudoOn(el, "::before") || pseudoOn(el, "::after")) return true;
 		const rad = [s.borderTopLeftRadius, s.borderTopRightRadius, s.borderBottomRightRadius, s.borderBottomLeftRadius];
 		if (new Set(rad).size > 1 || rad[0].trim().includes(" ")) return true;
@@ -496,7 +505,7 @@
 			const sides = ["Top", "Right", "Bottom", "Left"].map((k) => (parseFloat(s["border" + k + "Width"]) || 0) > 0 && s["border" + k + "Style"] !== "none");
 			const full = sides.every(Boolean);
 			if (!shallow && (fill || (full && bc && bw))) {
-				items.push({ type: "box", ...r, fill: fill ? { ...fill, alpha: fill.alpha * op } : null, line: full && bc && bw ? { ...bc, w: bw, dash: s.borderTopStyle } : null, radius: parseFloat(s.borderTopLeftRadius) || 0, round: s.borderTopLeftRadius.includes("%") && parseFloat(s.borderTopLeftRadius) >= 50 });
+				items.push({ type: "box", ...r, fill: fill ? { ...fill, alpha: fill.alpha * op } : null, line: full && bc && bw ? { ...bc, w: bw, dash: s.borderTopStyle } : null, radius: parseFloat(s.borderTopLeftRadius) || 0, round: s.borderTopLeftRadius.includes("%") && parseFloat(s.borderTopLeftRadius) >= 50, shadow: simpleShadow(s) });
 			}
 			// 한 변만 그은 선 (구분선 · 밑줄 강조)
 			if (!shallow && !full) {

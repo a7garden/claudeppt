@@ -47,8 +47,8 @@ export function ask<T = Msg>(win: Window, msg: Record<string, unknown>, ms = 200
 	});
 }
 
-/** 화면 밖에 1:1 크기 iframe 을 띄워 런타임이 준비되면 넘긴다. 내보내기 · 썸네일 굽기에 쓴다. */
-export function offscreen(id: string, file: string, w: number, h: number): Promise<{ win: Window; dispose: () => void }> {
+/** 화면 밖에 1:1 크기 iframe 을 띄워 런타임이 준비되면 넘긴다. 내보내기 · 썸네일 굽기 · 판 비교에 쓴다. rev 를 주면 그 판의 쪽이다. */
+export function offscreen(id: string, file: string, w: number, h: number, rev?: string): Promise<{ win: Window; dispose: () => void }> {
 	return new Promise((resolve, reject) => {
 		const f = document.createElement("iframe");
 		f.style.cssText = `position:fixed;left:-${w + 200}px;top:0;width:${w}px;height:${h}px;border:0;visibility:hidden;pointer-events:none`;
@@ -61,7 +61,7 @@ export function offscreen(id: string, file: string, w: number, h: number): Promi
 				resolve({ win: f.contentWindow!, dispose: () => f.remove() });
 			}
 		});
-		f.src = deckUrl(id, file) + "?x=" + Date.now();
+		f.src = deckUrl(id, file, rev) + "?x=" + Date.now();
 		document.body.appendChild(f);
 	});
 }

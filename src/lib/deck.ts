@@ -15,7 +15,7 @@
 
 import fontUrl from "pretendard/dist/web/variable/woff2/PretendardVariable.woff2?url";
 import { api, b64FromBytes } from "./api";
-import type { Settings } from "./settings";
+import { type Settings, type Template, templateOf } from "./settings";
 
 export const FORMAT = "claudeppt/1";
 
@@ -27,6 +27,8 @@ export interface Deck {
 	slides: SlideRef[];
 	theme: string;
 	source?: { kind: "new" | "pptx"; file?: string; pages?: number };
+	/** 만들 때 쓴 템플릿 id (settings.templates) — 매 턴 그 템플릿의 스타일 규칙이 실린다. 가져온 PPTX 는 없다 */
+	template?: string;
 	created: string;
 	updated: string;
 }
@@ -57,7 +59,7 @@ ${body}
 `;
 }
 
-export function themeCss(sh: Settings["shape"], size = { w: 1280, h: 720 }) {
+export function themeCss(sh: Pick<Template, "font" | "ink" | "paper" | "accent" | "radius" | "stroke">, size = { w: 1280, h: 720 }) {
 	const font = sh.font === "Pretendard" ? `"Pretendard", "Malgun Gothic", sans-serif` : `"${sh.font}", "Malgun Gothic", sans-serif`;
 	return `/* 모든 쪽이 함께 쓰는 서식. 색 · 글꼴은 변수로만 쓴다 — 바꾸면 모든 쪽이 따라 바뀐다. */
 @font-face { font-family: "Pretendard"; src: url("assets/fonts/PretendardVariable.woff2") format("woff2"); font-weight: 45 920; }
@@ -93,8 +95,36 @@ html, body { margin: 0; padding: 0; background: var(--paper); }
 `;
 }
 
-/** 빈 프로젝트를 만든다. 첫 쪽은 표지 하나. */
-export async function createDeck(dir: string, title: string, s: Settings): Promise<Deck> {
+/** 덱의 theme.css 에서 :root 변수만 템플릿 값으로 바꾼다 — 쪽마다 쓴 클래스 · 글자 틀 같은 나머지 서식은 그대로 둔다 */
+export function rethemeCss(css: string, tpl: Template) {
+	const font = `"${tpl.font}", "Malgun Gothic", sans-serif`;
+	const vars: Record<string, string> = { "--ink": tpl.ink, "--paper": tpl.paper, "--accent": tpl.accent, "--radius": tpl.radius + "px", "--stroke": tpl.stroke + "px", "--font": font };
+	for (const [k, v] of Object.entries(vars)) css = css.replace(new RegExp(`(${k}\\s*:\\s*)[^;]+;`), `$1${v};`);
+	return css;
+}
+
+/** theme.css 의 :root 변수 → 템플릿 값. 「지금 덱에서 가져오기」가 쓴다 — 가져온 PPTX 의 글꼴 · 색을 템플릿으로 남겨 다음 덱에 다시 쓰려고.
+ *  색 칸이 #RRGGBB 만 받으므로 그 꼴이 아닌 값(color-mix · rgb)은 건너뛴다 */
+export function themeVars(css: string): Partial<Template> {
+	const get = (k: string) => css.match(new RegExp(`${k}\\s*:\\s*([^;]+);`))?.[1].trim();
+	const hex = (v?: string) => {
+		if (!v) return undefined;
+		if (/^#[0-9a-f]{6}$/i.test(v)) return v.toUpperCase();
+		if (/^#[0-9a-f]{3}$/i.test(v)) return ("#" + [...v.slice(1)].map((c) => c + c).join("")).toUpperCase();
+		return undefined;
+	};
+	const num = (v?: string) => (v && !isNaN(parseFloat(v)) ? parseFloat(v) : undefined);
+	const out: Partial<Template> = {
+		ink: hex(get("--ink")), paper: hex(get("--paper")), accent: hex(get("--accent")),
+		radius: num(get("--radius")), stroke: num(get("--stroke")),
+		font: get("--font")?.split(",")[0].trim().replace(/^["']|["']$/g, ""),
+	};
+	return Object.fromEntries(Object.entries(out).filter(([, v]) => v !== undefined && v !== ""));
+}
+
+/** 빈 프로젝트를 만든다. 첫 쪽은 표지 하나. 템플릿을 주지 않으면 기본 템플릿 */
+export async function createDeck(dir: string, title: string, s: Settings, template?: string): Promise<Deck> {
+	const tpl = templateOf(s, template);
 	await api.vcsInit(dir);
 	const id = newId();
 	const deck: Deck = {
@@ -104,11 +134,12 @@ export async function createDeck(dir: string, title: string, s: Settings): Promi
 		slides: [{ id, file: `slides/${id}.html`, title }],
 		theme: "theme.css",
 		source: { kind: "new" },
+		template: tpl.id,
 		created: new Date().toISOString(),
 		updated: new Date().toISOString(),
 	};
 	await embedFont(dir);
-	await api.writeText(dir, "theme.css", themeCss(s.shape));
+	await api.writeText(dir, "theme.css", themeCss(tpl));
 	await api.writeText(dir, `slides/${id}.html`, slideHtml(`<section class="slide" style="display:flex;flex-direction:column;justify-content:center;padding:0 120px">
 	<h1 style="font-size:64px;font-weight:700;letter-spacing:-0.02em">${escapeHtml(title)}</h1>
 </section>`, s.lang));

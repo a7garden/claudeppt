@@ -30,25 +30,26 @@ const COMMANDS: &[&str] = &[
 
 const HELP: &str = "ClaudePPT CLI — 출력은 JSON 하나. 쪽 번호는 1부터.
 
-덱 고르기 (모든 명령 공통): --deck <폴더 | deck.json | 서재 안 이름>
+덱 고르기 (모든 명령 공통): --deck <폴더 | deck.json | 저장 폴더 안 이름>
   주지 않으면 지금 폴더에서 위로 deck.json 을 찾고, 없으면 앱에 열린 덱을 쓴다.
 
 앱 없이
   skill [--to <폴더>]                Claude Code 스킬 「claudeppt」를 깐다 (기본 ~/.claude/skills/claudeppt)
-  paths                              서재 · 앱 데이터 · 실행 파일 위치
-  list                               서재의 덱 목록 (최근 고친 순)
+  paths                              저장 폴더 · 앱 데이터 · 실행 파일 위치
+  list                               저장 폴더의 덱 목록 (최근 고친 순)
   info                               덱 목차 · 지금 판 · 릴리즈
   log [-n 20]                        판 이력 (v<n> = 커밋 수)
   commit -m \"<메시지>\" [--force]      바뀐 파일을 한 판으로 남긴다
   restore <v3 | 3 | 커밋> [--force]    그 판의 파일로 되돌려 새 판으로 남긴다 (이력은 지우지 않는다)
   pack <out.cppt>                    폴더째 한 파일로 묶는다 (판 이력 포함)
-  unpack <file.cppt> [--to <폴더>]   묶음을 서재에 푼다
+  unpack <file.cppt> [--to <폴더>]   묶음을 저장 폴더에 푼다
 
 앱에 넘김 (꺼져 있으면 띄운다)
   status                             앱이 켜져 있는지 · 열린 덱 · 앱 안 Claude 가 일하는 중인지
   launch                             앱만 띄운다
   open [--slide 3]                   덱을 앱 화면에 연다 · 그 쪽으로 간다
-  new <제목> [--no-open]              서재에 새 덱 (표지 한 장)
+  new <제목> [--template <이름>] [--no-open]
+                                     저장 폴더에 새 덱 (표지 한 장) · 템플릿의 스타일 규칙(style)을 돌려준다
   import <file.pptx> [--no-open]     PPTX 를 가져와 새 덱으로
   export <out.pptx> [--exact]        PPTX 로 내보낸다. --exact 는 모양 그대로(그림 + 투명 글상자)
   shot [--slides 1,3-5] [--out <폴더>] [--scale 1]
@@ -134,7 +135,7 @@ fn run(cmd: &str, a: &Args) -> R<Value> {
 		}
 		"new" => {
 			let title = a.pos.join(" ");
-			app()?.call("new", json!({ "title": title, "open": !a.has("no-open") }))
+			app()?.call("new", json!({ "title": title, "template": a.get("template"), "open": !a.has("no-open") }))
 		}
 		"import" => {
 			let file = abs(a.pos(0).ok_or("가져올 PPTX 경로가 필요하다")?);
@@ -175,7 +176,7 @@ struct Args {
 }
 
 /// 값을 받는 선택지. 나머지 --이름 은 켜고 끄기다
-const VALUED: &[&str] = &["deck", "m", "message", "n", "out", "slides", "slide", "scale", "name", "notes", "to"];
+const VALUED: &[&str] = &["deck", "m", "message", "n", "out", "slides", "slide", "scale", "name", "notes", "to", "template"];
 
 impl Args {
 	fn parse(raw: &[String]) -> Args {
@@ -262,7 +263,7 @@ fn deck_dir(a: &Args) -> R<PathBuf> {
 		if named.join("deck.json").is_file() {
 			return Ok(named);
 		}
-		return Err(format!("덱을 찾지 못했다: {d} (폴더 · deck.json · 서재 안 이름)"));
+		return Err(format!("덱을 찾지 못했다: {d} (폴더 · deck.json · 저장 폴더 안 이름)"));
 	}
 	// 지금 폴더에서 위로 — slides/ 안에서 불러도 그 덱을 찾는다
 	if let Ok(mut d) = std::env::current_dir() {

@@ -1,4 +1,4 @@
-// 앱 설정 · 프로젝트 열고 닫기 · 서재(프로젝트 모음 폴더) · 한 파일 묶음(.cppt) 내보내기와 풀기.
+// 앱 설정 · 프로젝트 열고 닫기 · 저장 폴더(덱 폴더 모음) · 한 파일 묶음(.cppt) 내보내기와 풀기.
 //
 // 프로젝트 = deck.json 이 있는 폴더 하나. 파일 꼴은 화면 쪽 src/lib/deck.ts 머리말에 적었다.
 // .cppt 는 그 폴더를 zip 으로 묶은 것 — 주고받거나 보관할 때 쓴다. 판 이력(.git)까지 함께 담긴다.
@@ -80,7 +80,7 @@ pub struct LibItem {
 	modified: i64,
 }
 
-/// 서재 폴더 바로 아래에서 deck.json 이 있는 폴더를 찾는다.
+/// 저장 폴더 바로 아래에서 deck.json 이 있는 폴더를 찾는다.
 #[tauri::command]
 pub fn library_list(dir: String) -> Res<Vec<LibItem>> {
 	let mut out = vec![];

@@ -1,16 +1,19 @@
 // 설정 — 오른쪽에서 펴는 판. 왼쪽 낱말 머리로 갈래를 고르고, 오른쪽은 「이름 · 값」 줄.
-// 갈래: 일반 · Claude · 그림 · 도형 · 바깥 연결(앱 밖 Claude Code 의 CLI · 스킬) · 업데이트
+// 갈래: 일반 · 템플릿(덱 만드는 스타일 한 벌) · Claude · 이미지 · 바깥 연결(앱 밖 Claude Code 의 CLI · 스킬) · 업데이트
+// 2026.11.24 : 「도형」 탭을 「템플릿」으로 바꿨다 — 한 벌만 고치던 것을 이름 붙여 여러 벌 두고, 덱마다 어느 것으로 만들었는지 남겨 같은 스타일을 다시 낸다.
+//              Claude 탭의 「프롬프트」 · 「추가 지침」 칸은 없앴다 (prompt.ts 머리말).
 import { getVersion } from "@tauri-apps/api/app";
 import { listen } from "@tauri-apps/api/event";
 import { open } from "@tauri-apps/plugin-dialog";
 import { useEffect, useState } from "react";
 import { api, type RemoteInfo, type Tool } from "../lib/api";
 import { type Key, useT } from "../lib/i18n";
-import { type ImageProvider, type Settings as S, useSettings } from "../lib/settings";
+import { rethemeCss, themeVars, writeDeck } from "../lib/deck";
+import { type ImageProvider, type Template, templateId, useSettings } from "../lib/settings";
 import { useDeck } from "../lib/store";
 import { useUpdate } from "../lib/updater";
 
-type Tab = "general" | "claude" | "image" | "shapes" | "connect" | "update";
+type Tab = "general" | "templates" | "claude" | "image" | "connect" | "update";
 
 function Seg<T extends string | number>({ value, options, onChange }: { value: T; options: { v: T; label: string }[]; onChange: (v: T) => void }) {
 	return (
@@ -27,8 +30,8 @@ function Row({ k, children }: { k: string; children: React.ReactNode }) {
 export default function Settings({ onClose }: { onClose: () => void }) {
 	const t = useT();
 	const [tab, setTab] = useState<Tab>("general");
-	const tabs: Tab[] = ["general", "claude", "image", "shapes", "connect", "update"];
-	const names: Record<Tab, Key> = { general: "general", claude: "claude", image: "image", shapes: "shapes", connect: "connect", update: "update" };
+	const tabs: Tab[] = ["general", "templates", "claude", "image", "connect", "update"];
+	const names: Record<Tab, Key> = { general: "general", templates: "templates", claude: "claude", image: "image", connect: "connect", update: "update" };
 	return (
 		<div className="settings" role="dialog" aria-label={t("settings")}>
 			<nav>
@@ -38,9 +41,9 @@ export default function Settings({ onClose }: { onClose: () => void }) {
 			<div className="pane">
 				<h3>{t(names[tab])}</h3>
 				{tab === "general" && <General />}
+				{tab === "templates" && <Templates />}
 				{tab === "claude" && <Claude />}
 				{tab === "image" && <Images />}
-				{tab === "shapes" && <Shapes />}
 				{tab === "connect" && <Connect />}
 				{tab === "update" && <Update />}
 			</div>
@@ -56,9 +59,11 @@ function General() {
 			<Row k={t("language")}><Seg value={s.lang} options={[{ v: "ko", label: "한국어" }, { v: "en", label: "English" }]} onChange={(lang) => set((x) => ({ ...x, lang }))} /></Row>
 			<Row k={t("theme")}><Seg value={s.theme} options={[{ v: "system", label: t("themeSystem") }, { v: "dark", label: t("themeDark") }, { v: "light", label: t("themeLight") }]} onChange={(theme) => set((x) => ({ ...x, theme }))} /></Row>
 			<Row k={t("libraryDir")}>
-				<span className="mono" style={{ fontSize: 12, flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{s.library}</span>
+				<span className="mono" style={{ fontSize: 12, flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }} title={s.library}>{s.library}</span>
+				<button className="ghost" onClick={() => api.reveal(s.library)}>{t("folder")} ↗</button>
 				<button className="ghost" onClick={async () => { const p = await open({ directory: true, defaultPath: s.library }); if (typeof p === "string") set((x) => ({ ...x, library: p })); }}>{t("change")}</button>
 			</Row>
+			<Row k=""><span className="note" style={{ whiteSpace: "normal" }}>{t("libraryNote")}</span></Row>
 		</>
 	);
 }
@@ -67,7 +72,7 @@ function Claude() {
 	const t = useT();
 	const { s, set } = useSettings();
 	const c = s.claude;
-	const put = (p: Partial<S["claude"]>) => set((x) => ({ ...x, claude: { ...x.claude, ...p } }));
+	const put = (p: Partial<typeof c>) => set((x) => ({ ...x, claude: { ...x.claude, ...p } }));
 	const [found, setFound] = useState<{ path: string; version: string } | null | undefined>(undefined);
 	// 경로 칸을 칠 때마다 찾지 않는다 — 멈춘 뒤에 한 번
 	useEffect(() => {
@@ -88,20 +93,7 @@ function Claude() {
 				<Seg value={c.effort} options={[{ v: "", label: t("auto") }, { v: "low", label: "low" }, { v: "medium", label: "medium" }, { v: "high", label: "high" }, { v: "xhigh", label: "xhigh" }, { v: "max", label: "max" }]} onChange={(effort) => put({ effort })} />
 			</Row>
 			<Row k={t("isolation")}><span className="note ok" style={{ whiteSpace: "normal" }}>{t("isolationOn")}</span></Row>
-			<Row k={t("promptExtra")}>
-				<textarea className="field" rows={4} value={c.extra} onChange={(e) => put({ extra: e.target.value })} />
-			</Row>
-			<div className="row" style={{ alignItems: "start" }}>
-				<div className="k">{t("prompt")}</div>
-				<div className="v" style={{ flexDirection: "column", alignItems: "stretch" }}>
-					{/* 앱 기본 프롬프트는 화면에 보이지 않는다 — 비워 두면 기본, 쓰면 그 글로 갈아 끼운다 */}
-					<textarea className="field" rows={16} placeholder={t("promptDefault")} value={c.prompt} onChange={(e) => put({ prompt: e.target.value })} />
-					<div style={{ display: "flex", justifyContent: "space-between" }}>
-						<span className="note">{c.prompt ? "custom" : "default"}</span>
-						{c.prompt && <button className="ghost" onClick={() => put({ prompt: "" })}>default</button>}
-					</div>
-				</div>
-			</div>
+			<Row k=""><span className="note" style={{ whiteSpace: "normal" }}>{t("styleInTemplate")}</span></Row>
 		</>
 	);
 }
@@ -110,7 +102,7 @@ function Images() {
 	const t = useT();
 	const { s, set } = useSettings();
 	const im = s.image;
-	const put = (p: Partial<S["image"]>) => set((x) => ({ ...x, image: { ...x.image, ...p } }));
+	const put = (p: Partial<typeof im>) => set((x) => ({ ...x, image: { ...x.image, ...p } }));
 	const [tools, setTools] = useState<Tool[] | null>(null);
 	useEffect(() => { api.toolsDetect().then(setTools, () => setTools([])); }, []);
 	const tool = (n: string) => tools?.find((x) => x.name === n);
@@ -149,31 +141,69 @@ function Images() {
 					</div>
 				</div>
 			</div>
-			<Row k={t("style")}><input className="field" placeholder="flat editorial illustration, muted palette" value={im.style} onChange={(e) => put({ style: e.target.value })} disabled={im.provider === "svg"} /></Row>
+			{im.provider !== "svg" && <Row k=""><span className="note" style={{ whiteSpace: "normal" }}>{t("imageStyleInTemplate")}</span></Row>}
 		</>
 	);
 }
 
 const FONTS = ["Pretendard", "Malgun Gothic", "Noto Sans KR", "KoPubWorld돋움체 Medium", "Nanum Gothic", "Segoe UI"];
 
-function Shapes() {
+/** 템플릿 — 위 목록에서 고칠 것을 고르고, 아래에서 값을 바꾼다. 「새 덱」 표시가 붙은 것이 새로 만드는 덱에 쓰인다.
+ *  덱을 열어 두면 템플릿을 그 덱에 입히거나, 그 덱의 글꼴 · 색을 새 템플릿으로 남길 수 있다 (가져온 PPTX 의 모양을 다음 덱에 다시 쓰려고) */
+function Templates() {
 	const t = useT();
 	const { s, set } = useSettings();
-	const sh = s.shape;
-	const put = (p: Partial<S["shape"]>) => set((x) => ({ ...x, shape: { ...x.shape, ...p } }));
 	const deck = useDeck((x) => x.deck);
 	const dir = useDeck((x) => x.dir);
 	const notify = useDeck((x) => x.notify);
+	// 덱을 열어 두었으면 그 덱의 템플릿부터 보인다
+	const [edit, setEdit] = useState(() => (deck?.template && s.templates.some((x) => x.id === deck.template) ? deck.template : s.template));
+	const sh = s.templates.find((x) => x.id === edit) || s.templates[0];
+	const put = (p: Partial<Template>) => set((x) => ({ ...x, templates: x.templates.map((y) => (y.id === sh.id ? { ...y, ...p } : y)) }));
+	const add = (from: Template, name: string) => {
+		const n: Template = { ...from, id: templateId(), name };
+		set((x) => ({ ...x, templates: [...x.templates, n] }));
+		setEdit(n.id);
+	};
+	const remove = () => {
+		if (s.templates.length < 2) return;
+		const rest = s.templates.filter((x) => x.id !== sh.id);
+		set((x) => ({ ...x, templates: rest, template: x.template === sh.id ? rest[0].id : x.template }));
+		setEdit(rest[0].id);
+	};
+	const fromDeck = async () => {
+		if (!deck) return;
+		try {
+			add({ ...sh, ...themeVars(await api.readText(dir, "theme.css")), guide: "", imageStyle: "" }, deck.title);
+		} catch (e) { notify(String(e), "err"); }
+	};
 	const applyToDeck = async () => {
-		// 열린 덱의 theme.css 에서 :root 변수만 바꾼다 — 나머지 서식은 그대로 둔다
-		let css = await api.readText(dir, "theme.css");
-		const vars: Record<string, string> = { "--ink": sh.ink, "--paper": sh.paper, "--accent": sh.accent, "--radius": sh.radius + "px", "--stroke": sh.stroke + "px", "--font": `"${sh.font}", "Malgun Gothic", sans-serif` };
-		for (const [k, v] of Object.entries(vars)) css = css.replace(new RegExp(`(${k}\\s*:\\s*)[^;]+;`), `$1${v};`);
-		await api.writeText(dir, "theme.css", css);
-		notify("theme.css");
+		if (!deck) return;
+		// theme.css 는 :root 변수만 바꾸고, deck.json 에 템플릿을 남긴다 — 다음 턴부터 이 템플릿의 지침이 실린다 (prompt.ts)
+		try {
+			await api.writeText(dir, "theme.css", rethemeCss(await api.readText(dir, "theme.css"), sh));
+			await writeDeck(dir, { ...deck, template: sh.id });
+			notify(`${sh.name} → ${deck.title}`);
+		} catch (e) { notify(String(e), "err"); }
 	};
 	return (
 		<>
+			<div className="tpl-list" role="listbox" aria-label={t("templates")}>
+				{s.templates.map((x) => (
+					<button key={x.id} role="option" aria-selected={x.id === sh.id} onClick={() => setEdit(x.id)}>
+						<span className="dots">{[x.paper, x.ink, x.accent].map((c, i) => <i key={i} style={{ background: c }} />)}</span>
+						<span className="n">{x.name || t("untitled")}</span>
+						{deck?.template === x.id && <span className="tag">{t("thisDeck")}</span>}
+						{x.id === s.template && <span className="tag on">{t("forNewDecks")}</span>}
+					</button>
+				))}
+				<button className="add" onClick={() => add(sh, `${sh.name} 2`)}>+ {t("duplicateTemplate")}</button>
+			</div>
+			<Row k={t("name")}>
+				<input className="field" value={sh.name} onChange={(e) => put({ name: e.target.value })} />
+				{sh.id !== s.template && <button className="ghost" onClick={() => set((x) => ({ ...x, template: sh.id }))}>{t("useForNew")}</button>}
+				<button className="ghost" disabled={s.templates.length < 2} onClick={remove}>{t("delete")}</button>
+			</Row>
 			<Row k={t("font")}>
 				<select className="field" value={FONTS.includes(sh.font) ? sh.font : ""} onChange={(e) => e.target.value && put({ font: e.target.value })}>
 					{FONTS.map((f) => <option key={f} value={f}>{f}</option>)}
@@ -194,13 +224,28 @@ function Shapes() {
 			<Row k={t("shadow")}><Seg value={sh.shadow} options={[{ v: "none", label: t("none") }, { v: "soft", label: t("soft") }]} onChange={(shadow) => put({ shadow })} /></Row>
 			<Row k={t("iconStyle")}><Seg value={sh.icon} options={[{ v: "line", label: t("line") }, { v: "solid", label: t("solid") }]} onChange={(icon) => put({ icon })} /></Row>
 			<Specimen sh={sh} />
-			{deck && <div style={{ marginTop: 12, display: "flex", justifyContent: "flex-end" }}><button className="ghost" onClick={applyToDeck}>theme.css ← {deck.title}</button></div>}
+			<div className="row" style={{ alignItems: "start" }}>
+				<div className="k" style={{ paddingTop: 8 }}>{t("guide")}</div>
+				<div className="v">
+					<textarea className="field" rows={6} placeholder={t("guideHint")} value={sh.guide} onChange={(e) => put({ guide: e.target.value })} />
+				</div>
+			</div>
+			<Row k={t("imageStyle")}>
+				<input className="field" placeholder="flat editorial illustration, muted palette" value={sh.imageStyle} onChange={(e) => put({ imageStyle: e.target.value })} />
+				{s.image.provider === "svg" && <span className="note">{t("imageStyleSvg")}</span>}
+			</Row>
+			{deck && (
+				<Row k={t("openDeckRow")}>
+					<button className="ghost" onClick={applyToDeck} title={deck.title}>{t("applyToDeck")}</button>
+					<button className="ghost" onClick={fromDeck} title={deck.title}>{t("templateFromDeck")}</button>
+				</Row>
+			)}
 		</>
 	);
 }
 
 /** 지금 설정으로 그린 작은 견본 쪽 — 바꾸는 즉시 따라 바뀐다 */
-function Specimen({ sh }: { sh: S["shape"] }) {
+function Specimen({ sh }: { sh: Template }) {
 	const sw = sh.stroke;
 	const icon = (d: string) => sh.icon === "line"
 		? <svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke={sh.ink} strokeWidth={sw} strokeLinecap="round" strokeLinejoin="round"><path d={d} /></svg>
@@ -300,7 +345,7 @@ function Update() {
 	return (
 		<>
 			<Row k={t("version")}><span className="mono">{ver}</span></Row>
-			<Row k={t("autoCheck")}><Seg value={s.update.auto ? 1 : 0} options={[{ v: 1, label: "on" }, { v: 0, label: "off" }]} onChange={(v) => set((x) => ({ ...x, update: { auto: !!v } }))} /></Row>
+			<Row k={t("autoCheck")}><Seg value={s.update.auto ? 1 : 0} options={[{ v: 1, label: t("remoteOn") }, { v: 0, label: t("remoteOff") }]} onChange={(v) => set((x) => ({ ...x, update: { auto: !!v } }))} /></Row>
 			<Row k={t("check")}>
 				<button className="ghost" onClick={() => u.run()} disabled={u.phase === "checking" || u.phase === "downloading"}>{t("check")}</button>
 				{u.phase === "latest" && <span className="note ok">{t("latest")}</span>}

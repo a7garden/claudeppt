@@ -16,6 +16,8 @@ export default function Home() {
 	const [brief, setBrief] = useState("");
 	const [items, setItems] = useState<LibItem[]>([]);
 	const [working, setWorking] = useState(false);
+	// 이번에 만들 덱의 템플릿 — 처음엔 설정의 「새 덱」 템플릿. 여기서 바꿔도 설정은 그대로 둔다
+	const [tpl, setTpl] = useState(s.template);
 
 	useEffect(() => {
 		(async () => {
@@ -34,7 +36,7 @@ export default function Home() {
 	const go = async () => {
 		if (working) return;
 		setWorking(true);
-		try { await startNew(brief); } catch (e) { useDeck.getState().notify(String(e), "err"); }
+		try { await startNew(brief, tpl); } catch (e) { useDeck.getState().notify(String(e), "err"); }
 		setWorking(false);
 	};
 	const pickPptx = async () => {
@@ -75,6 +77,15 @@ export default function Home() {
 					</div>
 				</div>
 				<div className="home-acts">
+					{/* 템플릿이 한 벌뿐이면 고를 것이 없다 — 칸을 띄우지 않는다 */}
+					{s.templates.length > 1 && (
+						<label className="tpl-pick">
+							{t("templatePick")}
+							<select value={s.templates.some((x) => x.id === tpl) ? tpl : s.template} onChange={(e) => setTpl(e.target.value)}>
+								{s.templates.map((x) => <option key={x.id} value={x.id}>{x.name}</option>)}
+							</select>
+						</label>
+					)}
 					<button onClick={pickPptx}>{t("openPptx")}<kbd>Ctrl O</kbd></button>
 					<button onClick={pickDeck}>{t("openDeck")}<kbd>Ctrl ⇧ O</kbd></button>
 				</div>

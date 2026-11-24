@@ -13,7 +13,7 @@ import JSZip from "jszip";
 import { api } from "./api";
 import { type Deck, FORMAT, embedFont, escapeHtml, newId, slideHtml, themeCss, writeDeck } from "./deck";
 import { faceResolver } from "./fonts";
-import type { Settings } from "./settings";
+import { type Settings, templateOf } from "./settings";
 
 type El = Element;
 const kids = (el: El | null | undefined, name?: string): El[] => (el ? [...el.children].filter((c) => !name || c.tagName === name) : []);
@@ -42,7 +42,9 @@ interface Ctx {
 	face: Awaited<ReturnType<typeof faceResolver>>;
 }
 /** spc = 자간(1/100 pt). 한글 PPT 는 대부분 음수 자간을 준다 — 빼면 글이 넓어져 원본과 다른 자리에서 줄이 바뀐다 */
-interface TextDefaults { size?: number; color?: string; bold?: boolean; font?: string; align?: string; spc?: number }
+/** ln · bef · aft — 줄 간격 · 문단 앞뒤 간격. pct 는 100000 분율(줄 높이 배수), pts 는 1/100 pt */
+type Spacing = { pct?: number; pts?: number };
+interface TextDefaults { size?: number; color?: string; bold?: boolean; font?: string; align?: string; spc?: number; ln?: Spacing; bef?: Spacing; aft?: Spacing }
 
 // 레이아웃 · 마스터 · 테마는 쪽마다 같은 것을 다시 읽는다 — 한 번 푼 것을 가져오기가 끝날 때까지 둔다.
 // 쪽 XML 은 담지 않는다 (수백 쪽이면 메모리만 먹는다). 읽기만 하는 DOM 이라 나눠 써도 된다.
@@ -171,6 +173,21 @@ function lineOf(spPr: El | null, ctx: Ctx, style: El | null): { w: number; c: st
 	return { w, c, dash };
 }
 
+// ── 그림자 ──
+/** 바깥 그림자(a:effectLst/a:outerShdw) → CSS 길이 · 색. 2026.11.24 : 빼서 카드 · 손 모양 그림의 그림자가 모두 빠졌다 (원본 25쪽 276개).
+ *  rotWithShape="0"(기본)이면 도형이 돌아도 그림자 방향은 그대로다 — CSS 는 요소와 함께 돌리므로 그만큼 거꾸로 돌려 둔다 */
+function shadowOf(spPr: El | null, ctx: Ctx, rot: number): { x: number; y: number; blur: number; color: string } | null {
+	const sh = path(spPr, "a:effectLst", "a:outerShdw");
+	const color = sh ? colorOf(sh, ctx) : null;
+	if (!sh || !color) return null;
+	const dist = num(sh.getAttribute("dist")) * ctx.k, blur = num(sh.getAttribute("blurRad")) * ctx.k;
+	let dir = num(sh.getAttribute("dir")) / 60000;
+	if (sh.getAttribute("rotWithShape") !== "1") dir -= rot;
+	const a = (dir * Math.PI) / 180;
+	return { x: dist * Math.cos(a), y: dist * Math.sin(a), blur, color };
+}
+const shadowCss = (s: { x: number; y: number; blur: number; color: string }) => `${r1(s.x)}px ${r1(s.y)}px ${r1(s.blur)}px ${s.color}`;
+
 // ── 위치 ──
 interface Box { x: number; y: number; w: number; h: number; rot: number; flipH: boolean; flipV: boolean }
 type Tx = (b: Box) => Box;
@@ -220,6 +237,13 @@ function textDefaultsOf(lvl: El | null, ctx: Ctx): TextDefaults {
 	const f = path(d, "a:latin")?.getAttribute("typeface") || path(d, "a:ea")?.getAttribute("typeface");
 	if (f) out.font = f;
 	if (lvl?.getAttribute("algn")) out.align = lvl.getAttribute("algn")!;
+	// 줄 간격 · 문단 간격도 목록 서식 · 마스터 서식에서 물려받는다. 2026.11.24 : 문단에 적힌 비율만 읽어, 「정확히 17.5pt」 줄 간격과 물려받은 간격이 빠져 줄이 원본보다 좁았다
+	for (const [tag, key] of [["a:lnSpc", "ln"], ["a:spcBef", "bef"], ["a:spcAft", "aft"]] as const) {
+		const e = kid(lvl, tag);
+		const pct = kid(e, "a:spcPct")?.getAttribute("val"), pts = kid(e, "a:spcPts")?.getAttribute("val");
+		if (pct != null) out[key] = { pct: num(pct) };
+		else if (pts != null) out[key] = { pts: num(pts) };
+	}
 	return out;
 }
 
@@ -253,13 +277,12 @@ function textHtml(txBody: El, ctx: Ctx, inh: TextDefaults[]): { html: string; an
 		const align = ({ l: "left", ctr: "center", r: "right", just: "justify", dist: "justify" } as Record<string, string>)[algn] || "left";
 		const marL = num(pPr?.getAttribute("marL") ?? lstLvl?.getAttribute("marL")) * ctx.k;
 		const indent = num(pPr?.getAttribute("indent") ?? lstLvl?.getAttribute("indent")) * ctx.k;
-		const lnPct = path(pPr, "a:lnSpc", "a:spcPct")?.getAttribute("val");
-		const spcBef = path(pPr, "a:spcBef", "a:spcPts")?.getAttribute("val");
-		const spcAft = path(pPr, "a:spcAft", "a:spcPts")?.getAttribute("val");
 		let firstSize = base.size || 18;
 		let firstFam: string[] = [];
 		let firstName: string | null = null;
 		const runs: string[] = [];
+		/** 공백뿐인 조각의 글자 크기(px) — runs 와 같은 자리. 글이 있는 조각 · 줄 바꿈은 0 */
+		const blank: number[] = [];
 		for (const r of p.children) {
 			if (r.tagName === "a:br") { runs.push("<br>"); continue; }
 			if (r.tagName !== "a:r" && r.tagName !== "a:fld") continue;
@@ -302,7 +325,11 @@ function textHtml(txBody: El, ctx: Ctx, inh: TextDefaults[]): { html: string; an
 			const sup = num(rPr?.getAttribute("baseline"));
 			if (sup) st.push(`vertical-align:${sup > 0 ? "super" : "sub"};font-size:${r1(size * 0.65 * PT * ctx.k)}px`);
 			runs.push(`<span style="${st.join(";")}">${escapeHtml(t)}</span>`);
+			blank[runs.length - 1] = t.trim() ? 0 : px;
 		}
+		// 문단 끝의 줄 바꿈 — PowerPoint 는 빈 줄 하나로 그린다. HTML 은 블록 끝 <br> 을 줄로 치지 않아 하나 더 둔다.
+		// 2026.11.24 : 목록 항목 사이를 이것으로 띄운 표에서 항목이 붙어 나왔다
+		if (runs[runs.length - 1] === "<br>") runs.push("<br>");
 		// 글머리
 		let bullet = "";
 		const bu = kid(pPr, "a:buChar") || kid(lstLvl, "a:buChar");
@@ -326,15 +353,35 @@ function textHtml(txBody: El, ctx: Ctx, inh: TextDefaults[]): { html: string; an
 			if (end) firstSize = end * scale;
 		}
 		const pxSize = firstSize * PT * ctx.k;
+		// 줄 간격 — 비율이면 그대로, 「정확히 n pt」면 이 문단 글자 크기에 대한 비율로 바꾼다 (줄 거리 = 1.2em × 비율)
+		const exact = base.ln?.pts != null;
+		const lnRatio = base.ln?.pct != null ? base.ln.pct / 100000 : exact ? (base.ln!.pts! / 100) * PT * ctx.k / (1.2 * pxSize) : null;
+		// 문단 간격 — pt 는 그대로, 비율은 이 문단 줄 높이(1.2em)의 배수
+		// 공백뿐인 줄 — PowerPoint 는 그 줄 높이를 그 공백의 글자 크기로 정한다(2pt 공백으로 줄 사이를 살짝 띄운다).
+		// HTML 은 줄마다 문단 글자 크기만큼은 높이를 잡아 빈 줄 하나가 통째로 생긴다 — 그 줄을 공백 크기 높이의 블록으로 바꾼다.
+		// 2026.11.24 : 「산림인접건축 / 산림재난위험 …」 사이가 원본보다 한 줄씩 벌어졌다
+		blank.length = runs.length;
+		for (let k = 0; k < runs.length; k++) {
+			if (runs[k] !== "<br>") continue;
+			let e = k + 1;
+			while (e < runs.length && runs[e] !== "<br>" && (blank[e] ?? 0) > 0) e++;
+			if (e === k + 1 || (e < runs.length && runs[e] !== "<br>")) continue;
+			const h = exact ? (base.ln!.pts! / 100) * PT * ctx.k : 1.2 * (lnRatio ?? 1) * Math.max(...blank.slice(k + 1, e).map((v) => v ?? 0));
+			// 뒤에 <br> 이 이어지면 그것이 이 블록 다음 줄을 연다 — 하나는 블록이 대신하므로 뺀다
+			const drop = e < runs.length ? 1 : 0;
+			runs.splice(k, e - k + drop, `<span style="display:block;height:${r1(h)}px"></span>`);
+			blank.splice(k, e - k + drop, 0);
+		}
+		const gap = (g?: Spacing) => (g?.pts != null ? (g.pts / 100) * PT * ctx.k : g?.pct != null ? (g.pct / 100000) * 1.2 * pxSize : 0);
 		// 문단 글자 크기를 첫 조각 크기로 준다. 안 주면 문단이 덱 기본 크기(24px)를 물려받아, 글이 작아도 줄마다 24px × 줄 간격 높이를 차지한다
 		// (2026.11.18 16px 글이 줄마다 29px 씩 벌어져 칸을 넘쳤다)
 		const pst = [`text-align:${align}`, `margin:0`, `padding-left:${r1(marL)}px`, `text-indent:${r1(indent)}px`, `font-size:${r1(pxSize)}px`];
-		if (lnPct) pst.push(`line-height:${num(lnPct) / 100000 * 1.2}`);
+		if (lnRatio != null) pst.push(`line-height:${r1(lnRatio * 1.2 * 1000) / 1000}`);
 		// 문단의 바탕 글꼴을 첫 조각 글꼴로 — 안 주면 덱 기본 글꼴의 위아래 높이가 줄마다 섞여 줄 거리가 조금씩 벌어진다
 		const pFam = firstFam.length ? firstFam : base.font ? [`'${fontName(base.font, ctx)}'`] : [];
 		if (pFam.length) pst.push(`font-family:${pFam.join(",")},var(--font)`);
-		const g = lineGeo(firstName || fontName(base.font, ctx), lnPct ? num(lnPct) / 100000 : 1, pxSize, ctx);
-		const bef = spcBef ? (num(spcBef) / 100) * PT * ctx.k : 0, aft = spcAft ? (num(spcAft) / 100) * PT * ctx.k : 0;
+		const g = lineGeo(firstName || fontName(base.font, ctx), lnRatio ?? 1, pxSize, ctx, exact);
+		const bef = gap(base.bef), aft = gap(base.aft);
 		if (!runs.length) { pst.push("min-height:1em"); ps.push({ pst, inner: "", g, bef, aft }); continue; }
 		// 줄 높이 0 — 글머리 글꼴(Arial 등)의 위아래 높이가 본문 글꼴과 달라 줄마다 1~2px 씩 벌어지는 것을 막는다. PowerPoint 는 글머리로 줄 높이를 바꾸지 않는다
 		const buSt = [`display:inline-block`, `line-height:0`, `min-width:${r1(Math.max(0, -indent))}px`, `font-size:${r1(pxSize * buSz)}px`, `text-indent:0`];
@@ -370,12 +417,13 @@ function textHtml(txBody: El, ctx: Ctx, inh: TextDefaults[]): { html: string; an
  *      마지막 줄 아래: 1.2em − 100% 의 첫 줄 기준선                  — 줄 간격과 상관없다
  *  글꼴을 못 찾았으면(지표가 없으면) null — 웹뷰 기본대로 둔다 */
 interface LineGeo { pitch: number; web: number; ppt: number; below: number }
-function lineGeo(name: string | null, pct: number, px: number, ctx: Ctx): LineGeo | null {
+function lineGeo(name: string | null, pct: number, px: number, ctx: Ctx, exact = false): LineGeo | null {
 	const f = name ? ctx.face(name)?.regular : null;
 	if (!f || !(f.metrics[0] > 0)) return null;
 	const [wa, wd, ta, td] = f.metrics;
 	const b1 = (1.2 * wa) / (wa + wd);
-	const ppt = (pct === 1 ? b1 : pct > 1 ? 0.907 * pct : Math.max(0.907 * pct, b1 - 1.14 * (1 - pct))) * px;
+	// 「정확히」 줄 간격은 첫 줄 기준선을 0.716 × 줄 높이 + 0.089 × 글자 크기에 둔다 (exportPptx 의 PPT_BASE_LH · PPT_BASE_SZ 와 같은 잰 값)
+	const ppt = exact ? 0.716 * 1.2 * pct * px + 0.089 * px : (pct === 1 ? b1 : pct > 1 ? 0.907 * pct : Math.max(0.907 * pct, b1 - 1.14 * (1 - pct))) * px;
 	const [ca, cd] = f.typo ? [ta, td] : [wa, wd];
 	const a = Math.round(ca * px), d = Math.round(cd * px);
 	const pitch = 1.2 * pct * px;
@@ -460,6 +508,54 @@ function presetSvg(prst: string, w: number, h: number, fill: string, line: { w: 
 	}
 	if (!body) return null;
 	return `<svg width="${r1(w)}" height="${r1(h)}" viewBox="0 0 ${r1(w)} ${r1(h)}" style="position:absolute;left:0;top:0;overflow:visible">${body}</svg>`;
+}
+
+/** 자유형 도형(a:custGeom) → SVG. 2026.11.24 : 테두리 상자로 그려 꼭짓점 여섯 개짜리 확대 쐐기가 반투명 사각형이 되어 뒤 화면을 덮었다.
+ *  점 좌표가 수식(가이드 이름)이면 풀지 않고 null — 부르는 쪽이 예전처럼 상자로 그린다 */
+function custGeomSvg(spPr: El | null, box: Box, ctx: Ctx, fill: string, line: { w: number; c: string; dash: boolean } | null): string | null {
+	const list = path(spPr, "a:custGeom", "a:pathLst");
+	if (!list) return null;
+	const N = (v: string | null) => (v !== null && /^-?\d+(\.\d+)?$/.test(v) ? +v : NaN);
+	const out: string[] = [];
+	for (const p of kids(list, "a:path")) {
+		// 경로 좌표계 — w · h 가 없으면 도형 크기(EMU) 그대로다
+		const pw = N(p.getAttribute("w")) || box.w / ctx.k, ph = N(p.getAttribute("h")) || box.h / ctx.k;
+		const sx = box.w / (pw || 1), sy = box.h / (ph || 1);
+		const pts = (c: El) => kids(c, "a:pt").map((pt) => [N(pt.getAttribute("x")) * sx, N(pt.getAttribute("y")) * sy]);
+		let d = "", cx = 0, cy = 0, bad = false;
+		for (const c of p.children) {
+			const q = pts(c);
+			if (q.some(([x, y]) => !Number.isFinite(x) || !Number.isFinite(y))) { bad = true; break; }
+			switch (c.tagName) {
+				case "a:moveTo": [cx, cy] = q[0]; d += `M${r1(cx)} ${r1(cy)}`; break;
+				case "a:lnTo": [cx, cy] = q[0]; d += `L${r1(cx)} ${r1(cy)}`; break;
+				case "a:cubicBezTo": d += "C" + q.map((v) => v.map(r1).join(" ")).join(" "); [cx, cy] = q[2]; break;
+				case "a:quadBezTo": d += "Q" + q.map((v) => v.map(r1).join(" ")).join(" "); [cx, cy] = q[1]; break;
+				case "a:arcTo": {
+					// 각도는 60000 분의 1도 · 화면 각도 → 타원 매개 각도로 바꿔 중심과 끝점을 구한다
+					const wr = N(c.getAttribute("wR")) * sx, hr = N(c.getAttribute("hR")) * sy;
+					const st = (N(c.getAttribute("stAng")) / 60000) * Math.PI / 180, sw = (N(c.getAttribute("swAng")) / 60000) * Math.PI / 180;
+					if (![wr, hr, st, sw].every(Number.isFinite)) { bad = true; break; }
+					const par = (a: number) => Math.atan2(wr * Math.sin(a), hr * Math.cos(a));
+					const t1 = par(st), t2 = par(st + sw);
+					const ox = cx - wr * Math.cos(t1), oy = cy - hr * Math.sin(t1);
+					cx = ox + wr * Math.cos(t2); cy = oy + hr * Math.sin(t2);
+					d += `A${r1(wr)} ${r1(hr)} 0 ${Math.abs(sw) > Math.PI ? 1 : 0} ${sw > 0 ? 1 : 0} ${r1(cx)} ${r1(cy)}`;
+					break;
+				}
+				case "a:close": d += "Z"; break;
+			}
+			if (bad) break;
+		}
+		if (bad) return null;
+		if (!d) continue;
+		const f = p.getAttribute("fill") === "none" || fill === "none" ? "none" : fill;
+		const s = line && p.getAttribute("stroke") !== "0" ? `stroke="${line.c}" stroke-width="${r1(line.w)}"${line.dash ? ' stroke-dasharray="6 4"' : ""}` : "";
+		out.push(`<path d="${d}" fill="${f}" ${s}/>`);
+	}
+	if (!out.length) return null;
+	const flip = box.flipH || box.flipV ? ` transform="translate(${box.flipH ? r1(box.w) : 0} ${box.flipV ? r1(box.h) : 0}) scale(${box.flipH ? -1 : 1} ${box.flipV ? -1 : 1})"` : "";
+	return `<svg width="${r1(box.w)}" height="${r1(box.h)}" viewBox="0 0 ${r1(box.w)} ${r1(box.h)}" style="position:absolute;left:0;top:0;overflow:visible"><g${flip}>${out.join("")}</g></svg>`;
 }
 
 async function mediaPath(ctx: Ctx, zipPath: string): Promise<string | null> {
@@ -551,13 +647,17 @@ async function shapeHtml(el: El, ctx: Ctx, rel: Record<string, string>, tx: Tx, 
 		const st = [posCss(box)];
 		let svg: string | null = null;
 		const solid = fill && fill !== "none" ? fill : null;
-		if (prst === "rect" || prst === "roundRect" || prst === "ellipse" || prst === "flowChartProcess" || prst === "flowChartTerminator" || prst === "custom" || prst === "snip1Rect" || prst === "round1Rect" || prst === "round2SameRect") {
+		if (prst === "custom") svg = custGeomSvg(spPr, box, ctx, fill || "none", line);
+		if (svg) {
+			// 자유형 도형은 SVG 로 그렸다 — 상자 배경 · 테두리를 더하지 않는다
+		} else if (prst === "rect" || prst === "roundRect" || prst === "ellipse" || prst === "flowChartProcess" || prst === "flowChartTerminator" || prst === "custom" || prst === "snip1Rect" || prst === "round1Rect" || prst === "round2SameRect") {
 			if (solid) st.push(`background:${solid}`);
 			if (line) st.push(`border:${r1(line.w)}px ${line.dash ? "dashed" : "solid"} ${line.c}`);
 			if (prst === "ellipse") st.push("border-radius:50%");
 			if (prst === "roundRect" || prst === "flowChartTerminator") {
 				const adj = num(path(spPr, "a:prstGeom", "a:avLst", "a:gd")?.getAttribute("fmla")?.replace("val ", ""), prst === "flowChartTerminator" ? 50000 : 16667);
-				st.push(`border-radius:${r1(Math.min(box.w, box.h) * adj / 100000)}px`);
+				// 바깥 모서리 반지름 = 선 가운데 반지름 + 선 두께 반 (아래 grow 로 상자를 넓힌다)
+				st.push(`border-radius:${r1(Math.min(box.w, box.h) * adj / 100000 + (line ? line.w / 2 : 0))}px`);
 			}
 			if (prst === "custom") ctx.warnings.add("custGeom");
 		} else {
@@ -565,19 +665,31 @@ async function shapeHtml(el: El, ctx: Ctx, rel: Record<string, string>, tx: Tx, 
 			svg = presetSvg(prst, box.w, box.h, fill || "none", line, ((v) => (Number.isFinite(v) ? v : undefined))(gd?.startsWith("val ") ? +gd.slice(4) : NaN));
 			if (!svg) { if (solid) st.push(`background:${solid}`); if (line) st.push(`border:${r1(line.w)}px solid ${line.c}`); }
 		}
+		// PowerPoint 는 선을 도형 테두리 가운데에 긋는다(반은 밖, 반은 안). CSS border 는 상자 안쪽에만 그리므로 상자를 선 두께 반만큼 넓혀
+		// 같은 자리에 오게 한다. 2026.11.24 : 6pt 테두리 원이 원본보다 6px 작게 나왔다. 내보내기(exportPptx)는 거꾸로 반만큼 줄여 도형을 만든다
+		const grow = !svg && line ? line.w / 2 : 0;
+		if (grow) st[0] = posCss({ ...box, x: box.x - grow, y: box.y - grow, w: box.w + grow * 2, h: box.h + grow * 2 });
 		const txBody = kid(el, "p:txBody");
 		let text = "";
 		if (txBody && txBody.textContent?.trim()) {
 			const fontRef = path(style, "a:fontRef");
 			const refColor = fontRef ? colorOf(fontRef, ctx) : null;
-			const defs = info.defaults.map((d) => ({ ...d, color: d.color || refColor || undefined }));
+			// 도형 서식(p:style)의 글자색은 마스터 기본 글자 서식보다 가깝다 — 도형 자신의 목록 서식 · 문단 · 조각 서식만 그 위에 선다.
+			// 2026.11.24 : 마스터 「기타」 서식의 검정이 이겨, 초록 머리띠 위 흰 글자(lt1)가 검정으로 나왔다
+			const defs = info.defaults.map((d) => ({ ...d, color: refColor || d.color || undefined }));
 			const t = textHtml(txBody, ctx, defs.length ? defs : [{ color: refColor || undefined }]);
 			const phBody = info.ph?.body ? kid(info.ph.body, "a:bodyPr") : null;
 			const anchor = kid(txBody, "a:bodyPr")?.getAttribute("anchor") || phBody?.getAttribute("anchor") || (info.kind === "title" ? "ctr" : t.anchor);
 			const jc = ({ t: "flex-start", ctr: "center", b: "flex-end" } as Record<string, string>)[anchor] || "flex-start";
-			text = `<div style="position:absolute;inset:0;display:flex;flex-direction:column;justify-content:${jc};padding:${t.ins.map((v) => r1(v) + "px").join(" ").replace(/^(\S+) (\S+) (\S+) (\S+)$/, "$2 $3 $4 $1")};line-height:1.2">${t.html}</div>`;
+			// 글 자리는 원래 도형 상자 기준 — border 안쪽(넓힌 상자 − 선 두께)에서 선 두께 반만큼 다시 밖으로
+			text = `<div style="position:absolute;inset:${grow ? r1(-grow) + "px" : "0"};display:flex;flex-direction:column;justify-content:${jc};padding:${t.ins.map((v) => r1(v) + "px").join(" ").replace(/^(\S+) (\S+) (\S+) (\S+)$/, "$2 $3 $4 $1")};line-height:1.2">${t.html}</div>`;
 		}
 		if (!svg && !text && !solid && !line) return "";
+		// 그림자 — 상자는 box-shadow (내보낼 때 PowerPoint 도형 그림자가 된다), SVG 도형은 그 모양을 따르는 drop-shadow.
+		// 채움 · 선 없는 글상자의 그림자는 PowerPoint 가 글자에 드리운다 — 상자 그림자로 그리면 안 된다
+		const shadow = shadowOf(spPr, ctx, box.rot);
+		if (shadow && svg) st.push(`filter:drop-shadow(${shadowCss(shadow)})`);
+		else if (shadow && (solid || line)) st.push(`box-shadow:${shadowCss(shadow)}`);
 		return `<div style="${st.join(";")}">${svg || ""}${text}</div>`;
 	}
 	if (tag === "p:pic") {
@@ -597,6 +709,9 @@ async function shapeHtml(el: El, ctx: Ctx, rel: Record<string, string>, tx: Tx, 
 			const fw = box.w / (1 - l - r), fh = box.h / (1 - t - b);
 			img = `<div style="${posCss(box)};overflow:hidden"><img src="${src}" alt="" style="position:absolute;left:${r1(-l * fw)}px;top:${r1(-t * fh)}px;width:${r1(fw)}px;height:${r1(fh)}px"></div>`;
 		}
+		// 그림 그림자 — 투명 바탕 그림(손 모양 등)은 모양을 따라 드리운다
+		const shadow = shadowOf(kid(el, "p:spPr"), ctx, box.rot);
+		if (shadow) img = img.replace(/^(<(?:img|div) [^>]*style="[^"]*)"/, `$1;filter:drop-shadow(${shadowCss(shadow)})"`);
 		return img;
 	}
 	if (tag === "p:cxnSp") {
@@ -805,7 +920,9 @@ export async function importPptx(bytes: Uint8Array, src: string, dir: string, ti
 		deck.slides.push({ id: sid, file: `slides/${sid}.html`, title: stitle.slice(0, 60) || undefined, notes: notes || undefined });
 	}
 	progress(order.length, order.length);
-	const css = themeCss({ ...s.shape, font: themeFont || s.shape.font }, deck.size) + `\n/* 가져온 PPTX 의 글자 틀 */\n.slide p { white-space: pre-wrap; }\n`;
+	const tpl = templateOf(s);
+	// overflow-wrap — 칸보다 긴 한 낱말은 PowerPoint 처럼 글자 사이에서 꺾는다. 2026.11.24 : keep-all 만 두어 「시스템명칭」이 좁은 칸 밖으로 넘쳤다
+	const css = themeCss({ ...tpl, font: themeFont || tpl.font }, deck.size) + `\n/* 가져온 PPTX 의 글자 틀 */\n.slide p { white-space: pre-wrap; overflow-wrap: anywhere; }\n`;
 	await api.writeText(dir, "theme.css", css);
 	await writeDeck(dir, deck);
 	return { deck, warnings: [...warnings] };

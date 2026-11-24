@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { ContextMenu, useDefaultMenu } from "./components/ContextMenu";
+import Crash from "./components/Crash";
 import DropZone from "./components/DropZone";
 import Home from "./components/Home";
 import Settings from "./components/Settings";
@@ -36,7 +37,7 @@ export default function App() {
 	useEffect(() => { document.documentElement.lang = lang; }, [lang]);
 	useTheme();
 	useAutoUpdate(loaded);
-	// 앱 밖 Claude Code 의 CLI 명령을 받기 시작한다 — 서재 경로 · 도형 설정을 읽은 뒤라야 새 덱을 만든다
+	// 앱 밖 Claude Code 의 CLI 명령을 받기 시작한다 — 저장 폴더 · 템플릿을 읽은 뒤라야 새 덱을 만든다
 	useEffect(() => { if (loaded) startRemote().catch((e) => console.error("제어 통로", e)); }, [loaded]);
 	useEffect(() => {
 		const k = (e: KeyboardEvent) => {
@@ -63,8 +64,11 @@ export default function App() {
 	return (
 		<div className="app">
 			<TitleBar onSettings={() => setSettings((v) => !v)} settingsOpen={settings} />
-			{open ? <Workspace /> : <Home />}
-			{settings && <Settings onClose={() => setSettings(false)} />}
+			{/* 제목 줄 밖에서 오류를 받는다 — 제목 줄이 남아야 창을 닫거나 옮길 수 있다 */}
+			<Crash>
+				{open ? <Workspace /> : <Home />}
+				{settings && <Settings onClose={() => setSettings(false)} />}
+			</Crash>
 			<Toasts />
 			<ContextMenu />
 			<DropZone />

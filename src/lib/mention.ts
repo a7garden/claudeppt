@@ -2,6 +2,8 @@
 //
 // 번호는 보낼 때의 쪽 순서로 푼다. 푼 결과(쪽 id)를 턴에 남겨 두므로, 나중에 쪽 순서가 바뀌어도 지난 대화의 멘션은 같은 쪽을 가리킨다.
 // 「a@3」 처럼 글자에 붙은 @ 는 멘션이 아니다 (메일 주소 등).
+// 판은 「@v12」 로 가리킨다 — 그 판의 파일을 Claude 가 참고로 읽는다 (versions.ts versionContext). 쪽 멘션과 달리 숫자 앞에 v 가 붙어 섞이지 않는다.
+import type { Commit } from "./api";
 import type { Deck } from "./deck";
 
 export interface Mention { no: number; id: string; file: string; title?: string }
@@ -50,3 +52,31 @@ export function mentionCandidates(deck: Deck, q: string, current: number, limit 
 	if (/^\d+$/.test(k)) return all.filter((m) => String(m.no).startsWith(k)).slice(0, limit);
 	return all.filter((m) => (m.title || "").toLowerCase().includes(k)).slice(0, limit);
 }
+
+// ── 판 멘션 ──
+
+/** 보낼 때 푼 판 — 판 번호는 바뀌지 않지만, 지난 대화에서 그 판을 열 수 있게 커밋을 함께 남긴다 */
+export interface VersionMention { n: number; hash: string; subject: string; date: string }
+export interface VersionToken { start: number; end: number; n: number }
+
+const VRE = /(^|[^\p{L}\p{N}@])@v(\d{1,5})(?![\p{L}\p{N}])/giu;
+
+export function versionTokens(text: string): VersionToken[] {
+	return [...text.matchAll(VRE)].map((m) => ({ start: m.index! + m[1].length, end: m.index! + m[0].length, n: +m[2] }));
+}
+
+/** 글이 가리키는 판들 — 번호 순, 겹치지 않게. 없는 판은 뺀다 */
+export function versionMentionsIn(text: string, versions: Commit[]): VersionMention[] {
+	const ns = [...new Set(versionTokens(text).map((t) => t.n))].sort((a, b) => a - b);
+	return ns.map((n) => versions.find((c) => c.n === n)).filter((c): c is Commit => !!c).map((c) => ({ n: c.n, hash: c.hash, subject: c.subject, date: c.date }));
+}
+
+/** 「@v」 를 적는 중이면 판 고르기 창 — q 는 v 뒤 숫자. 지금 판(맨 위)은 지금 파일과 같아 빼고, 새 판부터 */
+export function versionCandidates(versions: Commit[], q: string, limit = 8): Commit[] {
+	const k = q.replace(/^v/i, "");
+	const past = versions.slice(1);
+	return (k ? past.filter((c) => String(c.n).startsWith(k)) : past).slice(0, limit);
+}
+
+/** @ 뒤에 적는 것이 판인가 — 「v」 · 「v1」 · 「V12」 */
+export const isVersionQuery = (q: string) => /^v\d*$/i.test(q);

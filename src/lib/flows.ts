@@ -1,12 +1,13 @@
 // 프로젝트를 들이는 길 — 새로 만들기 · PPTX 가져오기 · 폴더나 .cppt 열기. 처음 화면과 끌어 놓기가 함께 쓴다.
 import { api, join } from "./api";
 import { createDeck, readDeck, safeName, writeDeck } from "./deck";
+import { linkFonts } from "./fonts";
 import { importPptx } from "./importPptx";
 import { useSettings } from "./settings";
 import { useDeck } from "./store";
 import { tNow } from "./i18n";
 
-/** 서재 안에서 아직 없는 폴더 이름 — 같은 이름이 있으면 뒤에 번호를 붙인다 */
+/** 저장 폴더 안에서 아직 없는 폴더 이름 — 같은 이름이 있으면 뒤에 번호를 붙인다 */
 export async function freeDir(name: string) {
 	const lib = useSettings.getState().s.library;
 	let n = safeName(name), i = 2;
@@ -20,22 +21,24 @@ const titleOf = (brief: string) => {
 	return line.length > 48 ? line.slice(0, 46) + "…" : line;
 };
 
-export async function startNew(brief: string) {
+export async function startNew(brief: string, template?: string) {
 	const s = useSettings.getState().s;
 	const title = brief.trim() ? titleOf(brief) : tNow("untitled");
 	const dir = await freeDir(title);
-	await createDeck(dir, title, s);
+	await createDeck(dir, title, s, template);
 	await useDeck.getState().openProject(dir);
 	if (brief.trim()) useDeck.getState().send(brief.trim());
 }
 
-/** PPTX 하나를 서재에 새 덱으로 들인다 — 첫 판을 남기고, PowerPoint 가 있으면 원본 쪽 그림을 뒤에서 뽑는다.
+/** PPTX 하나를 저장 폴더에 새 덱으로 들인다 — 첫 판을 남기고, PowerPoint 가 있으면 원본 쪽 그림을 뒤에서 뽑는다.
  *  화면의 가져오기(importFile)와 바깥 CLI(remote.ts)가 함께 쓴다. 덱을 열지는 않는다 */
 export async function importDeck(path: string, step: (i: number, n: number) => void) {
 	const name = path.split(/[\\/]/).pop()!.replace(/\.pptx$/i, "");
 	const dir = await freeDir(name);
 	const bytes = new Uint8Array(await api.absReadBytes(path));
 	const { deck, warnings } = await importPptx(bytes, path, dir, name, useSettings.getState().s, step);
+	// 글꼴 별칭을 첫 판에 함께 담는다. 2026.11.24 : 열 때만 이어서, 열지 않고 가져온 덱(CLI --no-open)의 쪽 그림 · 내보내기가 대체 글꼴로 가늘게 나왔다
+	await linkFonts(dir, deck).catch(() => {});
 	// 첫 판은 여기서 남긴다 — 바로 열지 않으면 openProject 의 첫 판 남기기가 늦어져, 아래 「원본 쪽 그림」이 첫 판 이름을 가져간다
 	await api.commit(dir, "PPTX 를 가져온다");
 	// 원본 쪽 그림 — PowerPoint 가 있으면 뒤에서 뽑는다. 없으면 조용히 넘어간다

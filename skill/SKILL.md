@@ -18,25 +18,25 @@ $CPPT help
 
 출력은 늘 JSON 하나다 — `{"ok":true,"data":…}` 또는 `{"ok":false,"error":"…"}` (종료 코드 1). 쪽 번호는 1부터 센다 (deck.json 의 slides 순서).
 
-덱 고르기: `--deck <폴더 | deck.json | 서재 안 덱 이름>`. 주지 않으면 지금 폴더에서 위로 deck.json 을 찾고, 없으면 앱에 열린 덱을 쓴다.
+덱 고르기: `--deck <폴더 | deck.json | 저장 폴더 안 덱 이름>`. 주지 않으면 지금 폴더에서 위로 deck.json 을 찾고, 없으면 앱에 열린 덱을 쓴다.
 **덱 폴더로 `cd` 해 두면 `--deck` 없이 쓴다.**
 
 | 명령 | 하는 일 | 앱 |
 | - | - | - |
 | `status` | 앱이 켜졌는지 · 열린 덱 · 지금 쪽 · **앱 안 Claude 가 일하는 중인지(`running`)** | 켜져 있을 때만 |
-| `list` | 서재의 덱 (최근 고친 순) | 필요 없음 |
+| `list` | 저장 폴더의 덱 (최근 고친 순) | 필요 없음 |
 | `info` | 목차(쪽 번호 · id · 파일 · 제목) · 지금 판 · 릴리즈 | 필요 없음 |
 | `log [-n 20]` | 판 이력 | 필요 없음 |
 | `commit -m "<한 줄>"` | 바뀐 파일을 한 판으로 남긴다 | 필요 없음 |
 | `restore <v3 \| 3 \| 커밋>` | 그 판으로 되돌려 새 판으로 남긴다 (이력은 지우지 않는다) | 필요 없음 |
 | `pack <out.cppt>` · `unpack <file.cppt>` | 폴더째 한 파일로 묶기 · 풀기 (판 이력 포함) | 필요 없음 |
-| `new <제목> [--no-open]` | 서재에 새 덱 (표지 한 장) — `dir` 을 돌려준다 | 띄운다 |
+| `new <제목> [--template <이름>] [--no-open]` | 저장 폴더에 새 덱 (표지 한 장) — `dir` 과 템플릿의 스타일 규칙 `style` 을 돌려준다. **`style` 을 이 덱의 모든 쪽에 지킨다** | 띄운다 |
 | `import <file.pptx> [--no-open]` | PPTX 를 가져와 새 덱으로 | 띄운다 |
 | `open [--slide 3]` | 덱을 앱 화면에 열고 그 쪽으로 간다 | 띄운다 |
 | `shot [--slides 1,3-5] [--scale 1] [--out <폴더>]` | 쪽을 브라우저가 그린 그대로 PNG 로 (기본 `.claudeppt/shots/<n>.png`) | 띄운다 |
 | `inspect [--slides …]` | PPTX 로 나갈 때 그림으로 굳는 것(`baked`) · 쪽 밖으로 넘친 것(`overflow`) | 띄운다 |
 | `export <out.pptx> [--exact]` | PPTX 로 내보낸다. `--exact` 는 모양 그대로(그림 + 투명 글상자, 편집 불가) | 띄운다 |
-| `check` | PPTX 를 PowerPoint 로 그려 웹과 픽셀로 견준다 (PowerPoint 필요) · 쪽마다 차이 % 와 web/ppt/diff 그림 경로 | 띄운다 |
+| `check` | PPTX 를 PowerPoint 로 그려 웹과 픽셀로 견준다 (PowerPoint 필요) · 쪽마다 차이 % 와 web/ppt/diff 그림 경로 · 그림으로 굳은 요소(`locked`)와 그 넓이 %(`stiff`) | 띄운다 |
 | `release [--name …] [--notes …]` | 릴리즈 r<k> — `releases/r<k>-v<n>.pptx` + git 태그 | 띄운다 |
 
 「띄운다」 명령은 앱이 꺼져 있으면 앱을 띄우고 준비될 때까지 기다린다 (처음 몇 초).
