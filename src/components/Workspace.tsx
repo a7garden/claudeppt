@@ -17,7 +17,7 @@ import { type Pin, useDeck } from "../lib/store";
 import { type MenuItem, openMenu } from "./ContextMenu";
 import { VersionBar, VersionLens } from "./VersionLens";
 import { SketchBoard } from "./Sketch";
-import Talk from "./Talk";
+import Talk, { useTalkFold } from "./Talk";
 
 export function SlideFrame({ file, rev, width, height, w, h, onWin, revHash }: { file: string; rev: number; width: number; height?: number; w: number; h: number; onWin?: (win: Window | null) => void; revHash?: string }) {
 	const id = useDeck((s) => s.id);
@@ -218,14 +218,17 @@ export default function Workspace() {
 	const t = useT();
 	const [railW, setRailW] = useWidth("rail", 148, 96, 280);
 	const [talkW, setTalkW] = useWidth("talk", 384, 300, 720);
+	// 대화를 접으면 등뼈 폭만 남는다 — 무대가 그만큼 넓어진다. 펼 때는 접기 전 너비로
+	const folded = useTalkFold((s) => s.folded);
+	const sideW = folded ? 44 : talkW;
 	return (
-		<main className="work" style={{ gridTemplateColumns: `${railW}px minmax(0, 1fr) ${talkW}px` }}>
+		<main className="work" style={{ gridTemplateColumns: `${railW}px minmax(0, 1fr) ${sideW}px` }}>
 			<Rail />
 			<Stage />
 			<Talk />
 			{/* 무대는 360px 아래로 줄이지 않는다 — 옆 영역을 넓혀도 슬라이드가 보여야 한다 */}
-			<Splitter side="left" at={railW} set={(v) => setRailW(v == null ? v : Math.min(v, innerWidth - talkW - 360))} label={t("slides")} />
-			<Splitter side="right" at={talkW} set={(v) => setTalkW(v == null ? v : Math.min(v, innerWidth - railW - 360))} label={t("talk")} />
+			<Splitter side="left" at={railW} set={(v) => setRailW(v == null ? v : Math.min(v, innerWidth - sideW - 360))} label={t("slides")} />
+			{!folded && <Splitter side="right" at={talkW} set={(v) => setTalkW(v == null ? v : Math.min(v, innerWidth - railW - 360))} label={t("talk")} />}
 		</main>
 	);
 }

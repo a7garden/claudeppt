@@ -10,7 +10,7 @@ import { useT } from "./lib/i18n";
 import { startRemote } from "./lib/remote";
 import { useSettings } from "./lib/settings";
 import { useDeck } from "./lib/store";
-import { useAutoUpdate, useUpdate } from "./lib/updater";
+import { useAutoUpdate } from "./lib/updater";
 
 function useTheme() {
 	const theme = useSettings((s) => s.s.theme);
@@ -80,7 +80,6 @@ function Toasts() {
 	const toast = useDeck((s) => s.toast);
 	const busy = useDeck((s) => s.busy);
 	const jobs = useDeck((s) => s.jobs);
-	const up = useUpdate();
 	const t = useT();
 	return (
 		<>
@@ -106,13 +105,6 @@ function Toasts() {
 							{j.note && <div className="detail" title={j.note}>{j.note}</div>}
 						</div>
 					))}
-				</div>
-			)}
-			{up.phase === "available" && up.notified && !busy && (
-				<div className="toast" role="status">
-					<span>{t("update")} <span className="mono">{up.version}</span></span>
-					<button onClick={up.install}>{t("install")}</button>
-					<button className="dim" onClick={up.dismiss}>{t("close")}</button>
 				</div>
 			)}
 		</>

@@ -7,6 +7,7 @@ import { useEffect, useRef, useState } from "react";
 import type { Commit } from "../lib/api";
 import { useT } from "../lib/i18n";
 import { useDeck } from "../lib/store";
+import { useUpdate } from "../lib/updater";
 import { openMenu } from "./ContextMenu";
 import DeckActions from "./DeckActions";
 
@@ -84,6 +85,7 @@ export default function TitleBar({ onSettings, settingsOpen }: { onSettings: () 
 				)}
 			</div>
 			<div className="right" data-tauri-drag-region>
+				<UpdateChip />
 				{deck && <DeckActions />}
 				<button className={"tb-btn" + (settingsOpen ? " on" : "")} onClick={onSettings} title={t("settings") + " (Ctrl+,)"} aria-label={t("settings")}>
 					<svg width="15" height="15" viewBox="0 0 16 16" aria-hidden><path d="M2 4.5h7M12 4.5h2M2 11.5h2M7 11.5h7" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" /><circle cx="10.5" cy="4.5" r="1.6" fill="none" stroke="currentColor" strokeWidth="1.4" /><circle cx="5.5" cy="11.5" r="1.6" fill="none" stroke="currentColor" strokeWidth="1.4" /></svg>
@@ -159,5 +161,44 @@ function VersionList({ onClose }: { onClose: () => void }) {
 				);
 			})}
 		</div>
+	);
+}
+
+/** 새 판 칩 — 새 판이 있을 때만 제목 줄 오른쪽에 선다. 처음 찾은 판이면 설명을 저절로 펴고(notified), 「나중에」로 접어도 칩은 남는다.
+ *  받는 중에는 칩이 진행률이 된다 — 다 받으면 앱이 다시 켜진다 */
+function UpdateChip() {
+	const t = useT();
+	const u = useUpdate();
+	const ref = useRef<HTMLSpanElement>(null);
+	const [open, setOpen] = useState(false);
+	const show = open || u.notified;
+	const close = () => { setOpen(false); if (useUpdate.getState().notified) useUpdate.getState().dismiss(); };
+	useEffect(() => {
+		if (!show) return;
+		const k = (e: MouseEvent) => { if (!ref.current?.contains(e.target as Node)) close(); };
+		const esc = (e: KeyboardEvent) => { if (e.key === "Escape") close(); };
+		addEventListener("mousedown", k);
+		addEventListener("keydown", esc);
+		return () => { removeEventListener("mousedown", k); removeEventListener("keydown", esc); };
+	}, [show]);
+	if (u.phase !== "available" && u.phase !== "downloading") return null;
+	const busy = u.phase === "downloading";
+	return (
+		<span className="upd" ref={ref}>
+			<button className={"upd-chip" + (show ? " on" : "")} onClick={() => (show ? close() : setOpen(true))} disabled={busy} aria-expanded={show}>
+				<i aria-hidden />
+				{busy ? <span className="mono">{Math.round(u.progress * 100)}%</span> : <>{t("updateReady")} <span className="mono">{u.version}</span></>}
+			</button>
+			{show && !busy && (
+				<div className="pop upd-pop" role="dialog" aria-label={t("update")}>
+					<div className="head"><b>ClaudePPT <span className="mono">{u.version}</span></b></div>
+					{u.notes && <div className="upd-notes">{u.notes}</div>}
+					<div className="acts">
+						<button className="ghost" onClick={close}>{t("updateLater")}</button>
+						<button className="send" onClick={() => { close(); u.install(); }}>{t("updateNow")}</button>
+					</div>
+				</div>
+			)}
+		</span>
 	);
 }

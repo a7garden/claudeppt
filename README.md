@@ -12,6 +12,7 @@ Tauri 2 · React 19 · Vite · TypeScript. 화면 서식은 토큰 CSS 한 장(`
 | 새로 만들기 | 처음 화면의 「주제」에 한 줄을 쓰고 Enter — 빈 덱을 만들고 그 글로 첫 턴을 보낸다. 비워 두고 누르면 표지 한 장만 |
 | PPTX 가져오기 | 「PPTX 가져오기」(Ctrl+O) 또는 창에 끌어 놓기(처음 화면 · 작업 화면 어디서나 — 끌어 오는 동안 무엇을 어떻게 가져오는지 판으로 보인다). 원본과 같은 모양의 HTML 로 옮기고, PowerPoint 가 있으면 원본 쪽 그림(`source/pages`)도 뽑는다 |
 | 고치기 | 오른쪽 대화칸에 쓰고 Enter. 붙여 넣은 그림은 첨부로 간다 |
+| 대화 접기 | 대화 머리의 판 아이콘 · Ctrl+B 로 오른쪽 대화를 접어 무대를 넓힌다. 접으면 44px 등뼈에 판 마디(누르면 그 판 보기) · Claude 가 도는 중 · 접은 뒤 온 새 답 · 핀 수 · 쓰던 글 표시가 남는다. 「/」 · 핀 꽂기 · 쪽 언급은 저절로 편다 |
 | 쪽 지정(@) | 요청칸에서 `@` 를 치면 쪽 고르기 창(번호 · 미리보기 · 제목)이 뜬다 — ↑↓ · Enter 로 넣는다. `@3` 은 3쪽, `@3-5` 는 3~5쪽. 쪽 목록 번호 옆 `@` 를 눌러도 들어간다. Claude 에게는 그 쪽들의 파일이 함께 가고, 지난 대화의 `@쪽` 을 누르면 그 쪽으로 간다 |
 | 판 언급(@v) | 요청칸에서 `@v` 를 치면 판 고르기 창 — `@v12` 는 12판. 보낼 때 그 판의 덱 파일을 `.claudeppt/versions/v12/` 에 펼치고 지금과 다른 쪽을 적어 넘겨, Claude 가 참고로 읽는다(「@v12 의 표지 배치로」). 판 목록 · 지난 판 보기 · 비교 띠 · 대화의 판 우클릭에서도 넣는다 |
 | 넘겨 보기 | 무대 위에서 휠 · ↑↓←→ · PageUp/Down · Home/End 로 쪽을 넘긴다. 제목 줄 가운데 「한 쪽 · 이어 보기」(S) — 이어 보기는 모든 쪽을 세로로 늘어놓고 스크롤로 넘긴다. 가운데 온 쪽이 지금 쪽, 두 번 누르면 그 쪽을 「한 쪽」으로 크게 연다 |
@@ -156,7 +157,7 @@ cd src-tauri && cargo check
   패치 판은 쌓아 두기만 하고 GitHub 릴리즈로 내지 않는다 — 깔린 앱이 받는 것은 릴리즈한 마이너 판뿐이다.
 - `package.json` · `src-tauri/Cargo.toml` · `src-tauri/tauri.conf.json` 의 버전과 `CHANGELOG.md` 구획을 함께 올리고 커밋한 뒤 `git tag v<버전> && git push origin v<버전>`.
   `.github/workflows/release.yml` 이 설치 파일 · 서명 · `latest.json` 을 GitHub 릴리즈에 올린다.
-- 설치된 앱은 켤 때와 1시간마다 `releases/latest/download/latest.json` 을 보고 새 판이면 알림의 「설치」로 받아 다시 켠다. 「설정 › 업데이트」에서 끄고 켠다. 개발 실행에서는 확인하지 않는다.
+- 설치된 앱은 켤 때와 1시간마다 `releases/latest/download/latest.json` 을 보고 새 판이면 제목 줄에 「새 판 <번호>」 칩이 서고, 처음 찾은 판은 설명을 저절로 편다. 「설치하고 다시 켜기」로 받는다 — 「나중에」로 닫아도 칩은 남는다. 창으로 돌아왔을 때 30분 넘게 안 봤으면 한 번 더 본다. 「설정 › 업데이트」에서 끄고 켠다. 개발 실행에서는 확인하지 않는다.
 - 업데이트 주소는 `tauri.conf.json` 의 `plugins.updater.endpoints` (지금 `a7garden/claudeppt` — 저장소를 만들면 맞춘다).
 - 서명 키는 `~/.tauri/claudeppt.key`(비밀번호 없음). 저장소 비밀 `TAURI_SIGNING_PRIVATE_KEY` 에 같은 내용을 넣는다.
 - 저장소 비밀이 없으면 CI 는 빌드를 건너뛴다. 그때는 키가 있는 PC 에서 서명 키를 주고 `npm run tauri build` 를 돌린 뒤 `git push origin main && node tools/release-local.mjs` — 설치 파일 · 서명 · `latest.json` 을 `v<버전>` 릴리즈로 올린다 (2026.11.18 0.1.1 을 이 길로 냈다).

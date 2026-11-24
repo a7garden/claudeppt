@@ -26,7 +26,7 @@ export default function DeckActions() {
 	}, []);
 	const busy = useDeck((s) => !!s.busy || !!s.running);
 	return (
-		<div ref={ref} style={{ display: "flex", gap: 2 }}>
+		<div ref={ref} className="deck-acts">
 			<button className={"tb-btn" + (open === "export" ? " on" : "")} onClick={() => setOpen(open === "export" ? "" : "export")} disabled={busy}>{t("export")}</button>
 			<button className={"tb-btn" + (open === "release" ? " on" : "")} onClick={() => setOpen(open === "release" ? "" : "release")} disabled={busy}>{t("release")}</button>
 			{open === "export" && <ExportPop onDone={() => setOpen("")} />}
@@ -47,7 +47,7 @@ function ExportPop({ onDone }: { onDone: () => void }) {
 		if (p) exportTo(p, exact);
 	};
 	return (
-		<div className="pop export" style={{ right: 210 }}>
+		<div className="pop export">
 			<div className="choices">
 				<button onClick={() => pptx(false)}>
 					<b>{t("pptxEditable")}</b>
@@ -89,7 +89,7 @@ function ReleasePop({ onDone }: { onDone: () => void }) {
 	const next = `r${releases.length + 1}`;
 	const head = versions[0]?.n ?? 0;
 	return (
-		<div className="pop" style={{ right: 150 }}>
+		<div className="pop">
 			<div className="head">
 				<b>{t("release")} {next}</b>
 				<span>{t("releaseOf").replace("{v}", `v${head}`)}{last ? ` · ${t("releaseSince").replace("{r}", last.tag).replace("{n}", String(since.length))}` : ""}</span>

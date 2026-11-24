@@ -1,10 +1,12 @@
-// 대화 — 턴마다 왼쪽 여백에 그 턴이 남긴 판(v<n>)을 찍는다. 대화 기록이 곧 판 이력이다.
+// 대화 — 턴마다 왼쪽 여백의 실(thread)에 그 턴이 남긴 판(v<n>)을 꿴다. 대화 기록이 곧 판 이력이다.
 // 아래 요청칸 위에 아직 보내지 않은 핀이 쌓이고, 보내기 한 번에 글과 핀이 함께 간다.
 // 요청칸에서 @ 를 치면 쪽 고르기 창이 뜬다 — 「@3」 · 「@3-5」 로 고칠 쪽을 가리킨다 (mention.ts).
 // 「@v」 를 치면 판 고르기 창 — 「@v12」 로 지난 판을 참고하게 한다 (보낼 때 그 판 파일을 펼쳐 넘긴다 · versions.ts).
-// 요청칸은 「아직 보내지 않은 다음 턴」이다 — 턴과 같은 왼쪽 여백에 보내면 남을 판(v<n+1>)을 흐리게 찍고, 핀 번호도 그 여백에 둔다.
-// 접으면 한 줄로 줄어 대화 기록에 자리를 내준다. 접힌 줄에도 쓰던 글 · 핀 수 · 언급한 쪽이 보여 무엇이 대기 중인지 잃지 않는다.
+// 요청칸은 「아직 보내지 않은 다음 턴」이다 — 같은 실 끝에 보내면 남을 판(v<n+1>)을 점선 마디로 찍는다.
+// 2026.11.24 : 요청칸 접기를 걷고 사이드바 전체를 접는다(Ctrl+B). 접히면 44px 등뼈 — 판 마디 · 도는 중 · 새 답 · 핀 수만 남아
+//              무대를 넓게 쓰면서도 Claude 가 일하는 중인지, 보낼 것이 쌓였는지는 잃지 않는다. 접어도 쓰던 글은 그대로다(숨길 뿐 내리지 않는다).
 import { Fragment, useEffect, useMemo, useRef, useState } from "react";
+import { create } from "zustand";
 import { api, b64FromBytes } from "../lib/api";
 import { useT } from "../lib/i18n";
 import { isVersionQuery, mentionCandidates, mentionTokens, mentionsIn, typingMention, versionCandidates, versionMentionsIn, versionTokens } from "../lib/mention";
@@ -12,28 +14,131 @@ import { copyText, openMenu } from "./ContextMenu";
 import { SLIDE_MIME, SlideFrame } from "./Workspace";
 import { type Turn, useDeck } from "../lib/store";
 
+/** 사이드바 접힘 — 보는 사람의 편의라 이 PC 에만 남긴다. seen 은 접을 때 본 마지막 턴(그 뒤 끝난 턴이 「새 답」) */
+interface Fold { folded: boolean; seen: string | null; draft: boolean; set: (v: boolean) => void }
+const FOLD_KEY = "claudeppt.talk.folded";
+export const useTalkFold = create<Fold>()((set) => ({
+	folded: (() => { try { return localStorage.getItem(FOLD_KEY) === "1"; } catch { return false; } })(),
+	seen: null,
+	draft: false,
+	set: (v) => {
+		// 접는 순간 끝나 있는 마지막 턴을 본 것으로 친다. 도는 중이면 비워 두어 끝나면 「새 답」이 된다
+		const last = useDeck.getState().turns.at(-1);
+		set({ folded: v, seen: v && last && last.status !== "running" ? last.id : null });
+		try { localStorage.setItem(FOLD_KEY, v ? "1" : "0"); } catch {}
+	},
+}));
+/** 펴고 요청칸에 손을 둔다 — 「/」 · 등뼈의 쓰기 단추 · 쪽 언급이 부른다 */
+export function openTalk(focus = true) {
+	if (useTalkFold.getState().folded) useTalkFold.getState().set(false);
+	if (focus) requestAnimationFrame(() => document.querySelector<HTMLTextAreaElement>(".composer textarea")?.focus());
+}
+
 export default function Talk() {
 	const t = useT();
 	const turns = useDeck((s) => s.turns);
 	const versions = useDeck((s) => s.versions);
 	const setPreview = useDeck((s) => s.setPreview);
+	const folded = useTalkFold((s) => s.folded);
 	const logRef = useRef<HTMLDivElement>(null);
 	const stick = useRef(true);
 	useEffect(() => {
 		const el = logRef.current;
 		if (el && stick.current) el.scrollTop = el.scrollHeight;
-	}, [turns]);
+	}, [turns, folded]);
+	// Ctrl+B — 접기 · 펴기. 글 칸 안에서도 받는다(굵게 같은 뜻이 없는 칸들이다)
+	useEffect(() => {
+		const k = (e: KeyboardEvent) => {
+			if (!e.ctrlKey || e.altKey || e.shiftKey || e.key.toLowerCase() !== "b") return;
+			e.preventDefault();
+			const f = useTalkFold.getState();
+			if (f.folded) openTalk(); else f.set(true);
+		};
+		addEventListener("keydown", k);
+		return () => removeEventListener("keydown", k);
+	}, []);
+	const head = versions[0];
 	return (
-		<aside className="talk" aria-label={t("talk")}>
-			<div className="log" ref={logRef} onScroll={(e) => { const el = e.currentTarget; stick.current = el.scrollHeight - el.scrollTop - el.clientHeight < 40; }}>
-				{turns.length === 0 ? (
-					<EmptyTalk />
-				) : (
-					turns.map((x) => <TurnView key={x.id} turn={x} onVersion={() => { const c = versions.find((v) => v.hash === x.version?.hash); if (c) setPreview(c); }} />)
-				)}
+		<aside className={"talk" + (folded ? " folded" : "")} aria-label={t("talk")}>
+			{folded && <Spine />}
+			{/* 접혀도 내리지 않는다 — 요청칸의 쓰던 글 · 첨부 · 고르기 상태를 잃지 않게 숨기기만 한다 */}
+			<div className="talk-body" hidden={folded}>
+				<header className="talk-head">
+					<b>{t("talk")}</b>
+					{turns.length > 0 && <span className="mono">{turns.length}{t("talkTurns")}{head ? ` · v${head.n}` : ""}</span>}
+					<button className="talk-fold" onClick={() => useTalkFold.getState().set(true)} aria-expanded={true} title={`${t("talkFold")} (Ctrl+B)`} aria-label={t("talkFold")}>
+						<PanelIcon open />
+					</button>
+				</header>
+				<div className="log" ref={logRef} onScroll={(e) => { const el = e.currentTarget; stick.current = el.scrollHeight - el.scrollTop - el.clientHeight < 40; }}>
+					{turns.length === 0 ? (
+						<EmptyTalk />
+					) : (
+						turns.map((x) => <TurnView key={x.id} turn={x} head={!!head && x.version?.hash === head.hash} onVersion={() => { const c = versions.find((v) => v.hash === x.version?.hash); if (c) setPreview(c); }} />)
+					)}
+				</div>
+				<Composer />
 			</div>
-			<Composer />
 		</aside>
+	);
+}
+
+/** 오른쪽 판 아이콘 — 열림이면 판을 밀어 닫는 쪽(»), 닫힘이면 꺼내는 쪽(«) */
+function PanelIcon({ open }: { open?: boolean }) {
+	return (
+		<svg width="16" height="16" viewBox="0 0 16 16" aria-hidden>
+			<rect x="1.75" y="2.75" width="12.5" height="10.5" rx="2" fill="none" stroke="currentColor" strokeWidth="1.3" />
+			<path d="M10 3v10" stroke="currentColor" strokeWidth="1.3" />
+			<path d={open ? "M5 6.2 6.8 8 5 9.8" : "M6.8 6.2 5 8l1.8 1.8"} fill="none" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" strokeLinejoin="round" />
+		</svg>
+	);
+}
+
+/** 접힌 대화 — 44px 등뼈. 위에서 아래로: 펴기 · 판 마디(새 판이 아래, 누르면 그 판 보기) · 도는 중/새 답 · 핀 수 · 쓰기.
+ *  대화를 펴지 않고도 「지금 Claude 가 일하는가 · 끝났는가 · 보낼 것이 쌓였는가」 셋을 읽는다 */
+function Spine() {
+	const t = useT();
+	const turns = useDeck((s) => s.turns);
+	const versions = useDeck((s) => s.versions);
+	const preview = useDeck((s) => s.preview);
+	const setPreview = useDeck((s) => s.setPreview);
+	const pins = useDeck((s) => s.pins.length);
+	const seen = useTalkFold((s) => s.seen);
+	const draft = useTalkFold((s) => s.draft);
+	const last = turns.at(-1);
+	const running = last?.status === "running";
+	const unseen = !!last && !running && last.id !== seen;
+	// 판을 남긴 턴만 마디가 된다 — 새 판이 아래(요청칸 쪽). 넘치면 오래된 위쪽이 가려진다
+	const nodes = turns.filter((x) => x.version).slice(-40);
+	const head = versions[0];
+	return (
+		<nav className="spine" aria-label={t("talk")}
+			onDragOver={(e) => { if (e.dataTransfer.types.includes(SLIDE_MIME)) openTalk(false); }}>
+			<button className="sp-btn" onClick={() => openTalk(false)} aria-expanded={false} title={`${t("talkOpen")} (Ctrl+B)`} aria-label={t("talkOpen")}>
+				<PanelIcon />
+			</button>
+			<ol className="sp-thread">
+				{nodes.map((x) => {
+					const v = x.version!;
+					const c = versions.find((k) => k.hash === v.hash);
+					const on = preview ? preview.hash === v.hash : v.hash === head?.hash;
+					return (
+						<li key={x.id}>
+							<button className={"sp-node" + (on ? " on" : "")} onClick={() => { if (c) setPreview(c === head ? null : c); }}
+								title={`v${v.n} · ${x.request.split("\n")[0].slice(0, 60)}`}>{v.n}</button>
+						</li>
+					);
+				})}
+				{running && <li><span className="sp-run" role="status" aria-label={t("working")} /></li>}
+				{unseen && <li><button className="sp-new" onClick={() => openTalk(false)} title={t("talkUnseen")} aria-label={t("talkUnseen")} /></li>}
+			</ol>
+			<div className="sp-foot">
+				{pins > 0 && <button className="sp-pins" onClick={() => openTalk()} title={`${t("pins")} ${pins}`} aria-label={`${t("pins")} ${pins}`}>{pins}</button>}
+				<button className={"sp-btn" + (draft ? " draft" : "")} onClick={() => openTalk()} title={`${t("talkWrite")} (/)`} aria-label={t("talkWrite")}>
+					<svg width="16" height="16" viewBox="0 0 16 16" aria-hidden><path d="M3 13l.6-2.6L10.8 3.2a1.4 1.4 0 0 1 2 2L5.6 12.4z" fill="none" stroke="currentColor" strokeWidth="1.3" strokeLinejoin="round" /></svg>
+				</button>
+			</div>
+		</nav>
 	);
 }
 
@@ -55,7 +160,7 @@ function EmptyTalk() {
 	);
 }
 
-function TurnView({ turn, onVersion }: { turn: Turn; onVersion: () => void }) {
+function TurnView({ turn, head: isHead, onVersion }: { turn: Turn; head: boolean; onVersion: () => void }) {
 	const t = useT();
 	const deck = useDeck((s) => s.deck)!;
 	const setCurrent = useDeck((s) => s.setCurrent);
@@ -84,8 +189,9 @@ function TurnView({ turn, onVersion }: { turn: Turn; onVersion: () => void }) {
 	const detail = [...files, reads ? `read ×${reads}` : "", turn.cost != null ? `$${turn.cost.toFixed(3)}` : ""].filter(Boolean).join("  ");
 	return (
 		<article className={"turn " + turn.status} onContextMenu={menu}>
+			{/* 실의 마디 — 판을 남긴 턴은 판 번호(지금 판은 채움), 도는 턴은 뛰는 점, 판 없이 끝난 턴(답만 · 멈춤)은 빈 점 */}
 			<div className="gutter">
-				{turn.status === "running" ? <span className="run" aria-label={t("working")} /> : turn.version ? <button onClick={onVersion} title={`${turn.version.short}${turn.cost != null ? ` · $${turn.cost.toFixed(3)}` : ""}`}>v{turn.version.n}</button> : <span className="mono dim" style={{ fontSize: 11 }}>—</span>}
+				{turn.status === "running" ? <span className="run" aria-label={t("working")} /> : turn.version ? <button className={"node" + (isHead ? " head" : "")} onClick={onVersion} title={`${turn.version.short}${turn.cost != null ? ` · $${turn.cost.toFixed(3)}` : ""}`}>v{turn.version.n}</button> : <span className="dot" aria-hidden />}
 			</div>
 			<div style={{ minWidth: 0 }}>
 				{turn.request && <div className="req"><Mentioned text={turn.request} turn={turn} /></div>}
@@ -159,10 +265,6 @@ function Composer() {
 	const rev = useDeck((s) => s.rev);
 	const next = useDeck((s) => (s.versions[0]?.n ?? 0) + 1);
 	const [text, setText] = useState("");
-	// 접힘은 보는 사람의 편의라 이 PC 에만 남긴다
-	const [open, setOpenRaw] = useState(() => { try { return localStorage.getItem("claudeppt.composer") !== "0"; } catch { return true; } });
-	const setOpen = (v: boolean) => { setOpenRaw(v); try { localStorage.setItem("claudeppt.composer", v ? "1" : "0"); } catch {} };
-	const unfold = () => { setOpen(true); requestAnimationFrame(() => ta.current?.focus()); };
 	// 쪽 목록 · 이어 보기에서 쪽을 끌어 요청칸 위에 올린 동안 — 놓으면 @쪽 이 들어간다
 	const [dropping, setDropping] = useState(false);
 	const mentionSlide = useDeck((s) => s.mentionSlide);
@@ -198,7 +300,7 @@ function Composer() {
 	// 「이 쪽 언급」 — 커서 자리에 넣는다. 앞 글자에 붙지 않게 빈칸을 둔다. 「요청 다시 쓰기」 — 칸 전체를 바꾼다
 	useEffect(() => {
 		if (!insertReq) return;
-		setOpen(true);
+		openTalk(false);
 		const el = ta.current;
 		if (insertReq.whole) {
 			setText(insertReq.text);
@@ -215,17 +317,20 @@ function Composer() {
 		const el = ta.current!;
 		el.style.height = "auto";
 		el.style.height = Math.min(220, el.scrollHeight) + "px";
-	}, [text, open]);
-	// 핀이 새로 꽂히면 펼친다 — 접힌 채로 두면 의견을 적을 칸이 보이지 않는다
+	}, [text]);
+	// 접힌 등뼈가 「쓰던 글이 있다」를 보이게 알린다
+	const hasDraft = !!text.trim();
+	useEffect(() => { useTalkFold.setState({ draft: hasDraft }); }, [hasDraft]);
+	// 핀이 새로 꽂히면 대화를 편다 — 접힌 채로 두면 의견을 적을 칸이 보이지 않는다
 	const pinCount = useRef(pins.length);
-	useEffect(() => { if (pins.length > pinCount.current) setOpen(true); pinCount.current = pins.length; }, [pins.length]);
-	// 「/」 — 어디서든 요청칸으로. 입력 중인 칸에서는 그냥 글자다
+	useEffect(() => { if (pins.length > pinCount.current) openTalk(false); pinCount.current = pins.length; }, [pins.length]);
+	// 「/」 — 어디서든 요청칸으로(접혀 있으면 편다). 입력 중인 칸에서는 그냥 글자다
 	useEffect(() => {
 		const k = (e: KeyboardEvent) => {
 			if (e.key !== "/" || e.ctrlKey || e.altKey || e.metaKey) return;
 			if ((e.target as Element).closest?.("input, textarea, [contenteditable]")) return;
 			e.preventDefault();
-			unfold();
+			openTalk();
 		};
 		addEventListener("keydown", k);
 		return () => removeEventListener("keydown", k);
@@ -252,7 +357,6 @@ function Composer() {
 	};
 	const slideNo = (id: string) => deck.slides.findIndex((s) => s.id === id) + 1;
 
-	const ghost = running ? <span className="run" aria-label={t("working")} /> : <span className="ghost" title={t("nextVersion")}>v{next}</span>;
 	const sendBtn = running ? (
 		<button className="send stop" onClick={stop}>{t("stop")}</button>
 	) : (
@@ -260,104 +364,82 @@ function Composer() {
 			{pins.length ? `${t("sendPins")} ${pins.length}` : t("send")}<kbd>↵</kbd>
 		</button>
 	);
-	const line = text.trim().split(/\n/)[0];
-
 	return (
-		<div className={"composer" + (open ? "" : " folded")}
-			onDragOver={(e) => { if (!open && e.dataTransfer.types.includes(SLIDE_MIME)) setOpen(true); }}>
-			{/* 접힌 줄 — 줄 전체가 펼치기 단추다. 보내기 · 멈춤만 따로 눌린다 */}
-			<div className="fold-line" hidden={open}>
-				<div className="gutter">{ghost}</div>
-				<button className="peek" onClick={unfold} aria-expanded={false} title={t("composerOpen")}>
-					{line ? <span className="draft">{line}</span> : <span className="hint">{t("composerHint")}</span>}
-					{pins.length > 0 && <span className="pinsum"><i>{pins.length}</i>{t("pins")}</span>}
-					{mentioned.map((m) => <span key={m.id} className="msum">@{m.no}</span>)}
-					{vmentioned.map((m) => <span key={m.hash} className="msum">@v{m.n}</span>)}
-					{attach.length > 0 && <span className="msum">{t("attachN")} {attach.length}</span>}
-					<span className="chev" aria-hidden>⌃</span>
-				</button>
-				{sendBtn}
-			</div>
-			<div className="unfolded" hidden={!open}>
-				{pins.length > 0 && (
-					<div className="tray" aria-label={t("pins")}>
-						{pins.map((p, i) => (
-							<div className="tray-pin" key={p.id}>
-								<span className="n">{i + 1}</span>
-								<button className="where" onClick={() => setCurrent(slideNo(p.slide) - 1)}>{slideNo(p.slide)}{t("slideN") === "쪽" ? "쪽" : ""}{p.shape ? ` ${GLYPH[p.shape.kind]}` : ""}</button>
-								<input defaultValue={p.text} key={p.text} placeholder={p.target?.text || t("pinPlaceholder")} aria-label={`${t("pin")} ${i + 1}`} onBlur={(e) => { if (e.target.value !== p.text) update(p.id, e.target.value); }}
-									onKeyDown={(e) => { if (e.key === "Enter") { (e.target as HTMLInputElement).blur(); if (e.ctrlKey) go(); } }} />
-								<button className="x" onClick={() => remove(p.id)} aria-label={t("delete")}>×</button>
-							</div>
+		<div className="composer">
+			{pins.length > 0 && (
+				<div className="tray" aria-label={t("pins")}>
+					{pins.map((p, i) => (
+						<div className="tray-pin" key={p.id}>
+							<span className="n">{i + 1}</span>
+							<button className="where" onClick={() => setCurrent(slideNo(p.slide) - 1)}>{slideNo(p.slide)}{t("slideN") === "쪽" ? "쪽" : ""}{p.shape ? ` ${GLYPH[p.shape.kind]}` : ""}</button>
+							<input defaultValue={p.text} key={p.text} placeholder={p.target?.text || t("pinPlaceholder")} aria-label={`${t("pin")} ${i + 1}`} onBlur={(e) => { if (e.target.value !== p.text) update(p.id, e.target.value); }}
+								onKeyDown={(e) => { if (e.key === "Enter") { (e.target as HTMLInputElement).blur(); if (e.ctrlKey) go(); } }} />
+							<button className="x" onClick={() => remove(p.id)} aria-label={t("delete")}>×</button>
+						</div>
+					))}
+				</div>
+			)}
+			{/* 실의 끝 마디 — 보내면 남을 판(점선). 도는 중이면 뛰는 점 */}
+			<div className="gutter">{running ? <span className="run" aria-label={t("working")} /> : <span className="next-v" title={t("nextVersion")}>v{next}</span>}</div>
+			<div className={"box" + (dropping ? " dropping" : "")} data-drop={t("dropMention")}
+				onDragOver={(e) => { if (!e.dataTransfer.types.includes(SLIDE_MIME)) return; e.preventDefault(); e.dataTransfer.dropEffect = "copy"; setDropping(true); }}
+				onDragLeave={(e) => { if (!e.currentTarget.contains(e.relatedTarget as Node)) setDropping(false); }}
+				onDrop={(e) => {
+					setDropping(false);
+					const no = deck.slides.findIndex((s) => s.id === e.dataTransfer.getData(SLIDE_MIME)) + 1;
+					if (!no) return;
+					e.preventDefault();
+					mentionSlide(no);
+				}}>
+				{pick && (
+					<div className="picker" role="listbox" aria-label={t("slides")}>
+						{count === 0 && <div className="none">{vpick ? t("mentionVersionNone") : t("mentionNone")}</div>}
+						{vcands.map((c, i) => (
+							<button key={c.hash} role="option" aria-selected={i === pick.sel} className={"ver" + (i === pick.sel ? " on" : "")}
+								onMouseDown={(e) => { e.preventDefault(); choose(i, ta.current?.selectionStart ?? text.length); }}
+								onMouseEnter={() => setPick({ ...pick, sel: i })}>
+								<span className="mono">@v{c.n}</span>
+								<span className="title">{c.subject}</span>
+								<span className="here mono">{c.date.slice(5, 16)}</span>
+							</button>
 						))}
+						{cands.map((m, i) => (
+							<button key={m.id} role="option" aria-selected={i === pick.sel} className={i === pick.sel ? "on" : ""}
+								onMouseDown={(e) => { e.preventDefault(); choose(i, ta.current?.selectionStart ?? text.length); }}
+								onMouseEnter={() => setPick({ ...pick, sel: i })}>
+								<span className="mono">@{m.no}</span>
+								{/* 작은 미리보기 — 제목이 없는 쪽(가져온 덱에 흔하다)도 모양으로 가려 고르게 */}
+								<span className="pthumb" style={{ height: (64 * deck.size.h) / deck.size.w }}><SlideFrame file={m.file} rev={rev[m.id] || 0} w={deck.size.w} h={deck.size.h} width={64} /></span>
+								<span className="title">{m.title || t("untitled")}</span>
+								{m.no === current + 1 && <span className="here">{t("here")}</span>}
+							</button>
+						))}
+						{/* 판도 멘션할 수 있다는 것을 쪽 고르기 창 끝에서 알린다 — 「@v」 를 모르면 쓸 길이 없다 */}
+						{!vpick && versions.length > 1 && <div className="none">{t("mentionVersionHint")}</div>}
 					</div>
 				)}
-				<div className="gutter side">
-					{ghost}
-					<button className="fold" onClick={() => setOpen(false)} aria-expanded={true} aria-label={t("composerFold")} title={t("composerFold")}>⌄</button>
-				</div>
-				<div className={"box" + (dropping ? " dropping" : "")} data-drop={t("dropMention")}
-					onDragOver={(e) => { if (!e.dataTransfer.types.includes(SLIDE_MIME)) return; e.preventDefault(); e.dataTransfer.dropEffect = "copy"; setDropping(true); }}
-					onDragLeave={(e) => { if (!e.currentTarget.contains(e.relatedTarget as Node)) setDropping(false); }}
-					onDrop={(e) => {
-						setDropping(false);
-						const no = deck.slides.findIndex((s) => s.id === e.dataTransfer.getData(SLIDE_MIME)) + 1;
-						if (!no) return;
-						e.preventDefault();
-						mentionSlide(no);
-					}}>
-					{pick && (
-						<div className="picker" role="listbox" aria-label={t("slides")}>
-							{count === 0 && <div className="none">{vpick ? t("mentionVersionNone") : t("mentionNone")}</div>}
-							{vcands.map((c, i) => (
-								<button key={c.hash} role="option" aria-selected={i === pick.sel} className={"ver" + (i === pick.sel ? " on" : "")}
-									onMouseDown={(e) => { e.preventDefault(); choose(i, ta.current?.selectionStart ?? text.length); }}
-									onMouseEnter={() => setPick({ ...pick, sel: i })}>
-									<span className="mono">@v{c.n}</span>
-									<span className="title">{c.subject}</span>
-									<span className="here mono">{c.date.slice(5, 16)}</span>
-								</button>
-							))}
-							{cands.map((m, i) => (
-								<button key={m.id} role="option" aria-selected={i === pick.sel} className={i === pick.sel ? "on" : ""}
-									onMouseDown={(e) => { e.preventDefault(); choose(i, ta.current?.selectionStart ?? text.length); }}
-									onMouseEnter={() => setPick({ ...pick, sel: i })}>
-									<span className="mono">@{m.no}</span>
-									{/* 작은 미리보기 — 제목이 없는 쪽(가져온 덱에 흔하다)도 모양으로 가려 고르게 */}
-									<span className="pthumb" style={{ height: (64 * deck.size.h) / deck.size.w }}><SlideFrame file={m.file} rev={rev[m.id] || 0} w={deck.size.w} h={deck.size.h} width={64} /></span>
-									<span className="title">{m.title || t("untitled")}</span>
-									{m.no === current + 1 && <span className="here">{t("here")}</span>}
-								</button>
-							))}
-							{/* 판도 멘션할 수 있다는 것을 쪽 고르기 창 끝에서 알린다 — 「@v」 를 모르면 쓸 길이 없다 */}
-							{!vpick && versions.length > 1 && <div className="none">{t("mentionVersionHint")}</div>}
-						</div>
-					)}
-					<textarea ref={ta} rows={2} value={text} placeholder={t("composerHint")} onPaste={onPaste}
-						onChange={(e) => { setText(e.target.value); sense(e.target.value, e.target.selectionStart); }}
-						onClick={(e) => sense(text, e.currentTarget.selectionStart)}
-						onBlur={() => setPick(null)}
-						onKeyDown={(e) => {
-							if (e.nativeEvent.isComposing) return;
-							// 고르기 창이 떠 있으면 위아래 · Enter · Tab · Esc 는 창이 쓴다
-							if (pick && count) {
-								if (e.key === "ArrowDown" || e.key === "ArrowUp") { e.preventDefault(); setPick({ ...pick, sel: (pick.sel + (e.key === "ArrowDown" ? 1 : count - 1)) % count }); return; }
-								if (e.key === "Enter" || e.key === "Tab") { e.preventDefault(); choose(pick.sel, e.currentTarget.selectionStart); return; }
-							}
-							if (pick && e.key === "Escape") { e.preventDefault(); e.stopPropagation(); setPick(null); return; }
-							// 고르기 창이 없을 때 Esc 는 요청칸을 접는다 — 쓰던 글은 그대로 남는다
-							if (e.key === "Escape") { e.preventDefault(); e.currentTarget.blur(); setOpen(false); return; }
-							if (e.key === "Enter" && (e.ctrlKey || !e.shiftKey)) { e.preventDefault(); go(); }
-						}}
-						onKeyUp={(e) => { if (["ArrowLeft", "ArrowRight", "Home", "End"].includes(e.key)) sense(text, e.currentTarget.selectionStart); }} />
-					<div className="bar">
-						<div className="attach">
-							{mentioned.map((m) => <button key={m.id} className="mention" onClick={() => setCurrent(m.no - 1)} title={m.title || ""}>@{m.no}{m.title ? ` ${m.title}` : ""}</button>)}
-							{vmentioned.map((m) => <button key={m.hash} className="mention" onClick={() => { const c = versions.find((x) => x.hash === m.hash); if (c) setPreview(c); }} title={`${m.date} · ${m.subject}`}>@v{m.n} {m.subject.slice(0, 24)}</button>)}
-							{attach.map((a) => <span key={a}>{a.split("/").pop()}<button onClick={() => setAttach(attach.filter((x) => x !== a))}>×</button></span>)}
-						</div>
-						{sendBtn}
+				<textarea ref={ta} rows={2} value={text} placeholder={t("composerHint")} onPaste={onPaste}
+					onChange={(e) => { setText(e.target.value); sense(e.target.value, e.target.selectionStart); }}
+					onClick={(e) => sense(text, e.currentTarget.selectionStart)}
+					onBlur={() => setPick(null)}
+					onKeyDown={(e) => {
+						if (e.nativeEvent.isComposing) return;
+						// 고르기 창이 떠 있으면 위아래 · Enter · Tab · Esc 는 창이 쓴다
+						if (pick && count) {
+							if (e.key === "ArrowDown" || e.key === "ArrowUp") { e.preventDefault(); setPick({ ...pick, sel: (pick.sel + (e.key === "ArrowDown" ? 1 : count - 1)) % count }); return; }
+							if (e.key === "Enter" || e.key === "Tab") { e.preventDefault(); choose(pick.sel, e.currentTarget.selectionStart); return; }
+						}
+						if (pick && e.key === "Escape") { e.preventDefault(); e.stopPropagation(); setPick(null); return; }
+						if (e.key === "Enter" && (e.ctrlKey || !e.shiftKey)) { e.preventDefault(); go(); }
+					}}
+					onKeyUp={(e) => { if (["ArrowLeft", "ArrowRight", "Home", "End"].includes(e.key)) sense(text, e.currentTarget.selectionStart); }} />
+				<div className="bar">
+					<div className="attach">
+						{mentioned.map((m) => <button key={m.id} className="mention" onClick={() => setCurrent(m.no - 1)} title={m.title || ""}>@{m.no}{m.title ? ` ${m.title}` : ""}</button>)}
+						{vmentioned.map((m) => <button key={m.hash} className="mention" onClick={() => { const c = versions.find((x) => x.hash === m.hash); if (c) setPreview(c); }} title={`${m.date} · ${m.subject}`}>@v{m.n} {m.subject.slice(0, 24)}</button>)}
+						{attach.map((a) => <span key={a}>{a.split("/").pop()}<button onClick={() => setAttach(attach.filter((x) => x !== a))}>×</button></span>)}
 					</div>
+					{sendBtn}
 				</div>
 			</div>
 		</div>
