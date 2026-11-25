@@ -251,6 +251,23 @@ export const sameDir = (a: string, b: string) => {
 const persistPins = (dir: string, pins: Pin[]) => api.writeText(dir, ".claudeppt/pins.json", JSON.stringify(pins, null, 1)).catch(() => {});
 const persistTalk = (dir: string, turns: Turn[], sessionId: string | null) =>
 	api.writeText(dir, ".claudeppt/talk.json", JSON.stringify({ sessionId, turns: turns.map((t) => (t.status === "running" ? { ...t, status: "stopped" } : t)) }, null, 1)).catch(() => {});
+/** 답 글자 조각을 잠깐(30ms) 모았다 한 번에 넣는다. 조각마다 turns 를 바꾸면 대화 · 쪽 목록이 조각 수만큼 다시 그려진다.
+ *  requestAnimationFrame 이 아니라 타이머 — 창을 내리거나 가려도 글자가 쌓이게 */
+const pendingText = new Map<string, string>();
+let textTimer: ReturnType<typeof setTimeout> | undefined;
+function flushText(get: () => S, set: (p: Partial<S>) => void) {
+	clearTimeout(textTimer);
+	textTimer = undefined;
+	if (!pendingText.size) return;
+	const add = new Map(pendingText);
+	pendingText.clear();
+	set({ turns: get().turns.map((t) => (add.has(t.id) ? { ...t, reply: t.reply + add.get(t.id) } : t)) });
+}
+function queueText(get: () => S, set: (p: Partial<S>) => void, turn: string, text: string) {
+	pendingText.set(turn, (pendingText.get(turn) ?? "") + text);
+	textTimer ??= setTimeout(() => flushText(get, set), 30);
+}
+
 const readJson = async <T,>(dir: string, rel: string, d: T): Promise<T> => {
 	try { return JSON.parse(await api.readText(dir, rel)); } catch { return d; }
 };
@@ -375,10 +392,13 @@ export const useDeck = create<S>()((set, get) => ({
 				try { m = JSON.parse(line); } catch { return; }
 				// 지금 이 프로젝트에서 돌고 있는 턴의 사건만 받는다 — 다른 턴의 세션 id 가 섞이면 다음 턴이 엉뚱한 대화를 잇는다
 				if (turn !== get().running) return;
+				const delta = m.type === "stream_event" && m.event?.type === "content_block_delta" && m.event.delta?.type === "text_delta";
+				// 글자가 아닌 사건(새 말 덩이 · 도구 · 끝) 앞에서는 모아 둔 글자를 먼저 넣는다 — 순서가 바뀌지 않게
+				if (!delta) flushText(get, set);
 				const patch = (fn: (t: Turn) => Turn) => set({ turns: get().turns.map((t) => (t.id === turn ? fn(t) : t)) });
 				if (m.type === "system" && m.subtype === "init" && m.session_id) set({ sessionId: m.session_id });
 				else if (m.type === "stream_event" && m.event?.type === "content_block_delta" && m.event.delta?.type === "text_delta") {
-					patch((t) => ({ ...t, reply: t.reply + m.event.delta.text }));
+					queueText(get, set, turn, m.event.delta.text);
 				} else if (m.type === "stream_event" && m.event?.type === "message_start") {
 					// 도구를 쓴 뒤 새 말 덩이 — 앞 덩이와 띄운다
 					patch((t) => ({ ...t, reply: t.reply && !t.reply.endsWith("\n\n") ? t.reply + "\n\n" : t.reply }));
@@ -553,6 +573,7 @@ export const useDeck = create<S>()((set, get) => ({
 				effort: s.claude.effort,
 				resume: get().sessionId,
 			});
+			flushText(get, set);
 			const t0 = get().turns.find((t) => t.id === turn.id)!;
 			let status: Turn["status"] = t0.status === "stopped" ? "stopped" : r.code === 0 && !t0.error ? "done" : "failed";
 			if (status === "failed" && !t0.error) patch((t) => ({ ...t, error: r.stderr.trim().split("\n").slice(-3).join("\n") || `exit ${r.code}` }));
