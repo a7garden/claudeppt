@@ -155,6 +155,11 @@ claudeppt.exe help           # 명령 목록
 마스터 → 레이아웃 → 쪽 순서로 그리고, 자리 표시자는 위치 · 글자 서식을 위에서 물려받는다. 테마 색(lumMod · tint · shade) · 그룹 좌표 · 표 · 그림 자르기 · 연결선 화살표 · 글머리 · 쪽 번호 필드를 옮긴다.
 차트 · SmartArt · EMF 그림 · 자유형 도형은 자리만 점선으로 남기고 알림에 적는다 — 원본 쪽 그림을 보고 Claude 에게 「원본과 같게」 다듬기를 맡긴다.
 
+## 기여 · 라이선스
+
+고장 알림 · 제안 · PR 을 받습니다. 보내기 전에 [CONTRIBUTING.md](CONTRIBUTING.md) 를 봐 주세요. 보안 문제는 [SECURITY.md](SECURITY.md) 의 비공개 보고로 알립니다.
+[MIT 라이선스](LICENSE)로 배포합니다.
+
 ## 개발
 
 ```
