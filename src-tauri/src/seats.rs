@@ -77,8 +77,104 @@ pub fn list(dir: &Path) -> Vec<Value> {
 	read(dir, "seats.json").and_then(|v| v["seats"].as_array().cloned()).unwrap_or_default()
 }
 
+/// 고쳐 쓰기 전에 읽는다 — 파일이 없으면 빈 목록, 있는데 못 읽으면 잠시 다시 읽고 그래도 안 되면 오류.
+/// 2026.11.25 : 못 읽은 것을 빈 목록으로 보면 join 이 「모든 권한」 1번을 만들어(이름을 바꿀 때는 빈 목록을) 저장해,
+///              사용자가 정한 담당이 사라졌다. 앱이 이 파일을 잠금 없이 반쯤 쓰는 동안 읽으면 그렇게 됐다
+fn load(dir: &Path) -> R<Vec<Value>> {
+	let p = state(dir).join("seats.json");
+	for _ in 0..10 {
+		match std::fs::read_to_string(&p) {
+			Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(vec![]),
+			Ok(t) => {
+				if let Ok(v) = serde_json::from_str::<Value>(&t) {
+					return Ok(v["seats"].as_array().cloned().unwrap_or_default());
+				}
+			}
+			Err(_) => {}
+		}
+		std::thread::sleep(std::time::Duration::from_millis(30));
+	}
+	Err("담당 파일(.claudeppt/seats.json)을 읽지 못했다 — 잠시 뒤 다시 한다".into())
+}
+
 fn save(dir: &Path, seats: &[Value]) -> R<()> {
 	write(dir, "seats.json", &json!({ "seats": seats }))
+}
+
+/// 앱의 「담당」 창이 고친 것을 파일에 합친다 — 화면이 본 담당(before)과 고친 담당(after)의 차이만 지금 파일에 얹는다.
+/// 화면의 사본은 몇 초 묵었을 수 있어서, 통째로 쓰면 그 사이 바깥 세션이 한 일(쪽 맡기 · 이름 · 새 1번)을 덮는다
+pub fn update(dir: &Path, before: &[Value], after: &[Value]) -> R<Vec<Value>> {
+	let _l = lock(dir);
+	let merged = merge(&load(dir)?, before, after);
+	save(dir, &merged)?;
+	Ok(merged)
+}
+
+fn merge(cur: &[Value], before: &[Value], after: &[Value]) -> Vec<Value> {
+	let by = |v: &[Value], n: u64| v.iter().find(|x| no(x) == n).cloned();
+	let mut out = Vec::new();
+	for c in cur {
+		match (by(before, no(c)), by(after, no(c))) {
+			// 화면에서 지운 담당
+			(Some(_), None) => {}
+			(Some(b), Some(a)) => out.push(patch(c, &b, &a)),
+			// 화면이 몰랐던 담당(그 사이 바깥 세션이 만든 것)
+			_ => out.push(c.clone()),
+		}
+	}
+	// 화면이 새로 더한 담당 — 그 번호를 그 사이 다른 쪽이 썼으면 다음 번호로
+	for a in after.iter().filter(|a| by(before, no(a)).is_none()) {
+		let mut a = a.clone();
+		if out.iter().any(|x| no(x) == no(&a)) {
+			let next = out.iter().map(no).max().unwrap_or(0) + 1;
+			a["no"] = json!(next);
+			a["color"] = json!(PALETTE[(next as usize - 1) % PALETTE.len()]);
+		}
+		out.push(a);
+	}
+	out.sort_by_key(no);
+	out
+}
+
+/// 화면이 바꾼 칸만 얹는다. 맡은 쪽 목록은 화면이 더하고 뺀 것만 — 그 사이 바깥 세션이 맡은 쪽(adopt)을 잃지 않게
+fn patch(cur: &Value, before: &Value, after: &Value) -> Value {
+	let mut out = cur.clone();
+	let Some(a) = after.as_object() else { return out };
+	for (k, av) in a {
+		let bv = &before[k];
+		if av == bv {
+			continue;
+		}
+		if let (Some(c), Some(b), Some(aa)) = (cur[k].as_array(), bv.as_array(), av.as_array()) {
+			let mut ids: Vec<Value> = c.iter().filter(|x| !b.contains(x) || aa.contains(x)).cloned().collect();
+			ids.extend(aa.iter().filter(|x| !b.contains(x) && !c.contains(x)).cloned());
+			out[k] = json!(ids);
+		} else {
+			out[k] = av.clone();
+		}
+	}
+	out
+}
+
+/// 앱의 「비우기」 — 맡은 세션을 내보낸다
+pub fn vacate(dir: &Path, seat: u64) -> R<()> {
+	let _l = lock(dir);
+	let mut p = presence(dir);
+	if p.remove(&seat.to_string()).is_some() {
+		save_presence(dir, &p)?;
+	}
+	Ok(())
+}
+
+// 앱 명령 — 잠금을 기다리며 잠들 수 있어 메인 스레드 밖에서 돈다
+#[tauri::command(async)]
+pub fn seats_update(dir: String, before: Vec<Value>, after: Vec<Value>) -> R<Vec<Value>> {
+	update(Path::new(&dir), &before, &after)
+}
+
+#[tauri::command(async)]
+pub fn seats_vacate(dir: String, seat: u64) -> R<()> {
+	vacate(Path::new(&dir), seat)
 }
 
 /// 담당 번호(문자열) → { session, since, seen, doing? }
@@ -229,7 +325,7 @@ pub fn seats_cmd(dir: &Path, deck: &Value, sid: Option<&str>) -> Value {
 /// 담당을 맡는다. key 가 없으면 이미 맡은 담당 → 빈 담당 차례. 담당이 하나도 없으면 「모든 권한」 1번을 만든다 (혼자 쓰던 길이 그대로 되게)
 pub fn join(dir: &Path, deck: &Value, sid: &str, key: Option<&str>, name: Option<&str>, take: bool) -> R<Value> {
 	let _l = lock(dir);
-	let mut all = list(dir);
+	let mut all = load(dir)?;
 	let mut p = presence(dir);
 	let held = |p: &serde_json::Map<String, Value>, n: u64| p.get(&n.to_string()).filter(|v| fresh(v) && v["session"].as_str() != Some(sid)).cloned();
 	let seat = if all.is_empty() {
@@ -258,7 +354,7 @@ pub fn join(dir: &Path, deck: &Value, sid: &str, key: Option<&str>, name: Option
 	let seat = match name.map(str::trim).filter(|x| !x.is_empty()) {
 		Some(nm) if seat["name"].as_str() != Some(nm) => {
 			let n = no(&seat);
-			let mut all = list(dir);
+			let mut all = load(dir)?;
 			for s in all.iter_mut().filter(|x| no(x) == n) {
 				s["name"] = json!(nm);
 			}
@@ -325,12 +421,100 @@ pub fn seen(dir: &Path, seat: &Value) {
 /// 쪽을 더한 담당은 그 쪽도 맡는다 — 안 그러면 막 더한 쪽을 판에 넣지 못한다
 pub fn adopt(dir: &Path, seat: &Value, id: &str) {
 	let _l = lock(dir);
-	let mut all = list(dir);
+	let Ok(mut all) = load(dir) else { return };
 	let n = no(seat);
 	if let Some(s) = all.iter_mut().find(|x| no(x) == n) {
 		if let Some(ids) = s["slides"].as_array_mut() {
 			ids.push(json!(id));
 			let _ = save(dir, &all);
 		}
+	}
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+
+	fn tmp(name: &str) -> std::path::PathBuf {
+		let d = std::env::temp_dir().join(format!("cppt-seats-{name}-{}", std::process::id()));
+		let _ = std::fs::remove_dir_all(&d);
+		std::fs::create_dir_all(d.join(".claudeppt")).unwrap();
+		d
+	}
+	fn seat(n: u64, name: &str, slides: Value) -> Value {
+		json!({ "no": n, "name": name, "color": PALETTE[0], "slides": slides, "theme": false, "order": false, "manage": false })
+	}
+
+	// 반쯤 쓰인 담당 파일을 읽으면 join 이 「모든 권한」 1번으로 덮어써 정한 담당이 사라졌다 — 이제는 거절하고 파일을 그대로 둔다
+	#[test]
+	fn join_does_not_overwrite_unreadable_seats() {
+		let d = tmp("join");
+		let half = "{\n  \"seats\": [\n    { \"no\": 1, \"name\": \"도입\"";
+		std::fs::write(d.join(".claudeppt/seats.json"), half).unwrap();
+		assert!(join(&d, &json!({ "slides": [] }), "s1", None, None, false).is_err());
+		assert_eq!(std::fs::read_to_string(d.join(".claudeppt/seats.json")).unwrap(), half);
+		let _ = std::fs::remove_dir_all(&d);
+	}
+
+	// 담당 파일이 없으면 혼자 쓰던 길 그대로 — 모든 권한 1번을 만든다
+	#[test]
+	fn join_without_seats_creates_first() {
+		let d = tmp("first");
+		let v = join(&d, &json!({ "slides": [] }), "s1", None, None, false).unwrap();
+		assert_eq!(v["no"], 1);
+		assert_eq!(list(&d).len(), 1);
+		let _ = std::fs::remove_dir_all(&d);
+	}
+
+	// 화면이 이름을 바꾸는 사이 바깥 세션이 쪽을 맡았다(adopt) — 둘 다 남는다
+	#[test]
+	fn update_keeps_adopted_slide_and_new_name() {
+		let before = vec![seat(1, "", json!(["a"]))];
+		let cur = vec![seat(1, "", json!(["a", "b"]))];
+		let after = vec![seat(1, "도입", json!(["a"]))];
+		let m = merge(&cur, &before, &after);
+		assert_eq!(m[0]["name"], "도입");
+		assert_eq!(m[0]["slides"], json!(["a", "b"]));
+	}
+
+	// 화면에서 쪽을 빼고 더한 것만 얹는다
+	#[test]
+	fn update_applies_slide_add_and_remove() {
+		let before = vec![seat(1, "", json!(["a", "b"]))];
+		let cur = vec![seat(1, "", json!(["a", "b", "c"]))];
+		let after = vec![seat(1, "", json!(["b", "d"]))];
+		assert_eq!(merge(&cur, &before, &after)[0]["slides"], json!(["b", "c", "d"]));
+	}
+
+	// 화면이 지운 담당은 빠지고, 화면이 몰랐던 담당은 남고, 번호가 겹친 새 담당은 다음 번호로
+	#[test]
+	fn update_delete_keep_and_renumber() {
+		let before = vec![seat(1, "", json!("all")), seat(2, "가", json!([]))];
+		let cur = vec![seat(1, "", json!("all")), seat(2, "가", json!([])), seat(3, "바깥", json!([]))];
+		let after = vec![seat(1, "", json!("all")), seat(3, "새", json!([]))];
+		let m = merge(&cur, &before, &after);
+		let names: Vec<_> = m.iter().map(|x| (no(x), x["name"].as_str().unwrap().to_string())).collect();
+		assert_eq!(names, vec![(1, "".into()), (3, "바깥".into()), (4, "새".into())]);
+		assert_eq!(m[2]["color"], PALETTE[3]);
+	}
+
+	// 「모든 쪽」(문자열)과 목록 사이를 바꾸면 화면 값 그대로
+	#[test]
+	fn update_switches_all_and_list() {
+		let before = vec![seat(1, "", json!(["a"]))];
+		let after = vec![seat(1, "", json!("all"))];
+		assert_eq!(merge(&before, &before, &after)[0]["slides"], "all");
+	}
+
+	#[test]
+	fn update_writes_file_atomically_and_vacate_removes_presence() {
+		let d = tmp("update");
+		save(&d, &[seat(1, "", json!(["a"]))]).unwrap();
+		let m = update(&d, &[seat(1, "", json!(["a"]))], &[seat(1, "도입", json!(["a"]))]).unwrap();
+		assert_eq!(list(&d), m);
+		save_presence(&d, json!({ "1": { "session": "s1", "since": 0, "seen": 0 } }).as_object().unwrap()).unwrap();
+		vacate(&d, 1).unwrap();
+		assert!(presence(&d).is_empty());
+		let _ = std::fs::remove_dir_all(&d);
 	}
 }

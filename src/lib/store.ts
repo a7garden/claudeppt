@@ -31,7 +31,7 @@ import { markedPictures, type Shape, type Tool } from "./markup";
 import { type Mention, type VersionMention, mentionsIn, versionMentionsIn } from "./mention";
 import { type PinNote, systemPrompt, turnPrompt } from "./prompt";
 import { useSettings } from "./settings";
-import { type Activity, busy, owns, type Presence, readSeats, type Seat, writePresence, writeSeats } from "./seats";
+import { type Activity, busy, owns, type Presence, readSeats, type Seat } from "./seats";
 import { type VersionDiff, diffVersion, restoreSlide as restoreSlideFile, versionContext } from "./versions";
 
 /** 핀 하나 — shape 가 있으면 그어 놓은 표시(펜 · 화살표 · 상자)이고 x, y 는 그 번호 표식 자리다 (markup.ts) */
@@ -166,6 +166,8 @@ const clearUndo = () => { undoStack = []; redoStack = []; syncHist(); };
 // 손 편집 · 되돌리기는 한 줄로 차례대로 돈다 — 방향키 이동을 쓰는 중에 Ctrl+Z 가 같은 파일을 읽고 쓰면 하나가 다른 것을 덮는다
 let queue: Promise<unknown> = Promise.resolve();
 const serial = (f: () => Promise<void>) => { const r = queue.then(f, f); queue = r.catch(() => {}); return r; };
+// 담당 저장도 한 줄로 — 이름을 치는 동안 연달아 불려도 앞의 저장이 뒤의 것을 덮지 않게
+let seatWrites: Promise<unknown> = Promise.resolve();
 
 let compareTimer: ReturnType<typeof setTimeout> | undefined;
 /** 비교 중에 파일이 바뀌면(Claude 턴 · 손 편집 · 되돌리기) 잠잠해진 뒤 다시 견준다 */
@@ -608,17 +610,29 @@ export const useDeck = create<S>()((set, get) => ({
 		const same = JSON.stringify([r.seats, r.presence]) === JSON.stringify([st.seats, st.presence]) && r.activity.length === st.activity.length && r.activity.at(-1)?.at === st.activity.at(-1)?.at;
 		if (!same) set(r);
 	},
-	saveSeats: async (seats) => {
+	saveSeats: (seats) => {
 		const { dir } = get();
+		// 화면이 본 담당 — Rust 가 이것과 고친 것의 차이만 지금 파일에 얹는다 (그 사이 바깥 세션이 한 일을 덮지 않게)
+		const before = get().seats;
 		set({ seats });
-		await writeSeats(dir, seats).catch((e) => get().notify(String(e), "err"));
+		const r = seatWrites.then(async () => {
+			try {
+				const merged = await api.seatsUpdate(dir, before, seats);
+				// 그 사이 화면에서 또 고쳤으면 그 저장이 뒤따르므로 지금 것은 화면에 덮지 않는다
+				if (get().dir === dir && get().seats === seats) set({ seats: merged });
+			} catch (e) {
+				get().notify(String(e), "err");
+			}
+		});
+		seatWrites = r;
+		return r;
 	},
 	vacate: async (no) => {
 		const { dir } = get();
 		const presence = { ...get().presence };
 		delete presence[no];
 		set({ presence });
-		await writePresence(dir, presence).catch((e) => get().notify(String(e), "err"));
+		await api.seatsVacate(dir, no).catch((e) => get().notify(String(e), "err"));
 	},
 	clearStrays: () => set({ strays: [] }),
 
