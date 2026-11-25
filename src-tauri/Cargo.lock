@@ -543,7 +543,7 @@ dependencies = [
 
 [[package]]
 name = "claudeppt"
-version = "0.5.1"
+version = "0.6.0"
 dependencies = [
  "arboard",
  "base64 0.22.1",
