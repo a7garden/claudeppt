@@ -273,6 +273,27 @@ const nextSession = (list: Session[]): Session => ({ key: "s" + (Math.max(0, ...
 export const team = () => useSettings.getState().s.collab.on;
 /** 이 기기를 쓰는 팀원 — 협업을 켰을 때만. 판의 작성자로도 남긴다 (꺼져 있으면 빈 글 → 판 작성자는 전처럼 ClaudePPT) */
 export const me = () => (team() ? useSettings.getState().s.me.trim() : "");
+/** 새 Claude 세션 id (--session-id) */
+const uuid = (): string =>
+	crypto.randomUUID?.() ??
+	[...crypto.getRandomValues(new Uint8Array(16))]
+		.map((b, i) => (i === 6 ? (b & 15) | 64 : i === 8 ? (b & 63) | 128 : b).toString(16).padStart(2, "0"))
+		.join("")
+		.replace(/^(.{8})(.{4})(.{4})(.{4})/, "$1-$2-$3-$4-");
+/** 세션 기록을 잃었을 때 새 세션 앞에 붙일 요약 — 이 세션의 최근 요청 · 답 · 고친 파일과 시킨 사람 (오래된 것부터) */
+export function recapOf(turns: Turn[], key: string, skip: string): string {
+	const mine = turns.filter((t) => t.session === key && t.id !== skip && t.status !== "running").slice(-8);
+	if (!mine.length) return "";
+	const cut = (s: string, n: number) => {
+		const one = s.replace(/\s+/g, " ").trim();
+		return one.length > n ? one.slice(0, n) + "…" : one;
+	};
+	const lines = mine.map((t) => {
+		const files = [...new Set(t.tools.map((x) => x.file).filter(Boolean))];
+		return `- ${t.by ? `${t.by}: ` : ""}${cut(t.request || t.pins.map((p) => p.text).join(" · "), 300)}\n  → ${cut(t.reply || t.error || "", 400)}` + (files.length ? `\n  files: ${files.join(", ")}` : "");
+	});
+	return `The earlier Claude session for these slides could not be restored. Recent requests in this session, oldest first:\n${lines.join("\n")}\n\n`;
+}
 
 /**
  * 이 요청이 갈 세션 — 보내기와 요청칸의 「보낼 곳」 미리보기가 같은 규칙을 쓴다.
@@ -595,18 +616,25 @@ export const useDeck = create<S>()((set, get) => ({
 				const c = get().versions.find((x) => x.hash === v.hash);
 				vlines.push(c ? await versionContext(dir, get().id, deck, c).catch((e) => `- @v${v.n}: could not be read (${e})`) : `- @v${v.n}: not found`);
 			}
-			const r = await api.claudeRun({
-				turn: turn.id,
-				dir,
-				// 협업을 켜면 한 세션을 여러 팀원이 이어 쓰므로 누가 시킨 것인지 알린다 — 「아까 말한 것」이 누구 말인지 가린다
-				prompt: (by ? `Request from teammate: ${by}\n\n` : "") + turnPrompt(text, notes, cur ? { id: cur.id, no: current + 1 } : null, attachments, mentions, vlines, deck),
-				system: systemPrompt(s, deck),
-				claudePath: s.claude.path,
-				model: s.claude.model,
-				effort: s.claude.effort,
-				resume: session.claude,
-			});
+			// 협업을 켜면 한 세션을 여러 팀원이 이어 쓰므로 누가 시킨 것인지 알린다 — 「아까 말한 것」이 누구 말인지 가린다
+			const prompt = (by ? `Request from teammate: ${by}\n\n` : "") + turnPrompt(text, notes, cur ? { id: cur.id, no: current + 1 } : null, attachments, mentions, vlines, deck);
+			// 새 세션은 앱이 id 를 정한다 — 턴이 멈춰도 그 세션의 기록을 찾아 덱에 남긴다 (claude.rs)
+			const run = (p: string, resume: string | null) =>
+				api.claudeRun({ turn: turn.id, dir, prompt: p, system: systemPrompt(s, deck), claudePath: s.claude.path, model: s.claude.model, effort: s.claude.effort, resume, sessionId: resume ? null : uuid() });
+			let r = await run(prompt, session.claude);
 			flushText(get, set);
+			// 세션 기록을 claude 쪽에서도 덱에서도 찾지 못했다 (기록 없이 옮겨 온 덱 · 지운 기록). 그대로 두면 이 세션을 이을 때마다 실패하고
+			// 장표의 맥락이 끊긴다 — 이 세션의 지난 요청 · 답을 요약해 앞에 붙여 새 Claude 세션으로 한 번 더 돌린다.
+			// 「requires a valid session ID」는 id 가 UUID 꼴이 아닐 때(손으로 고친 talk.json 등) claude 가 내는 말이다
+			if (session.claude && r.code !== 0 && /No conversation found|requires a valid session ID/i.test(r.stderr) && get().turns.find((t) => t.id === turn.id)?.status !== "stopped") {
+				set({ sessions: get().sessions.map((x) => (x.key === key ? { ...x, claude: null } : x)) });
+				patch((t) => ({ ...t, error: undefined, reply: "", tools: [], cost: undefined, phase: tNow("sessionRecovering") }));
+				r = await run(recapOf(get().turns, key, turn.id) + prompt, null);
+				flushText(get, set);
+				patch((t) => ({ ...t, phase: undefined }));
+				// 협업이 꺼져 있으면 세션 번호가 화면에 없다 — 번호 없이 알린다
+				get().notify(team() ? tNow("sessionRecovered").replace("{n}", key.slice(1)) : tNow("sessionRecoveredOne"), "ok");
+			}
 			const t0 = get().turns.find((t) => t.id === turn.id)!;
 			let status: Turn["status"] = t0.status === "stopped" ? "stopped" : r.code === 0 && !t0.error ? "done" : "failed";
 			if (status === "failed" && !t0.error) patch((t) => ({ ...t, error: r.stderr.trim().split("\n").slice(-3).join("\n") || `exit ${r.code}` }));
