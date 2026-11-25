@@ -48,8 +48,8 @@ export async function readSeats(dir: string) {
 	return { seats, presence, activity };
 }
 
-export const writeSeats = (dir: string, seats: Seat[]) => api.writeText(dir, ".claudeppt/seats.json", JSON.stringify({ seats }, null, 2) + "\n");
-export const writePresence = (dir: string, p: Record<string, Presence>) => api.writeText(dir, ".claudeppt/presence.json", JSON.stringify(p, null, 2) + "\n");
+// 쓰기는 seats.rs 의 앱 명령(api.seatsUpdate · seatsVacate)으로만 — 바깥 세션 CLI 와 같은 잠금 · 바꿔 달기를 거친다.
+// 2026.11.25 : 여기서 파일을 통째로 쓰던 때는 쓰는 도중 join 이 반쪽 파일을 읽고 담당을 「모든 권한」 1번으로 덮어썼다
 
 /** 맡은 세션이 있는지 — 오래 조용했으면 비어 있다 */
 export const taken = (p?: Presence) => !!p && Date.now() - p.seen < STALE_MS;
