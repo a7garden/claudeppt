@@ -1,5 +1,6 @@
 // 백엔드(src-tauri) 명령을 부르는 얇은 층. 이름은 Rust 명령과 같다.
 import { invoke } from "@tauri-apps/api/core";
+import type { Seat } from "./seats";
 
 /** author — 남긴 이(앱은 ClaudePPT) · seat — 담당이 남긴 판이면 그 번호 (seats.ts) */
 export interface Commit { n: number; hash: string; short: string; date: string; subject: string; tags: string[]; author: string; seat: number | null }
@@ -51,6 +52,9 @@ export const api = {
 	log: (dir: string, limit?: number) => invoke<Commit[]>("vcs_log", { dir, limit }),
 	tag: (dir: string, name: string) => invoke<void>("vcs_tag", { dir, name }),
 	restore: (dir: string, hash: string, message: string) => wrote(invoke<Commit | null>("vcs_restore", { dir, hash, message })),
+	/** 「담당」 창이 고친 것을 파일에 합친다 — 바깥 세션과 같은 잠금 안에서, 화면이 바꾼 칸만 (seats.rs update) */
+	seatsUpdate: (dir: string, before: Seat[], after: Seat[]) => invoke<Seat[]>("seats_update", { dir, before, after }),
+	seatsVacate: (dir: string, seat: number) => invoke<void>("seats_vacate", { dir, seat }),
 
 	claudeDetect: (path: string) => invoke<{ path: string; version: string } | null>("claude_detect", { path }),
 	claudeRun: (spec: { turn: string; dir: string; prompt: string; system: string; claudePath: string; model: string; effort: string; resume?: string | null; mode?: "fonts" }) => invoke<{ code: number; stderr: string }>("claude_run", { spec }),
