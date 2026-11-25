@@ -804,7 +804,7 @@ export interface ImportResult { deck: Deck; warnings: string[] }
 export async function importPptx(bytes: Uint8Array, src: string, dir: string, title: string, s: Settings, progress: (i: number, n: number) => void): Promise<ImportResult> {
 	const zip = await JSZip.loadAsync(bytes);
 	const pres = await xml(zip, "ppt/presentation.xml");
-	if (!pres) throw new Error("presentation.xml 이 없다 — PPTX 가 아니다");
+	if (!pres) throw new Error("PPTX 파일이 아닙니다 (presentation.xml 이 없습니다)");
 	const sz = pres.getElementsByTagName("p:sldSz")[0];
 	const cx = num(sz?.getAttribute("cx"), 12192000), cy = num(sz?.getAttribute("cy"), 6858000);
 	const W = 1280;

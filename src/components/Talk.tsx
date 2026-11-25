@@ -6,11 +6,16 @@
 //              무대를 넓게 쓰면서도 Claude 가 일하는 중인지, 보낼 것이 쌓였는지는 잃지 않는다. 접어도 쓰던 글은 그대로다(숨길 뿐 내리지 않는다).
 // 2026.11.25 : 왼쪽 56px 실 여백 열과 요청칸 앞 다음 판(점선 v<n+1>)을 걷었다. 그 열 하나 때문에 머리 · 대화 · 요청칸이 모두 왼쪽이 비어
 //              좁은 사이드바 폭을 깎았다. 판 번호는 턴 끝줄의 알약으로 옮겼다.
+// 2026.11.25 : 요청칸 아랫줄을 「범위 줄」(ScopeLine)로 바꿨다. 보내기 바로 옆에 이 요청이 닿는 곳(덱 전체 · @쪽 · @판)을 보인다.
+//              전에는 범위가 어디에도 안 보였고, @쪽을 쓰면 아랫줄에 같은 칩이 한 번 더 나올 뿐이었다. 「@ 로 쪽 지정」은 안내 글에만 있어
+//              글을 쓰기 시작하면 사라졌다. 빈 대화의 큰 제목 · 단추 셋도 걷고 범위 줄이 하지 않는 일 둘만 요청칸 바로 위에 남겼다.
 import { Fragment, useEffect, useMemo, useRef, useState } from "react";
 import { create } from "zustand";
-import { api, b64FromBytes } from "../lib/api";
+import { open as pickFiles } from "@tauri-apps/plugin-dialog";
+import { api, deckUrl, join } from "../lib/api";
+import { ATTACH_EXT, attachName, isImage, useAttach } from "../lib/attach";
 import { useT } from "../lib/i18n";
-import { isVersionQuery, mentionCandidates, mentionTokens, mentionsIn, typingMention, versionCandidates, versionMentionsIn, versionTokens } from "../lib/mention";
+import { isVersionQuery, mentionCandidates, mentionTokens, typingMention, versionCandidates, versionTokens } from "../lib/mention";
 import { copyText, openMenu } from "./ContextMenu";
 import { SLIDE_MIME, SlideFrame } from "./Workspace";
 import { type Turn, useDeck } from "../lib/store";
@@ -145,18 +150,15 @@ function Spine() {
 }
 
 /** 대화가 없을 때 — 빈 자리에 「대화」 글자만 두지 않고, 여기서 바로 시작할 길 셋을 둔다 */
+/** 빈 대화. 요청칸 바로 위에 범위 줄이 하지 않는 시작 길 둘과 끌어 놓기 안내. 「이 쪽에 쓰기」는 범위 줄의 「n쪽만」이 한다 */
 function EmptyTalk() {
 	const t = useT();
-	const current = useDeck((s) => s.current);
-	const mentionSlide = useDeck((s) => s.mentionSlide);
 	const refill = useDeck((s) => s.refill);
 	const setTool = useDeck((s) => s.setTool);
 	return (
 		<div className="log-empty">
-			<b>{t("emptyTalk")}</b>
-			<button onClick={() => mentionSlide(current + 1)}><span>{t("startThis")}</span><kbd>@{current + 1}</kbd></button>
 			<button onClick={() => setTool("pen")}><span>{t("startMark")}</span><kbd>1</kbd></button>
-			<button onClick={() => refill(t("startPolishText"))}><span>{t("startPolish")}</span><kbd>↵</kbd></button>
+			<button onClick={() => refill(t("startPolishText"))}><span>{t("startPolish")}</span></button>
 			<p>{t("startDrop")}</p>
 		</div>
 	);
@@ -194,12 +196,13 @@ function TurnView({ turn, head: isHead, onVersion }: { turn: Turn; head: boolean
 	return (
 		<article className={"turn " + turn.status} onContextMenu={menu}>
 			{/* 요청 — 내가 쓴 것은 옅은 칸에 담아 답과 가른다. 핀은 그 칸 안에 */}
-			{(turn.request || turn.pins.length > 0) && (
+			{(turn.request || turn.pins.length > 0 || !!turn.attach?.length) && (
 				<div className="req">
 					{turn.request && <div className="req-text"><Mentioned text={turn.request} turn={turn} /></div>}
+					{!!turn.attach?.length && <div className="attach-row">{turn.attach.map((a) => <AttachTile key={a} rel={a} />)}</div>}
 					{turn.pins.length > 0 && (
 						<div className="req-pins">
-							{turn.pins.map((p) => <div key={p.n}><i>{p.n}</i><span><span style={{ fontSize: 11.5, color: "var(--faint)" }}>{p.slideNo}{t("slideN") === "쪽" ? "쪽" : ""} · </span>{p.text || "—"}</span></div>)}
+							{turn.pins.map((p) => <div key={p.n}><i>{p.n}</i><span><span style={{ fontSize: 11.5, color: "var(--faint)" }}>{p.slideNo}{t("slideN") === "쪽" ? "쪽" : ""} · </span>{p.text}</span></div>)}
 						</div>
 					)}
 				</div>
@@ -265,7 +268,6 @@ function Composer() {
 	const update = useDeck((s) => s.updatePin);
 	const remove = useDeck((s) => s.removePin);
 	const setCurrent = useDeck((s) => s.setCurrent);
-	const dir = useDeck((s) => s.dir);
 	const current = useDeck((s) => s.current);
 	const insertReq = useDeck((s) => s.insertReq);
 	const rev = useDeck((s) => s.rev);
@@ -273,19 +275,16 @@ function Composer() {
 	// 쪽 목록 · 이어 보기에서 쪽을 끌어 요청칸 위에 올린 동안 — 놓으면 @쪽 이 들어간다
 	const [dropping, setDropping] = useState(false);
 	const mentionSlide = useDeck((s) => s.mentionSlide);
-	const [attach, setAttach] = useState<string[]>([]);
+	const attach = useAttach((s) => s.files);
 	const ta = useRef<HTMLTextAreaElement>(null);
 	// @ 고르기 창 — start 는 @ 자리, sel 은 고른 줄
 	const [pick, setPick] = useState<{ start: number; q: string; sel: number } | null>(null);
 	const versions = useDeck((s) => s.versions);
-	const setPreview = useDeck((s) => s.setPreview);
 	// 「@v…」 를 적는 중이면 판 고르기, 아니면 쪽 고르기
 	const vpick = !!pick && isVersionQuery(pick.q);
 	const cands = useMemo(() => (pick && !vpick ? mentionCandidates(deck, pick.q, current) : []), [pick, vpick, deck, current]);
 	const vcands = useMemo(() => (pick && vpick ? versionCandidates(versions, pick.q) : []), [pick, vpick, versions]);
 	const count = vpick ? vcands.length : cands.length;
-	const mentioned = useMemo(() => mentionsIn(text, deck), [text, deck]);
-	const vmentioned = useMemo(() => versionMentionsIn(text, versions), [text, versions]);
 	const sense = (value: string, caret: number) => {
 		const m = typingMention(value, caret);
 		setPick(m ? { ...m, sel: 0 } : null);
@@ -341,24 +340,20 @@ function Composer() {
 		return () => removeEventListener("keydown", k);
 	}, []);
 
-	const can = !running && (text.trim() || pins.length);
+	const can = !running && (text.trim() || pins.length || attach.length);
 	const go = () => {
 		if (!can) return;
 		send(text, attach);
 		setText("");
 		setPick(null);
-		setAttach([]);
+		useAttach.getState().clear();
 	};
-	// 붙여 넣은 그림은 .claudeppt/attach 에 두고 경로를 요청에 붙인다 (Claude 의 Read 가 그림을 본다)
-	const onPaste = async (e: React.ClipboardEvent) => {
-		const files = [...e.clipboardData.files].filter((f) => f.type.startsWith("image/"));
+	// 붙여 넣은 파일(그림 · PDF · 글)은 .claudeppt/attach 에 두고 경로를 요청에 붙인다 (attach.ts). 글자만 붙이면 그대로 글이다
+	const onPaste = (e: React.ClipboardEvent) => {
+		const files = [...e.clipboardData.files];
 		if (!files.length) return;
 		e.preventDefault();
-		for (const f of files) {
-			const rel = `.claudeppt/attach/${Date.now().toString(36)}.${f.type.split("/")[1] || "png"}`;
-			await api.writeB64(dir, rel, b64FromBytes(new Uint8Array(await f.arrayBuffer())));
-			setAttach((a) => [...a, rel]);
-		}
+		useAttach.getState().addBlobs(files);
 	};
 	const slideNo = (id: string) => deck.slides.findIndex((s) => s.id === id) + 1;
 
@@ -394,6 +389,8 @@ function Composer() {
 					e.preventDefault();
 					mentionSlide(no);
 				}}>
+				{/* 첨부는 범위 줄(어디에 닿는가)과 따로, 글 위 한 줄에. 「무엇을 함께 보내는가」 */}
+				{attach.length > 0 && <div className="attach-row">{attach.map((a) => <AttachTile key={a} rel={a} onRemove={() => useAttach.getState().remove(a)} />)}</div>}
 				{pick && (
 					<div className="picker" role="listbox" aria-label={t("slides")}>
 						{count === 0 && <div className="none">{vpick ? t("mentionVersionNone") : t("mentionNone")}</div>}
@@ -437,14 +434,100 @@ function Composer() {
 					}}
 					onKeyUp={(e) => { if (["ArrowLeft", "ArrowRight", "Home", "End"].includes(e.key)) sense(text, e.currentTarget.selectionStart); }} />
 				<div className="bar">
-					<div className="attach">
-						{mentioned.map((m) => <button key={m.id} className="mention" onClick={() => setCurrent(m.no - 1)} title={m.title || ""}>@{m.no}{m.title ? ` ${m.title}` : ""}</button>)}
-						{vmentioned.map((m) => <button key={m.hash} className="mention" onClick={() => { const c = versions.find((x) => x.hash === m.hash); if (c) setPreview(c); }} title={`${m.date} · ${m.subject}`}>@v{m.n} {m.subject.slice(0, 24)}</button>)}
-						{attach.map((a) => <span key={a}>{a.split("/").pop()}<button onClick={() => setAttach(attach.filter((x) => x !== a))}>×</button></span>)}
-					</div>
+					<ScopeLine text={text} setText={setText} ta={ta} />
 					{sendBtn}
 				</div>
 			</div>
 		</div>
+	);
+}
+
+/**
+ * 범위 줄. 이 요청이 닿는 곳을 보내기 바로 옆에 보인다.
+ *   @쪽 · @판을 썼으면 그 덩이마다 칩 (누르면 그 쪽 · 판으로, × 는 글에서도 뺀다)
+ *   안 썼으면 「덱 전체」와 지금 쪽 하나로 좁히는 「n쪽만」. 그 뒤 「@」는 쪽 고르기 창을 연다
+ * 범위를 정하는 것은 글 안의 @ 하나다. 칩은 그 글을 비추고 고칠 뿐, 따로 상태를 쥐지 않는다
+ */
+function ScopeLine({ text, setText, ta }: { text: string; setText: (v: string) => void; ta: React.RefObject<HTMLTextAreaElement | null> }) {
+	const t = useT();
+	const deck = useDeck((s) => s.deck)!;
+	const current = useDeck((s) => s.current);
+	const versions = useDeck((s) => s.versions);
+	const setCurrent = useDeck((s) => s.setCurrent);
+	const setPreview = useDeck((s) => s.setPreview);
+	const mentionSlide = useDeck((s) => s.mentionSlide);
+	/** 클립. 파일을 골라 붙인다. 읽을 수 있는 종류만 보이게 거른다 */
+	const choose = async () => {
+		const p = await pickFiles({ multiple: true, filters: [{ name: t("attachKinds"), extensions: ATTACH_EXT }] });
+		const list = Array.isArray(p) ? p : p ? [p] : [];
+		if (list.length) await useAttach.getState().addPaths(list);
+		ta.current?.focus();
+	};
+	const toks = useMemo(() => [
+		...mentionTokens(text).filter((x) => x.from >= 1 && x.from <= deck.slides.length).map((x) => ({ ...x, v: 0 })),
+		...versionTokens(text).filter((x) => versions.some((c) => c.n === x.n)).map((x) => ({ start: x.start, end: x.end, from: 0, to: 0, v: x.n })),
+	].sort((a, b) => a.start - b.start), [text, deck, versions]);
+	const slideTitle = (no: number) => deck.slides[no - 1]?.title || "";
+	/** 칩의 ×. 글에서 그 덩이와 뒤 빈칸 하나를 뺀다 */
+	const drop = (start: number, end: number) => {
+		setText((text.slice(0, start) + text.slice(end).replace(/^ /, "")).replace(/^ /, ""));
+		requestAnimationFrame(() => ta.current?.focus());
+	};
+	/** 「@」. 커서 자리에 @ 를 넣고 고르기 창을 연다 (요청칸의 onChange 가 창을 띄운다) */
+	const pickSlide = () => {
+		const el = ta.current;
+		if (!el) return;
+		el.focus();
+		const at = el.selectionStart ?? text.length;
+		const pad = at > 0 && !/\s/.test(text[at - 1]) ? " " : "";
+		// 리액트가 쥔 값을 바꾸고 input 사건을 일으켜 고르기 창 감지(sense)가 돌게 한다
+		const next = text.slice(0, at) + pad + "@" + text.slice(at);
+		const set = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, "value")!.set!;
+		set.call(el, next);
+		el.setSelectionRange(at + pad.length + 1, at + pad.length + 1);
+		el.dispatchEvent(new Event("input", { bubbles: true }));
+	};
+	return (
+		<div className="scope" aria-label={t("scope")}>
+			{toks.length === 0 ? (
+				<>
+					<span className="scope-all">{t("scopeAll")}</span>
+					<button className="scope-btn" onClick={() => mentionSlide(current + 1)} title={slideTitle(current + 1)}>{t("scopeOnly").replace("{n}", String(current + 1))}</button>
+				</>
+			) : (
+				toks.map((x) => {
+					const label = x.v ? `@v${x.v}` : x.from === x.to ? `@${x.from}` : `@${x.from}-${x.to}`;
+					const tip = x.v ? versions.find((c) => c.n === x.v)?.subject : x.from === x.to ? slideTitle(x.from) : "";
+					return (
+						<span className="scope-chip" key={x.start}>
+							<button onClick={() => { if (x.v) { const c = versions.find((k) => k.n === x.v); if (c) setPreview(c); } else setCurrent(x.from - 1); }} title={tip || undefined}>{label}</button>
+							<button className="x" onClick={() => drop(x.start, x.end)} aria-label={`${label} ${t("delete")}`}>×</button>
+						</span>
+					);
+				})
+			)}
+			<button className="scope-btn at" onClick={pickSlide} title={t("scopePick")} aria-label={t("scopePick")}>@</button>
+			<button className="scope-btn clip" onClick={choose} title={t("attachAdd")} aria-label={t("attachAdd")}>
+				<svg width="14" height="14" viewBox="0 0 16 16" aria-hidden><path d="M10.5 4.5 5.4 9.6a1.6 1.6 0 0 0 2.3 2.3l5.4-5.4a3 3 0 0 0-4.3-4.3L3.3 7.7a4.4 4.4 0 0 0 6.2 6.2l4-4" fill="none" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" strokeLinejoin="round" /></svg>
+			</button>
+		</div>
+	);
+}
+
+/** 첨부 하나. 그림은 알아볼 크기의 미리보기, 그 밖은 이름과 확장자. 누르면 탐색기에서 그 파일을 보인다. onRemove 가 있으면 모서리 × */
+function AttachTile({ rel, onRemove }: { rel: string; onRemove?: () => void }) {
+	const t = useT();
+	const id = useDeck((s) => s.id);
+	const dir = useDeck((s) => s.dir);
+	const name = attachName(rel);
+	const ext = (/\.([a-z0-9]+)$/i.exec(name)?.[1] || "").toUpperCase();
+	const stem = name.replace(/\.[a-z0-9]+$/i, "");
+	return (
+		<span className={"att" + (isImage(rel) ? " img" : "")}>
+			<button onClick={() => api.reveal(join(dir, rel))} title={name} aria-label={name}>
+				{isImage(rel) ? <img src={deckUrl(id, rel)} alt="" /> : <><span className="nm">{stem}</span><span className="ext">{ext}</span></>}
+			</button>
+			{onRemove && <button className="x" onClick={onRemove} aria-label={`${name} ${t("delete")}`}>×</button>}
+		</span>
 	);
 }

@@ -582,7 +582,7 @@ function StageTools({ left, top, right, onUndo, canUndo }: { left: number; top: 
 		<>
 			<div className="stagetools" role="toolbar" aria-label={t("tools")} style={{ left, top: y }}>
 				{tools.map((x) => (
-					<button key={x.k} aria-pressed={tool === x.k} onClick={() => setTool(x.k)} title={`${x.label} (${x.key}) — ${x.k === "select" ? t("selectHint") : x.k === "sketch" ? t("sketchHint") : t("toolHint")}`} aria-label={x.label}>
+					<button key={x.k} aria-pressed={tool === x.k} onClick={() => setTool(x.k)} title={`${x.label} (${x.key}). ${x.k === "select" ? t("selectHint") : x.k === "sketch" ? t("sketchHint") : t("toolHint")}`} aria-label={x.label}>
 						<svg width="16" height="16" viewBox="0 0 16 16" aria-hidden>{x.icon}</svg>
 					</button>
 				))}

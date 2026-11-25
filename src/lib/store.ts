@@ -46,6 +46,8 @@ export interface Turn {
 	mentions?: Mention[];
 	/** 요청 글의 @v<n> 판 멘션 — 지난 대화에서 그 판을 열 수 있게 커밋을 남긴다 */
 	versionMentions?: VersionMention[];
+	/** 사용자가 붙인 첨부 (.claudeppt/attach/…). 지난 요청에 무엇을 붙였는지 보인다. 표시 그림(marks-*)은 앱이 만든 것이라 넣지 않는다 */
+	attach?: string[];
 	reply: string;
 	tools: ToolUse[];
 	status: "running" | "done" | "failed" | "stopped";
@@ -199,10 +201,10 @@ function verifyPptx(get: () => S, deck: Deck, built: Built) {
 			// 모양이 다른 쪽이 먼저다. 그림으로 굳은 곳만 있으면(돌린 배지처럼 일부러 쓴 효과일 수 있다) 알리기만 하고 붉게 칠하지 않는다
 			const differ = bad.filter((x) => x.score > SAME).map((x) => x.no);
 			const stiff = bad.filter((x) => x.locked?.length).map((x) => x.no);
-			const msg = [differ.length ? `${tNow("pptxDiffers")} ${differ.join(" · ")}` : "", stiff.length ? `${tNow("lockedSlides")} ${stiff.join(" · ")}` : ""].filter(Boolean).join(" — ");
+			const msg = [differ.length ? `${tNow("pptxDiffers")} ${differ.join(" · ")}` : "", stiff.length ? `${tNow("lockedSlides")} ${stiff.join(" · ")}` : ""].filter(Boolean).join(". ");
 			get().notify(msg, differ.length ? "err" : "ok", { action: { label: tNow("fixDiff"), run: () => get().fixDiff(report) } });
 		})
-		.catch((e) => { if (get().dir === dir) get().notify(`${tNow("pptxNoCheck")} — ${String(e)}`, "err"); })
+		.catch((e) => { if (get().dir === dir) get().notify(`${tNow("pptxNoCheck")}. ${String(e)}`, "err"); })
 		.finally(() => { useDeck.setState((st) => ({ jobs: st.jobs.filter((j) => j.id !== job) })); });
 }
 
@@ -401,7 +403,7 @@ export const useDeck = create<S>()((set, get) => ({
 			if (!missing.length || fontAsked.has(dir)) return;
 			fontAsked.add(dir);
 			const list = missing.slice(0, 4).join(" · ") + (missing.length > 4 ? ` 외 ${missing.length - 4}개` : "");
-			get().notify(`글꼴 ${missing.length}개를 찾지 못했습니다 — ${list}. Claude 에게 글꼴 설정을 맡길까요?`, "ok", { action: { label: "맡기기", run: () => get().fixFonts(missing) } });
+			get().notify(`이 PC 에 없는 글꼴 ${missing.length}개: ${list}. Claude 에게 글꼴 설정을 맡길까요?`, "ok", { action: { label: "맡기기", run: () => get().fixFonts(missing) } });
 		}, () => {});
 	},
 
@@ -498,7 +500,7 @@ export const useDeck = create<S>()((set, get) => ({
 	send: async (text, attachments = [], force = false) => {
 		const { dir, deck, pins, running, current } = get();
 		if (!deck || running) return;
-		if (!text.trim() && !pins.length) return;
+		if (!text.trim() && !pins.length && !attachments.length) return;
 		// 앱 밖 Claude Code 가 방금 이 덱을 다뤘으면 한 번 묻는다 — 그쪽이 고치던 파일이 이 턴의 판에 섞이고, 같은 쪽을 둘이 고치면 한쪽이 덮인다.
 		// 요청칸은 보내며 비워지므로 글을 되돌려 놓는다
 		const out = get().outside;
@@ -521,7 +523,7 @@ export const useDeck = create<S>()((set, get) => ({
 		const cur = deck.slides[current];
 		const mentions = mentionsIn(text, deck);
 		const versionMentions = versionMentionsIn(text, get().versions);
-		const turn: Turn = { id: "t" + Date.now().toString(36), at: Date.now(), request: text.trim(), pins: notes, mentions, versionMentions, reply: "", tools: [], status: "running" };
+		const turn: Turn = { id: "t" + Date.now().toString(36), at: Date.now(), request: text.trim(), pins: notes, mentions, versionMentions, attach: attachments.length ? [...attachments] : undefined, reply: "", tools: [], status: "running" };
 		set({ turns: [...get().turns, turn], running: turn.id, pins: [] });
 		persistPins(dir, []);
 		const patch = (fn: (t: Turn) => Turn) => set({ turns: get().turns.map((t) => (t.id === turn.id ? fn(t) : t)) });
@@ -702,9 +704,9 @@ export const useDeck = create<S>()((set, get) => ({
 			const parts = [r.installed.length ? `글꼴 파일 ${r.installed.length}개를 설치했습니다` : "설치한 글꼴이 없습니다"];
 			if (r.missing.length) parts.push(`아직 없는 글꼴: ${r.missing.join(" · ")}`);
 			if (r.reasons.length) parts.push(r.reasons.join(" / "));
-			get().notify(parts.join(" — "), r.missing.length ? "err" : "ok", { sticky: !!(r.missing.length || r.reasons.length) });
+			get().notify(parts.join(". "), r.missing.length ? "err" : "ok", { sticky: !!(r.missing.length || r.reasons.length) });
 		} catch (e) {
-			get().notify(`글꼴 설정 실패 — ${String(e)}`, "err", { sticky: true });
+			get().notify(`글꼴 설정에 실패했습니다. ${String(e)}`, "err", { sticky: true });
 		} finally {
 			useDeck.setState((s) => ({ jobs: s.jobs.filter((j) => j.id !== id) }));
 		}
@@ -804,7 +806,7 @@ export async function makeRelease(dir: string, id: string, deck: Deck, prev: Rel
 	onBuilt?.(b);
 	const rel: Release = { name: name.trim() || tag, tag, n: head.n, hash: head.hash, file, notes: notes.trim(), at: new Date().toISOString() };
 	await api.writeText(dir, "releases/releases.json", JSON.stringify([...prev, rel], null, 2) + "\n");
-	await api.commit(dir, `릴리즈 ${tag} — ${rel.name}`);
+	await api.commit(dir, `릴리즈 ${tag} · ${rel.name}`);
 	await api.tag(dir, tag);
 	return rel;
 }

@@ -69,7 +69,7 @@ export async function importFile(path: string) {
 		const { dir, warnings } = await importDeck(path, step);
 		const ko = useSettings.getState().s.lang === "ko";
 		const names: Record<string, [string, string]> = { emf: ["EMF 그림", "EMF images"], chart: ["차트", "charts"], object: ["개체", "objects"], custGeom: ["자유형 도형", "freeform shapes"] };
-		const differ = warnings.length ? (ko ? "원본과 다를 수 있음 — " : "May differ from original — ") + warnings.map((w) => names[w]?.[ko ? 0 : 1] || w).join(" · ") : "";
+		const differ = warnings.length ? (ko ? "원본과 다를 수 있음: " : "May differ from original: ") + warnings.map((w) => names[w]?.[ko ? 0 : 1] || w).join(" · ") : "";
 		if (!useDeck.getState().deck) {
 			await st.openProject(dir);
 			if (differ) st.notify(differ);

@@ -115,7 +115,7 @@ const handlers: Record<string, (a: Args) => Promise<unknown>> = {
 		useDeck.setState({ outside: { dir, at: Date.now(), cmd: who } });
 		if (same(st.dir, dir)) st.loadSeats();
 		// 처음 한 번만 알린다 — 명령마다 띄우면 알림이 쌓여 화면을 가린다
-		if (fresh && same(st.dir, dir)) st.notify(label ? `${label} — ${tNow("outsideNotice")}` : tNow("outsideNotice"));
+		if (fresh && same(st.dir, dir)) st.notify(label ? `${label} · ${tNow("outsideNotice")}` : tNow("outsideNotice"));
 		return null;
 	},
 

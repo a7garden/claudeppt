@@ -169,7 +169,7 @@ function SeatRow({ seat, editing, onEdit }: { seat: Seat; editing: boolean; onEd
 							const o = other(x.id);
 							return (
 								<button key={x.id} aria-pressed={seat.slides === "all" || seat.slides.includes(x.id)} onClick={() => toggleSlide(x.id)}
-									title={[x.title || `${i + 1}`, o ? `${t("seatOwner")}: ${t("seatNo").replace("{n}", String(o.no))}${o.name ? " · " + o.name : ""}` : ""].filter(Boolean).join(" — ")}
+									title={[x.title || `${i + 1}`, o ? `${t("seatOwner")}: ${t("seatNo").replace("{n}", String(o.no))}${o.name ? " · " + o.name : ""}` : ""].filter(Boolean).join(" · ")}
 									style={o ? ({ "--o": o.color } as React.CSSProperties) : undefined} className={o ? "taken" : ""}>
 									{i + 1}
 								</button>
