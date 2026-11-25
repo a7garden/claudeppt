@@ -34,7 +34,8 @@ export interface Settings {
 	templates: Template[];
 	/** 새 덱에 쓰는 템플릿 id */
 	template: string;
-	update: { auto: boolean };
+	/** auto — 새 판을 저절로 확인 · install — 찾으면 내려받아 쉬는 틈에 저절로 설치 (2026.11.25~ 기본 켬) */
+	update: { auto: boolean; install: boolean };
 	/** 앱 밖 Claude Code 가 CLI 로 이 앱을 부리는 것을 받을지 (control.rs · remote.ts) */
 	remote: { enabled: boolean };
 }
@@ -53,7 +54,7 @@ export const DEFAULTS: Settings = {
 	image: { provider: "svg", openaiKey: "", geminiKey: "", openaiModel: "gpt-image-1", geminiModel: "gemini-2.5-flash-image" },
 	templates: [BASIC],
 	template: BASIC.id,
-	update: { auto: true },
+	update: { auto: true, install: true },
 	remote: { enabled: true },
 };
 

@@ -345,13 +345,16 @@ function Update() {
 	return (
 		<>
 			<Row k={t("version")}><span className="mono">{ver}</span></Row>
-			<Row k={t("autoCheck")}><Seg value={s.update.auto ? 1 : 0} options={[{ v: 1, label: t("remoteOn") }, { v: 0, label: t("remoteOff") }]} onChange={(v) => set((x) => ({ ...x, update: { auto: !!v } }))} /></Row>
+			<Row k={t("autoCheck")}><Seg value={s.update.auto ? 1 : 0} options={[{ v: 1, label: t("remoteOn") }, { v: 0, label: t("remoteOff") }]} onChange={(v) => set((x) => ({ ...x, update: { ...x.update, auto: !!v } }))} /></Row>
+			<Row k={t("autoInstall")}><Seg value={s.update.install ? 1 : 0} options={[{ v: 1, label: t("remoteOn") }, { v: 0, label: t("remoteOff") }]} onChange={(v) => set((x) => ({ ...x, update: { ...x.update, install: !!v } }))} /><span className="note" style={{ whiteSpace: "normal" }}>{t("autoInstallHint")}</span></Row>
 			<Row k={t("check")}>
 				<button className="ghost" onClick={() => u.run()} disabled={u.phase === "checking" || u.phase === "downloading"}>{t("check")}</button>
 				{u.phase === "latest" && <span className="note ok">{t("latest")}</span>}
 				{u.phase === "checking" && <span className="note">…</span>}
-				{u.phase === "available" && <><span className="mono">{u.version}</span><button className="send" onClick={u.install}>{t("install")}</button></>}
+				{(u.phase === "available" || u.phase === "ready") && <><span className="mono">{u.version}</span><button className="send" onClick={u.install}>{t("install")}</button></>}
+				{u.phase === "ready" && <span className="note">{t("updateQueued")}</span>}
 				{u.phase === "downloading" && <span className="mono">{Math.round(u.progress * 100)}%</span>}
+				{u.phase === "installing" && <span className="note">{t("updateInstalling")}</span>}
 				{u.phase === "error" && <span className="note" style={{ color: "var(--err)", whiteSpace: "normal" }}>{u.error}</span>}
 			</Row>
 			{u.notes && <Row k={t("notes")}><span style={{ whiteSpace: "pre-wrap" }}>{u.notes}</span></Row>}

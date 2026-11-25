@@ -10,7 +10,7 @@ import { useT } from "./lib/i18n";
 import { startRemote } from "./lib/remote";
 import { useSettings } from "./lib/settings";
 import { useDeck } from "./lib/store";
-import { useAutoUpdate } from "./lib/updater";
+import { resumeAfterUpdate, useAutoUpdate } from "./lib/updater";
 
 function useTheme() {
 	const theme = useSettings((s) => s.s.theme);
@@ -39,6 +39,8 @@ export default function App() {
 	useAutoUpdate(loaded);
 	// 앱 밖 Claude Code 의 CLI 명령을 받기 시작한다 — 저장 폴더 · 템플릿을 읽은 뒤라야 새 덱을 만든다
 	useEffect(() => { if (loaded) startRemote().catch((e) => console.error("제어 통로", e)); }, [loaded]);
+	// 업데이트를 설치하며 다시 켰으면 그때 열려 있던 덱을 다시 연다
+	useEffect(() => { if (loaded) resumeAfterUpdate(); }, [loaded]);
 	useEffect(() => {
 		const k = (e: KeyboardEvent) => {
 			if (e.ctrlKey && e.key === ",") { e.preventDefault(); setSettings((v) => !v); }

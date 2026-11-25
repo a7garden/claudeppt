@@ -187,18 +187,20 @@ function UpdateChip() {
 		addEventListener("keydown", esc);
 		return () => { removeEventListener("mousedown", k); removeEventListener("keydown", esc); };
 	}, [show]);
-	if (u.phase !== "available" && u.phase !== "downloading") return null;
-	const busy = u.phase === "downloading";
+	// 받는 중 · 설치 중이면 칩이 진행률 · 상태가 된다. 받아 두었으면(ready) 쉬는 틈에 저절로 설치한다 — 칩의 단추로 바로 설치할 수도 있다
+	if (!["available", "downloading", "ready", "installing"].includes(u.phase)) return null;
+	const busy = u.phase === "downloading" || u.phase === "installing";
 	return (
 		<span className="upd" ref={ref}>
 			<button className={"upd-chip" + (show ? " on" : "")} onClick={() => (show ? close() : setOpen(true))} disabled={busy} aria-expanded={show}>
 				<i aria-hidden />
-				{busy ? <span className="mono">{Math.round(u.progress * 100)}%</span> : <>{t("updateReady")} <span className="mono">{u.version}</span></>}
+				{u.phase === "installing" ? t("updateInstalling") : busy ? <span className="mono">{Math.round(u.progress * 100)}%</span> : <>{t("updateReady")} <span className="mono">{u.version}</span></>}
 			</button>
 			{show && !busy && (
 				<div className="pop upd-pop" role="dialog" aria-label={t("update")}>
 					<div className="head"><b>ClaudePPT <span className="mono">{u.version}</span></b></div>
 					{u.notes && <div className="upd-notes">{u.notes}</div>}
+					{u.phase === "ready" && <div className="upd-queued">{t("updateQueued")}</div>}
 					<div className="acts">
 						<button className="ghost" onClick={close}>{t("updateLater")}</button>
 						<button className="send" onClick={() => { close(); u.install(); }}>{t("updateNow")}</button>

@@ -33,13 +33,23 @@
 		}
 		return p;
 	};
+	const atPath = (p) => p.reduce((e, i) => e?.children[i] ?? null, root);
+	// 고친 요소를 다시 그린 뒤에도 고른 채로 — 원본에 되쓰면 앱이 이 쪽을 새로 읽어(핫 리로드) 고른 것 · 키보드 자리가 사라진다.
+	// 그러면 Enter 로 마친 뒤 Enter · F2 로 이어 고치지 못한다. 되쓰기 직전에 길을 적어 두고, 다시 뜬 무대 쪽이 edit 모드를 받으면 되살린다.
+	// 쪽 목록 미리보기는 view 모드를 받으므로 되살리지 않는다 (2026.11.25)
+	const KEEP = "deck-keep:" + location.pathname;
+	const keep = (el) => { try { sessionStorage.setItem(KEEP, JSON.stringify({ path: pathOf(el), at: Date.now() })); } catch {} };
 	const label = (el) => {
 		const t = (el.innerText || el.getAttribute("alt") || "").replace(/\s+/g, " ").trim();
 		return t.length > 60 ? t.slice(0, 60) + "…" : t;
 	};
 
-	// ── 편집 ── 글자를 두 번 눌러 고친다 · 끌어 옮긴다 · 방향키로 1px(Shift 10px) · Delete 로 지운다
-	let mode = "view", sel = null, drag = null;
+	// ── 편집 ── 글자를 고친다 · 끌어 옮긴다 · 방향키로 1px(Shift 10px) · Delete 로 지운다
+	//   글 고치기 시작   두 번 누르기(누른 낱말이 골라진다) · 고른 요소를 한 번 더 누르기(누른 자리에 커서) · 고른 요소에서 Enter · F2(글 전체를 고른다)
+	//   마치기 · 취소    Enter 또는 밖을 누르면 원본에 되쓴다 · Esc 는 고치기 전으로 · Shift+Enter 는 줄 바꿈(<br>)
+	//   붙여 넣기        글자만 — 다른 문서의 서식(style · 글꼴 · 색)이 섞이면 PPTX 로 나갈 때 모양이 틀어진다
+	// 2026.11.25 : 두 번 누르기만 있었고 Enter 가 <div> 를 끼워 넣고 Esc 도 저장했다 — 제목을 고치다 Enter 로 마치려 하면 구조가 깨졌다
+	let mode = "view", sel = null, drag = null, edit = null, picked = 0;
 	const style = document.createElement("style");
 	style.textContent = `
 		[data-deck-edit] .slide *:hover { outline: 1px solid rgba(229,72,45,.32); outline-offset: 1px; cursor: default }
@@ -52,15 +62,73 @@
 		if (sel) sel.setAttribute("data-deck-sel", "");
 	};
 	const movable = (el) => el && el !== root && ["absolute", "fixed"].includes(css(el).position);
+	// 글을 고칠 수 있는 요소 — 글이 있고, 그림 · 표처럼 글 상자로 다루지 않는 것을 품지 않은 것
+	const editable = (el) => el && el !== root && el !== document.body && !!(el.innerText || "").trim() && !el.querySelector("img, svg, table, video, canvas");
+
+	/** 글 고치기를 시작한다. at 이 있으면 그 자리에 커서, all 이면 글 전체를 고른다. 둘 다 없으면 브라우저가 고른 그대로(두 번 누르기의 낱말) */
+	const startEdit = (el, at, all) => {
+		if (edit || !editable(el)) return;
+		edit = { el, before: el.innerHTML, cancel: false };
+		select(null);
+		el.contentEditable = "true";
+		el.focus();
+		const s = getSelection();
+		const r = at ? document.caretRangeFromPoint(at.x, at.y) : all ? document.createRange() : null;
+		if (r) {
+			if (all) r.selectNodeContents(el);
+			s.removeAllRanges();
+			s.addRange(r);
+		}
+		el.addEventListener("blur", finishEdit, { once: true });
+	};
+	const finishEdit = () => {
+		if (!edit) return;
+		const { el, before, cancel } = edit;
+		edit = null;
+		el.removeAttribute("contenteditable");
+		if (cancel) el.innerHTML = before;
+		else if (el.innerHTML !== before) { keep(el); post({ t: "edit", path: pathOf(el), html: el.innerHTML }); }
+		// Enter · Esc 로 마쳤으면 그 요소를 고른 채로 둔다. 다른 요소를 눌러 마쳤으면 그 요소가 이미 골라져 있다 — 덮지 않는다
+		if (!sel) select(el);
+	};
+	/** 글자만 끼운다 — 줄은 <br> 로 */
+	const insertPlain = (text) => {
+		const lines = text.replace(/\r\n?/g, "\n").split("\n");
+		lines.forEach((l, i) => {
+			if (i) document.execCommand("insertLineBreak");
+			if (l) document.execCommand("insertText", false, l);
+		});
+	};
+	addEventListener("paste", (e) => {
+		if (!edit) return;
+		e.preventDefault();
+		insertPlain(e.clipboardData?.getData("text/plain") || "");
+	});
+	addEventListener("drop", (e) => {
+		if (!edit) return;
+		e.preventDefault();
+		const t = e.dataTransfer?.getData("text/plain");
+		if (!t) return;
+		const r = document.caretRangeFromPoint(e.clientX, e.clientY);
+		if (r) { getSelection().removeAllRanges(); getSelection().addRange(r); }
+		insertPlain(t);
+	});
 
 	addEventListener("pointerdown", (e) => {
 		if (mode !== "edit") return;
 		const el = e.target.closest("[contenteditable=true]") ? null : e.target;
 		if (!el || el === root || el === document.body) return select(null);
+		// 고른 지 조금 지난 요소를 다시 누르면 글 고치기 — 두 번 누르기의 둘째 누름과 가르려고 시간을 본다
+		const again = el === sel && e.button === 0 && Date.now() - picked > 450;
+		if (el !== sel) picked = Date.now();
 		select(el);
+		if (again && editable(el) && !movable(el)) {
+			startEdit(el, { x: e.clientX, y: e.clientY });
+			return;
+		}
 		// 우클릭은 고르기만 한다 — 끌기를 시작하면 메뉴를 여는 동안 요소가 손에 붙는다
 		if (movable(el) && e.button === 0) {
-			drag = { el, x: e.clientX, y: e.clientY, l: parseFloat(css(el).left) || el.offsetLeft, t: parseFloat(css(el).top) || el.offsetTop, moved: false };
+			drag = { el, x: e.clientX, y: e.clientY, l: parseFloat(css(el).left) || el.offsetLeft, t: parseFloat(css(el).top) || el.offsetTop, moved: false, again };
 			e.preventDefault();
 		}
 	}, true);
@@ -72,21 +140,16 @@
 		drag.el.style.left = Math.round(drag.l + dx) + "px";
 		drag.el.style.top = Math.round(drag.t + dy) + "px";
 	});
-	addEventListener("pointerup", () => {
-		if (drag?.moved) post({ t: "patch", path: pathOf(drag.el), style: { left: drag.el.style.left, top: drag.el.style.top } });
+	addEventListener("pointerup", (e) => {
+		if (drag?.moved) { keep(drag.el); post({ t: "patch", path: pathOf(drag.el), style: { left: drag.el.style.left, top: drag.el.style.top } }); }
+		// 옮길 수 있는 요소는 누르면 끌기가 시작된다 — 끌지 않고 뗐고 이미 골라 둔 요소였으면 그때 글 고치기
+		else if (drag && drag.again && editable(drag.el)) startEdit(drag.el, { x: e.clientX, y: e.clientY });
 		drag = null;
 	});
 	addEventListener("dblclick", (e) => {
-		if (mode !== "edit") return;
-		const el = e.target;
-		if (!el || el === root || !(el.innerText || "").trim()) return;
-		el.contentEditable = "true";
-		el.focus();
-		const before = el.innerHTML;
-		el.addEventListener("blur", () => {
-			el.removeAttribute("contenteditable");
-			if (el.innerHTML !== before) post({ t: "edit", path: pathOf(el), html: el.innerHTML });
-		}, { once: true });
+		if (mode !== "edit" || edit) return;
+		// 그림 · 표를 품은 요소를 두 번 눌렀으면 그 안의 글 요소까지 내려가지 않는다 — 누른 요소가 글 상자일 때만
+		startEdit(e.target);
 	});
 	// 휠 · 쪽 넘김 키는 앱으로 넘긴다 — 슬라이드 창이 받아 버리면 무대 위에서 휠을 굴리거나, 슬라이드를 한 번 누른 뒤 방향키를 눌러도 쪽이 안 넘어간다
 	addEventListener("wheel", (e) => post({ t: "wheel", dy: e.deltaY }), { passive: true });
@@ -114,10 +177,17 @@
 			return;
 		}
 		if (mode !== "edit") return;
-		const editing = document.activeElement?.isContentEditable;
-		if (editing) { if (e.key === "Escape") document.activeElement.blur(); return; }
+		if (edit) {
+			if (e.key === "Escape") { edit.cancel = true; edit.el.blur(); e.preventDefault(); }
+			else if (e.key === "Enter" && !e.shiftKey && !e.isComposing) { edit.el.blur(); e.preventDefault(); }
+			else if (e.key === "Enter" && e.shiftKey && !e.isComposing) { document.execCommand("insertLineBreak"); e.preventDefault(); }
+			return;
+		}
 		if (!sel) return;
-		if (e.key === "Delete" || e.key === "Backspace") {
+		if ((e.key === "Enter" || e.key === "F2") && editable(sel)) {
+			startEdit(sel, null, true);
+			e.preventDefault();
+		} else if (e.key === "Delete" || e.key === "Backspace") {
 			post({ t: "remove", path: pathOf(sel) });
 			select(null);
 		} else if (e.key.startsWith("Arrow") && movable(sel)) {
@@ -129,7 +199,7 @@
 			if (e.key === "ArrowDown") sel.style.top = t + d + "px";
 			clearTimeout(sel.__nudge);
 			const el = sel;
-			sel.__nudge = setTimeout(() => post({ t: "patch", path: pathOf(el), style: { left: el.style.left, top: el.style.top } }), 400);
+			sel.__nudge = setTimeout(() => { keep(el); post({ t: "patch", path: pathOf(el), style: { left: el.style.left, top: el.style.top } }); }, 400);
 			e.preventDefault();
 		} else if (e.key === "Escape") select(null);
 	});
@@ -143,6 +213,12 @@
 			mode = m.mode;
 			document.documentElement.toggleAttribute("data-deck-edit", mode === "edit");
 			if (mode !== "edit") select(null);
+			else {
+				let k = null;
+				try { k = JSON.parse(sessionStorage.getItem(KEEP) || "null"); sessionStorage.removeItem(KEEP); } catch {}
+				const el = k && Date.now() - k.at < 5000 && k.path ? atPath(k.path) : null;
+				if (el && el !== root) { select(el); picked = Date.now(); window.focus(); }
+			}
 		} else if (m.t === "hit") {
 			const el = document.elementFromPoint(m.x, m.y) || root;
 			post({ t: "hit", req: m.req, path: pathOf(el), tag: el.tagName.toLowerCase(), text: el === root ? "" : label(el), cls: el.className && typeof el.className === "string" ? el.className : "" });
