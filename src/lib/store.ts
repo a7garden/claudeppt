@@ -152,6 +152,9 @@ interface S {
 }
 
 let unlisten: (() => void)[] = [];
+/** 사건 리스너(deck-fs · claude)는 앱에 한 벌만 — 덱을 열 때마다 붙였다 떼면, openProject 가 겹쳐 불릴 때(다시 켠 뒤 덱 열기 + 사용자 클릭 등)
+ *  두 벌 붙어 Claude 글자가 두 번 찍혔다. 받은 사건은 지금 연 덱(id) · 지금 도는 턴 것만 쓴다 */
+let listening: Promise<unknown> | null = null;
 /** 이 앱을 켜 둔 동안 글꼴을 물어본 프로젝트 — 열 때마다 같은 것을 다시 묻지 않는다 */
 const fontAsked = new Set<string>();
 let directTimer: ReturnType<typeof setTimeout> | undefined;
@@ -344,8 +347,8 @@ export const useDeck = create<S>()((set, get) => ({
 		const log = await api.log(dir, 1);
 		if (!log.length) await api.commit(dir, deck.source?.kind === "pptx" ? "PPTX 가져옴" : "새로 만듦");
 		await get().refreshVersions();
-		unlisten.push(
-			await listen<{ id: string; paths: string[] }>("deck-fs", async (e) => {
+		listening ??= Promise.all([
+			listen<{ id: string; paths: string[] }>("deck-fs", async (e) => {
 				if (e.payload.id !== get().id) return;
 				const paths = e.payload.paths;
 				if (paths.includes("deck.json")) {
@@ -367,9 +370,7 @@ export const useDeck = create<S>()((set, get) => ({
 				attribute(get, set, paths);
 				if (get().vdiff) refreshCompare(get, set);
 			}),
-		);
-		unlisten.push(
-			await listen<{ turn: string; line: string }>("claude", (e) => {
+			listen<{ turn: string; line: string }>("claude", (e) => {
 				const { turn, line } = e.payload;
 				let m: any;
 				try { m = JSON.parse(line); } catch { return; }
@@ -390,7 +391,8 @@ export const useDeck = create<S>()((set, get) => ({
 					patch((t) => ({ ...t, cost: m.total_cost_usd, reply: (t.reply.trim() || m.result || "").trim(), error: m.is_error ? m.result || "error" : t.error }));
 				}
 			}),
-		);
+		]);
+		await listening;
 		// 글꼴 잇기 — 화면을 막지 않고 뒤에서 한다 (깔린 글꼴을 처음 읽을 때 몇 초 걸린다).
 		// 폴더 감시 사건을 받기 시작한 뒤에 돌린다. 2026.11.20 : 전에는 받기 전에 돌려, 글꼴 목록을 이미 읽어 둔 두 번째 가져오기에서
 		// theme.css 를 먼저 고쳐 버렸다 — 그 사건을 놓친 쪽들이 대체 글꼴로 남아 「목차」가 두 줄로 꺾였다.
