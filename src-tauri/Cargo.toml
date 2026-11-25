@@ -1,6 +1,6 @@
 [package]
 name = "claudeppt"
-version = "0.4.0"
+version = "0.4.5"
 description = "Claude 와 대화하며 웹으로 PPT 를 짓고 PPTX 로 내보내는 작업대"
 authors = ["seesun"]
 license = "MIT"
@@ -23,7 +23,8 @@ tauri-plugin-dialog = "2"
 tauri-plugin-updater = "2"
 tauri-plugin-process = "2"
 serde = { version = "1", features = ["derive"] }
-serde_json = "1"
+# preserve_order — CLI 가 deck.json 을 고쳐 쓸 때 키 순서를 지킨다. 안 지키면 판 비교에 키 순서만 바뀐 줄이 섞인다
+serde_json = { version = "1", features = ["preserve_order"] }
 tokio = { version = "1", features = ["process", "io-util", "sync", "time", "macros", "rt-multi-thread"] }
 uuid = { version = "1", features = ["v4"] }
 chrono = "0.4"

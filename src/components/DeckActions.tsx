@@ -102,13 +102,18 @@ function ReleasePop({ onDone }: { onDone: () => void }) {
 			</div>
 			{releases.length > 0 && (
 				<div className="rels">
-					{[...releases].reverse().map((r) => (
-						<div key={r.tag}>
-							<span className="mono" style={{ color: "var(--accent)" }}>{r.tag}</span>
-							<span>{r.name}</span>
-							<button className="mono" title={r.file} onClick={() => api.reveal(join(dir, r.file))}>v{r.n} ↗</button>
-						</div>
-					))}
+					{/* 판 목록과 같은 꼬리표 · 판 알약. 알약은 대화에서처럼 그 판을 보고, ↗ 는 만든 PPTX 가 있는 폴더를 연다 */}
+					{[...releases].reverse().map((r) => {
+						const c = versions.find((v) => v.n === r.n);
+						return (
+							<div key={r.tag}>
+								<i className="rtag">{r.tag}</i>
+								<span>{r.name}</span>
+								<button className={"node" + (c && c === versions[0] ? " head" : "")} disabled={!c} onClick={() => { if (c) { onDone(); useDeck.getState().setPreview(c); } }} title={c?.subject}>v{r.n}</button>
+								<button className="open" title={r.file} aria-label={r.file} onClick={() => api.reveal(join(dir, r.file))}>↗</button>
+							</div>
+						);
+					})}
 				</div>
 			)}
 		</div>

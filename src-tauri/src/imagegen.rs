@@ -95,7 +95,7 @@ pub async fn image_generate(spec: GenSpec) -> Res<String> {
 		"openai" => openai(&spec).await?,
 		"gemini" => gemini_api(&spec).await?,
 		"codex-cli" | "gemini-cli" => return cli(spec).await,
-		p => return Err(format!("모르는 그림 공급자: {p}")),
+		p => return Err(format!("모르는 그림 생성 방식: {p}")),
 	};
 	std::fs::write(&out, bytes).map_err(err)?;
 	Ok(spec.out)

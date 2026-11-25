@@ -5,6 +5,10 @@
 //   new · import             저장 폴더에 새 덱 — 앱의 처음 화면 · 가져오기와 같은 길(createDeck · flows.importDeck)
 //   export · shot · inspect  웹뷰가 쪽을 그려야 하는 일 — 내보내기와 같은 런타임(rt.js)의 extract · snapshot 을 쓴다
 //   check · release          비교 검사 · 릴리즈 — 앱의 단추와 같은 함수(runCheck · makeRelease)
+//   style                    덱이 따를 스타일 · 그림 규칙 — 앱 안 Claude 의 시스템 프롬프트와 같은 글(prompt.ts houseStyle · imageRules)
+//   pins · unpin             사용자가 꽂은 핀을 앱 안 턴과 같은 글(pinLine) · 같은 표시 그림(markedPictures)으로 / 다 고친 핀 지우기
+//   gen                      그림 자리(data-gen) 채우기 — 앱 안 턴 끝과 같은 함수(fillGenerated)
+//   touch                    CLI 가 덱을 다룰 때마다 알린다 → store.outside. 그 덱에서 보내기 전에 한 번 묻는다 · 맡은 담당이 있으면 담당 파일을 다시 읽는다
 //
 // 열려 있지 않은 덱도 화면을 바꾸지 않고 처리한다 — deck:// 에 잠깐 올렸다가(api.open) 감시만 내린다.
 // 오래 걸리는 일은 오른쪽 아래 진행 막대(jobs)에 「CLI · …」 로 보인다 — 사용자가 밖에서 무엇을 시켰는지 알게.
@@ -19,9 +23,11 @@ import { linkFonts } from "./fonts";
 import { ask, offscreen } from "./frames";
 import { runCheck } from "./check";
 import { tNow } from "./i18n";
-import { templateRules } from "./prompt";
+import { fillGenerated } from "./imagegen";
+import { describe, markedPictures } from "./markup";
+import { deckTemplate, houseStyle, imageRules, type PinNote, pinLine, templateRules } from "./prompt";
 import { templateOf, useSettings } from "./settings";
-import { makeRelease, type Release, useDeck } from "./store";
+import { makeRelease, OUTSIDE_MS, type Pin, type Release, useDeck } from "./store";
 
 type Args = Record<string, any>;
 
@@ -65,6 +71,13 @@ function pick(deck: Deck, nums: number[] | null) {
 
 const titleOf = (dir: string, d: Deck) => d.title || dir.split(/[\\/]/).pop();
 
+/** 덱의 핀 — 화면에 열린 덱이면 앱이 쥔 것(파일보다 앞설 수 있다), 아니면 .claudeppt/pins.json */
+async function pinsOf(dir: string): Promise<Pin[]> {
+	const st = useDeck.getState();
+	if (same(st.dir, dir)) return st.pins;
+	try { return JSON.parse(await api.readText(dir, ".claudeppt/pins.json")); } catch { return []; }
+}
+
 function status() {
 	const st = useDeck.getState();
 	return {
@@ -93,10 +106,83 @@ async function show(dir: string, slide?: number | null) {
 const handlers: Record<string, (a: Args) => Promise<unknown>> = {
 	status: async () => status(),
 
+	touch: async ({ dir, cmd, label }) => {
+		const st = useDeck.getState();
+		const prev = st.outside;
+		const fresh = !prev || !same(prev.dir, dir) || Date.now() - prev.at >= OUTSIDE_MS;
+		// 담당을 맡은 세션이면 그 담당 이름을 붙인다 — 「누가」 다루는지 보이게
+		const who = label ? `${label} · ${cmd || ""}` : String(cmd || "");
+		useDeck.setState({ outside: { dir, at: Date.now(), cmd: who } });
+		if (same(st.dir, dir)) st.loadSeats();
+		// 처음 한 번만 알린다 — 명령마다 띄우면 알림이 쌓여 화면을 가린다
+		if (fresh && same(st.dir, dir)) st.notify(label ? `${label} — ${tNow("outsideNotice")}` : tNow("outsideNotice"));
+		return null;
+	},
+
+	style: async ({ dir }) => {
+		const s = useSettings.getState().s;
+		const deck = await readDeck(dir);
+		const tpl = deckTemplate(s, deck);
+		return { template: tpl?.name ?? null, imported: !tpl, images: s.image.provider, style: houseStyle(s, deck) + "\n\n" + imageRules(s, tpl, true) };
+	},
+
+	pins: async ({ dir, slides, marks }) => {
+		const deck = await readDeck(dir);
+		const order = (id: string) => deck.slides.findIndex((x) => x.id === id) + 1;
+		// 번호는 앱 안 턴과 같다 — 꽂은 차례. --slides 로 걸러도 번호는 그대로라 pins --done 에 그대로 쓴다
+		const all: PinNote[] = (await pinsOf(dir)).map((p, i) => ({ n: i + 1, slide: p.slide, slideNo: order(p.slide), x: p.x, y: p.y, text: p.text, target: p.target, shape: p.shape }));
+		const want = Array.isArray(slides) ? all.filter((p) => slides.includes(p.slideNo)) : all;
+		// 표시 그림 — 좌표 글만으로는 「어디를 가리키는지」를 자주 잘못 짚는다. 앱 안 턴과 같은 그림을 .claudeppt/attach 에 굽는다
+		const pictures = marks && want.length ? await withDeck(dir, (id, d) => markedPictures(dir, id, d, want)) : [];
+		return {
+			count: all.length,
+			pins: want.map((p) => ({
+				n: p.n,
+				slide: p.slideNo || null,
+				file: `slides/${p.slide}.html`,
+				x: Math.round(p.x),
+				y: Math.round(p.y),
+				text: p.text,
+				target: p.target ? { tag: p.target.tag, text: p.target.text } : null,
+				mark: p.shape ? describe(p.shape) : null,
+			})),
+			text: want.map(pinLine).join("\n"),
+			marks: pictures.map((rel) => join(dir, rel)),
+		};
+	},
+
+	unpin: async ({ dir, nums, only }) => {
+		const all = await pinsOf(dir);
+		const bad = Array.isArray(nums) ? nums.filter((n: number) => n < 1 || n > all.length) : [];
+		if (bad.length) throw new Error(`없는 핀: ${bad.join(", ")} (핀 ${all.length}개)`);
+		// only — 맡은 쪽이 정해진 담당이 부르면 그 쪽 id. 남의 쪽 핀은 지우지 않는다 (all 이면 맡은 쪽 핀만)
+		const mine = (p: Pin) => !Array.isArray(only) || only.includes(p.slide);
+		const foreign = Array.isArray(nums) ? all.filter((p, i) => nums.includes(i + 1) && !mine(p)).map((p) => all.indexOf(p) + 1) : [];
+		if (foreign.length) throw new Error(`맡지 않은 쪽의 핀이다: ${foreign.join(", ")} — 그 쪽 담당이 지운다`);
+		const drop = (Array.isArray(nums) ? all.filter((_, i) => nums.includes(i + 1)) : all).filter(mine);
+		const st = useDeck.getState();
+		// 화면에 열린 덱은 앱이 핀을 쥐고 있다 — 파일만 고치면 다음 핀 변경 때 앱이 옛 목록으로 덮어쓴다
+		if (same(st.dir, dir)) for (const p of drop) useDeck.getState().removePin(p.id);
+		else await api.writeText(dir, ".claudeppt/pins.json", JSON.stringify(all.filter((p) => !drop.includes(p)), null, 1));
+		return { removed: drop.length, left: all.length - drop.length };
+	},
+
+	gen: async ({ dir }) => {
+		const s = useSettings.getState().s;
+		if (s.image.provider === "svg") throw new Error("그림 생성 방식이 SVG 라 그림을 만들지 않는다 — 인라인 SVG 로 그린다 (사용자가 앱 설정에서 바꿀 수 있다)");
+		const st = useDeck.getState();
+		if (st.running && same(st.dir, dir)) throw new Error("앱 안 Claude 가 이 덱을 고치는 중이다 — status --wait 뒤에 다시 한다");
+		const deck = await readDeck(dir);
+		let tried = 0;
+		const errors = await job(`${titleOf(dir, deck)} · ${tNow("generating")}`, (step) => fillGenerated(dir, deck, s, () => step(++tried, 0)));
+		return { filled: tried - errors.length, errors };
+	},
+
 	refresh: async ({ dir }) => {
 		const st = useDeck.getState();
 		if (!same(st.dir, dir)) return { refreshed: false };
 		await st.refreshVersions();
+		await st.loadSeats();
 		try { useDeck.setState({ releases: JSON.parse(await api.readText(st.dir, "releases/releases.json")) }); } catch {}
 		return { refreshed: true };
 	},
@@ -120,7 +206,7 @@ const handlers: Record<string, (a: Args) => Promise<unknown>> = {
 			await useDeck.getState().openProject(dir);
 			opened = true;
 		} else {
-			await api.commit(dir, "새로 만든다");
+			await api.commit(dir, "새로 만듦");
 		}
 		// 바깥 세션은 앱의 시스템 프롬프트를 받지 않는다 — 같은 스타일로 만들게 템플릿 규칙을 돌려준다
 		const used = templateOf(s, deck.template);

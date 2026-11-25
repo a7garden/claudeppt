@@ -38,8 +38,8 @@ export default class Crash extends Component<{ children: ReactNode }, State> {
 				<p>{tNow("crashBody")}</p>
 				<pre>{String(error.stack || error)}{stack}</pre>
 				<div className="crash-act">
-					<button className="primary" onClick={this.retry}>{tNow("crashRetry")}</button>
-					<button onClick={this.home}>{tNow("crashHome")}</button>
+					<button className="send" onClick={this.retry}>{tNow("crashRetry")}</button>
+					<button className="ghost" onClick={this.home}>{tNow("crashHome")}</button>
 				</div>
 			</div>
 		);

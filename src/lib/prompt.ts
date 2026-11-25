@@ -50,9 +50,15 @@ A request may attach a sketch picture (.claudeppt/attach/sketch-*.png): a rough 
 Keep the reply to 1–3 short lines: what you changed, and a question only if something is truly ambiguous. The app already shows which files changed.`;
 
 /** 덱이 쓰는 템플릿 — 가져온 PPTX 는 원본 모양을 따르므로 없다(null). template 이 없는 새 덱(옛 덱)은 기본 템플릿 */
-function deckTemplate(s: Settings, deck: Deck): Template | null {
+export function deckTemplate(s: Settings, deck: Deck): Template | null {
 	if (deck.source?.kind === "pptx" && !deck.template) return null;
 	return templateOf(s, deck.template);
+}
+
+/** 덱의 스타일 규칙 — 템플릿 규칙, 가져온 PPTX 면 원본을 지키라는 말. 앱 안 Claude 의 시스템 프롬프트와 바깥 CLI 의 style 이 같은 글이다 */
+export function houseStyle(s: Settings, deck: Deck) {
+	const tpl = deckTemplate(s, deck);
+	return tpl ? templateRules(tpl) : "# House style\nThis deck was imported from a PPTX. Keep its own fonts, colors and layout (theme.css and the existing slides); do not restyle it.";
 }
 
 /** 템플릿 하나의 스타일 규칙 — 앱 안 Claude 의 시스템 프롬프트와, 바깥 CLI 의 new 가 돌려주는 style 이 같은 글이다 */
@@ -65,14 +71,15 @@ export function templateRules(sh: Template) {
 - Accent color only for the one thing that matters on a slide.${sh.guide.trim() ? `\n\n## Style rules of this template — follow them on every slide\n${sh.guide.trim()}` : ""}`;
 }
 
-function imageRules(s: Settings, tpl: Template | null) {
+/** 그림 규칙. outside 는 바깥 CLI 의 style 이 쓴다 — 바깥 세션은 턴이 없어서 그림 자리를 gen 명령으로 채운다 */
+export function imageRules(s: Settings, tpl: Template | null, outside = false) {
 	const im = s.image;
 	if (im.provider === "svg") {
 		return `# Images
 Draw every illustration, icon, diagram and chart yourself as inline SVG. There is no raster image generator.`;
 	}
 	return `# Images
-Use inline SVG for icons, diagrams and charts. For a photograph or rich illustration, place a placeholder and the app generates it after your turn:
+Use inline SVG for icons, diagrams and charts. For a photograph or rich illustration, place a placeholder and ${outside ? "then run `cppt gen --deck <dir>` to have the app generate it" : "the app generates it after your turn"}:
 <img data-gen="<detailed English description of the image>" data-gen-size="<width>x<height>" style="position:absolute; left:…; top:…; width:…; height:…; object-fit:cover">
 - Leave src empty; the app writes the file to assets/ and fills src. To regenerate, change data-gen and remove src.
 - Size the element exactly as it should appear.${tpl?.imageStyle ? `\n- Visual style for every generated image: ${tpl.imageStyle}` : ""}`;
@@ -83,7 +90,7 @@ export function systemPrompt(s: Settings, deck: Deck) {
 	const lang = s.lang === "ko" ? "Korean" : "English";
 	return [
 		BASE_PROMPT,
-		tpl ? templateRules(tpl) : "# House style\nThis deck was imported from a PPTX. Keep its own fonts, colors and layout (theme.css and the existing slides); do not restyle it.",
+		houseStyle(s, deck),
 		imageRules(s, tpl),
 		`# Deck\nTitle: ${deck.title}\nSize: ${deck.size.w}×${deck.size.h}px\nSlides: ${deck.slides.length}${deck.source?.kind === "pptx" ? `\nImported from PPTX. Reference pages: ${deck.source.pages ? `source/pages/1.png … ${deck.source.pages}.png` : "none"}` : ""}`,
 		`# Language\nWrite replies in ${lang}. Write slide text in the language the person uses for the deck content.`,
@@ -93,6 +100,10 @@ export function systemPrompt(s: Settings, deck: Deck) {
 }
 
 export interface PinNote { n: number; slide: string; slideNo: number; x: number; y: number; text: string; target?: { tag: string; text: string; path: number[] | null }; shape?: Shape }
+
+/** 핀 하나를 Claude 가 읽을 글로 — 앱 안 턴의 요청문과 바깥 CLI 의 pins 가 같은 글이다 */
+export const pinLine = (p: PinNote) =>
+	`${p.n}. slide ${p.slideNo} (slides/${p.slide}.html) ` + (p.shape ? describe(p.shape) : `at (${Math.round(p.x)}, ${Math.round(p.y)})`) + (p.target ? ` on <${p.target.tag}>${p.target.text ? ` "${p.target.text}"` : ""}` : "") + `\n   ${p.text.trim() || (p.shape ? "(no comment — look at what this mark shows)" : "(no comment — look at this spot)")}`;
 
 /** 한 턴의 요청문 — 사용자 글 · @쪽 멘션 · @판 멘션 · 핀 · 지금 보던 쪽. versions 는 versions.ts versionContext 가 만든 줄 */
 export function turnPrompt(text: string, pins: PinNote[], current: { id: string; no: number } | null, attachments: string[], mentions: Mention[] = [], versions: string[] = []) {
@@ -108,9 +119,7 @@ export function turnPrompt(text: string, pins: PinNote[], current: { id: string;
 		// 표시(펜 · 화살표 · 상자)는 좌표만으로는 뜻이 흐려서, 표시를 그려 넣은 쪽 그림을 첨부로 함께 준다 (markup.ts markedPictures)
 		parts.push(
 			"Pins (numbered marks the person placed on slides; coordinates are slide pixels" + (pins.some((p) => p.shape) ? ". The attached marks-*.png pictures show each slide with the marks drawn in red and numbered — Read them first" : "") + "):\n" +
-				pins
-					.map((p) => `${p.n}. slide ${p.slideNo} (slides/${p.slide}.html) ` + (p.shape ? describe(p.shape) : `at (${Math.round(p.x)}, ${Math.round(p.y)})`) + (p.target ? ` on <${p.target.tag}>${p.target.text ? ` "${p.target.text}"` : ""}` : "") + `\n   ${p.text.trim() || (p.shape ? "(no comment — look at what this mark shows)" : "(no comment — look at this spot)")}`)
-					.join("\n"),
+				pins.map(pinLine).join("\n"),
 		);
 	}
 	if (versions.length) {

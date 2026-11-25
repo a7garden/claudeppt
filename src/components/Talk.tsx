@@ -1,10 +1,11 @@
-// 대화 — 턴마다 왼쪽 여백의 실(thread)에 그 턴이 남긴 판(v<n>)을 꿴다. 대화 기록이 곧 판 이력이다.
+// 대화 — 턴마다 요청 · 답 · 끝줄(그 턴이 남긴 판 v<n> · 고친 쪽)을 쌓는다. 판 번호를 누르면 그 판을 본다.
 // 아래 요청칸 위에 아직 보내지 않은 핀이 쌓이고, 보내기 한 번에 글과 핀이 함께 간다.
 // 요청칸에서 @ 를 치면 쪽 고르기 창이 뜬다 — 「@3」 · 「@3-5」 로 고칠 쪽을 가리킨다 (mention.ts).
 // 「@v」 를 치면 판 고르기 창 — 「@v12」 로 지난 판을 참고하게 한다 (보낼 때 그 판 파일을 펼쳐 넘긴다 · versions.ts).
-// 요청칸은 「아직 보내지 않은 다음 턴」이다 — 같은 실 끝에 보내면 남을 판(v<n+1>)을 점선 마디로 찍는다.
 // 2026.11.24 : 요청칸 접기를 걷고 사이드바 전체를 접는다(Ctrl+B). 접히면 44px 등뼈 — 판 마디 · 도는 중 · 새 답 · 핀 수만 남아
 //              무대를 넓게 쓰면서도 Claude 가 일하는 중인지, 보낼 것이 쌓였는지는 잃지 않는다. 접어도 쓰던 글은 그대로다(숨길 뿐 내리지 않는다).
+// 2026.11.25 : 왼쪽 56px 실 여백 열과 요청칸 앞 다음 판(점선 v<n+1>)을 걷었다. 그 열 하나 때문에 머리 · 대화 · 요청칸이 모두 왼쪽이 비어
+//              좁은 사이드바 폭을 깎았다. 판 번호는 턴 끝줄의 알약으로 옮겼다.
 import { Fragment, useEffect, useMemo, useRef, useState } from "react";
 import { create } from "zustand";
 import { api, b64FromBytes } from "../lib/api";
@@ -65,7 +66,8 @@ export default function Talk() {
 			<div className="talk-body" hidden={folded}>
 				<header className="talk-head">
 					<b>{t("talk")}</b>
-					{turns.length > 0 && <span className="mono">{turns.length}{t("talkTurns")}{head ? ` · v${head.n}` : ""}</span>}
+					{/* 지금 판 번호는 제목 줄에 있다 — 여기서는 턴 수만 */}
+					{turns.length > 0 && <span className="mono">{turns.length}{t("talkTurns")}</span>}
 					<button className="talk-fold" onClick={() => useTalkFold.getState().set(true)} aria-expanded={true} title={`${t("talkFold")} (Ctrl+B)`} aria-label={t("talkFold")}>
 						<PanelIcon open />
 					</button>
@@ -125,7 +127,7 @@ function Spine() {
 					return (
 						<li key={x.id}>
 							<button className={"sp-node" + (on ? " on" : "")} onClick={() => { if (c) setPreview(c === head ? null : c); }}
-								title={`v${v.n} · ${x.request.split("\n")[0].slice(0, 60)}`}>{v.n}</button>
+								title={`v${v.n} · ${x.request.split("\n")[0].slice(0, 60)}`}>v{v.n}</button>
 						</li>
 					);
 				})}
@@ -187,31 +189,35 @@ function TurnView({ turn, head: isHead, onVersion }: { turn: Turn; head: boolean
 	const touched = files.map((f) => deck.slides.findIndex((s) => s.file === f) + 1).filter((n) => n > 0).sort((a, b) => a - b);
 	const others = files.filter((f) => f !== "deck.json" && !deck.slides.some((s) => s.file === f));
 	const detail = [...files, reads ? `read ×${reads}` : "", turn.cost != null ? `$${turn.cost.toFixed(3)}` : ""].filter(Boolean).join("  ");
+	const live = turn.status === "running";
+	const changed = touched.length > 0 || others.length > 0;
 	return (
 		<article className={"turn " + turn.status} onContextMenu={menu}>
-			{/* 실의 마디 — 판을 남긴 턴은 판 번호(지금 판은 채움), 도는 턴은 뛰는 점, 판 없이 끝난 턴(답만 · 멈춤)은 빈 점 */}
-			<div className="gutter">
-				{turn.status === "running" ? <span className="run" aria-label={t("working")} /> : turn.version ? <button className={"node" + (isHead ? " head" : "")} onClick={onVersion} title={`${turn.version.short}${turn.cost != null ? ` · $${turn.cost.toFixed(3)}` : ""}`}>v{turn.version.n}</button> : <span className="dot" aria-hidden />}
-			</div>
-			<div style={{ minWidth: 0 }}>
-				{turn.request && <div className="req"><Mentioned text={turn.request} turn={turn} /></div>}
-				{turn.pins.length > 0 && (
-					<div className="req-pins">
-						{turn.pins.map((p) => <div key={p.n}><i>{p.n}</i><span><span className="mono" style={{ fontSize: 11 }}>{p.slideNo}{t("slideN") === "쪽" ? "쪽" : ""} · </span>{p.text || "—"}</span></div>)}
-					</div>
-				)}
-				{(turn.reply || turn.status === "running") && <div className="reply">{turn.reply}</div>}
-				{turn.phase && <div className="meta">{turn.phase}</div>}
-				{turn.error && <div className="err">{turn.error}</div>}
-				{(touched.length > 0 || others.length > 0 || turn.status === "stopped") && (
-					<div className="touched" title={detail}>
-						{(touched.length > 0 || others.length > 0) && <span className="lbl">{t("changedSlides")}</span>}
-						{touched.map((no) => <button key={no} className="mention" onClick={() => setCurrent(no - 1)}>{no}{t("slideN") === "쪽" ? "쪽" : ""}</button>)}
-						{others.length > 0 && <span className="more">{others.some((f) => f.endsWith(".css")) ? t("styleFile") : `+${others.length}`}</span>}
-						{turn.status === "stopped" && <span className="more">{t("stop")}</span>}
-					</div>
-				)}
-			</div>
+			{/* 요청 — 내가 쓴 것은 옅은 칸에 담아 답과 가른다. 핀은 그 칸 안에 */}
+			{(turn.request || turn.pins.length > 0) && (
+				<div className="req">
+					{turn.request && <div className="req-text"><Mentioned text={turn.request} turn={turn} /></div>}
+					{turn.pins.length > 0 && (
+						<div className="req-pins">
+							{turn.pins.map((p) => <div key={p.n}><i>{p.n}</i><span><span style={{ fontSize: 11.5, color: "var(--faint)" }}>{p.slideNo}{t("slideN") === "쪽" ? "쪽" : ""} · </span>{p.text || "—"}</span></div>)}
+						</div>
+					)}
+				</div>
+			)}
+			{(turn.reply || live) && <div className="reply">{turn.reply}</div>}
+			{turn.error && <div className="err">{turn.error}</div>}
+			{/* 끝줄 — 이 턴이 남긴 판(지금 판은 채움) · 고친 쪽. 도는 중이면 뛰는 점과 지금 하는 일 */}
+			{(live || turn.version || changed || turn.status === "stopped" || turn.phase) && (
+				<div className="foot" title={detail}>
+					{live && <span className="run" aria-label={t("working")} />}
+					{turn.version && <button className={"node" + (isHead ? " head" : "")} onClick={onVersion} title={`${turn.version.short}${turn.cost != null ? ` · $${turn.cost.toFixed(3)}` : ""}`}>v{turn.version.n}</button>}
+					{turn.phase && <span className="phase">{turn.phase}</span>}
+					{changed && <span className="lbl">{t("changedSlides")}</span>}
+					{touched.map((no) => <button key={no} className="mention" onClick={() => setCurrent(no - 1)}>{no}{t("slideN") === "쪽" ? "쪽" : ""}</button>)}
+					{others.length > 0 && <span className="more">{others.some((f) => f.endsWith(".css")) ? t("styleFile") : `+${others.length}`}</span>}
+					{turn.status === "stopped" && <span className="more">{t("stopped")}</span>}
+				</div>
+			)}
 		</article>
 	);
 }
@@ -263,7 +269,6 @@ function Composer() {
 	const current = useDeck((s) => s.current);
 	const insertReq = useDeck((s) => s.insertReq);
 	const rev = useDeck((s) => s.rev);
-	const next = useDeck((s) => (s.versions[0]?.n ?? 0) + 1);
 	const [text, setText] = useState("");
 	// 쪽 목록 · 이어 보기에서 쪽을 끌어 요청칸 위에 올린 동안 — 놓으면 @쪽 이 들어간다
 	const [dropping, setDropping] = useState(false);
@@ -379,8 +384,6 @@ function Composer() {
 					))}
 				</div>
 			)}
-			{/* 실의 끝 마디 — 보내면 남을 판(점선). 도는 중이면 뛰는 점 */}
-			<div className="gutter">{running ? <span className="run" aria-label={t("working")} /> : <span className="next-v" title={t("nextVersion")}>v{next}</span>}</div>
 			<div className={"box" + (dropping ? " dropping" : "")} data-drop={t("dropMention")}
 				onDragOver={(e) => { if (!e.dataTransfer.types.includes(SLIDE_MIME)) return; e.preventDefault(); e.dataTransfer.dropEffect = "copy"; setDropping(true); }}
 				onDragLeave={(e) => { if (!e.currentTarget.contains(e.relatedTarget as Node)) setDropping(false); }}

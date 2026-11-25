@@ -158,7 +158,7 @@ export async function askClaude(dir: string, deck: Deck, names: string[], step: 
 	const urls = [...new Set((found.fonts || []).map((f) => f.url).filter((u) => /^https:\/\//.test(u)))];
 	const installed: string[] = [];
 	if (urls.length) {
-		step("글꼴 받아 까는 중");
+		step("글꼴 내려받아 설치하는 중");
 		for (const r of await api.fontInstall(urls)) {
 			if (r.error) reasons.push(`${r.url.split("/").pop()}: ${r.error}`);
 			for (const file of r.files) {

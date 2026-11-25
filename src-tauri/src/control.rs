@@ -90,14 +90,14 @@ fn handle(app: &AppHandle, line: &str) -> Value {
 		return json!({ "ok": true, "data": { "pid": std::process::id(), "version": app.package_info().version.to_string(), "enabled": on } });
 	}
 	if !on {
-		return json!({ "ok": false, "error": "앱의 「설정 › 바깥 연결 › 바깥 제어」가 꺼져 있다" });
+		return json!({ "ok": false, "error": "앱의 「설정 › Claude Code 연결 › 명령 받기」가 꺼져 있다" });
 	}
 	let started = chrono::Local::now();
 	let reply = forward(app, &ctl, cmd, &req["args"]);
-	// 상태 묻기는 CLI 가 저절로 부르는 것이라 기록에 넣지 않는다.
+	// 상태 묻기 · 바깥 작업 알림(touch)은 CLI 가 저절로 부르는 것이라 기록에 넣지 않는다.
 	// 새로 고침은 앱 없이 한 일(commit · restore)을 알리는 것이라 그 일 이름(why)으로 남긴다
 	let label = if cmd == "refresh" { req["args"]["why"].as_str().unwrap_or("") } else { cmd };
-	if cmd != "status" && !label.is_empty() {
+	if cmd != "status" && cmd != "touch" && !label.is_empty() {
 		let mut r = ctl.recent.lock().unwrap();
 		r.push(json!({
 			"at": started.format("%H:%M:%S").to_string(),

@@ -299,7 +299,7 @@ function Connect() {
 		<>
 			<Row k={t("remoteControl")}>
 				<Seg value={s.remote.enabled ? 1 : 0} options={[{ v: 1, label: t("remoteOn") }, { v: 0, label: t("remoteOff") }]} onChange={(v) => set((x) => ({ ...x, remote: { enabled: !!v } }))} />
-				<span className="note">{s.remote.enabled ? `127.0.0.1:${info.port}` : t("remoteOffNote")}</span>
+				<span className={"note" + (s.remote.enabled ? " mono" : "")}>{s.remote.enabled ? `127.0.0.1:${info.port}` : t("remoteOffNote")}</span>
 			</Row>
 			<Row k={t("skill")}>
 				<span className={"note" + (sk.current ? " ok" : "")} style={sk.installed && !sk.current ? { color: "var(--err)" } : undefined}>
@@ -310,7 +310,7 @@ function Connect() {
 			</Row>
 			{sk.installed && !sk.current && sk.linked && sk.linked !== sk.exe && (
 				<Row k="">
-					<span className="note" style={{ whiteSpace: "normal", wordBreak: "break-all" }} title={`${sk.linked} → ${sk.exe}`}>{sk.linked}<br />→ {sk.exe}</span>
+					<span className="note mono" style={{ whiteSpace: "normal", wordBreak: "break-all" }} title={`${sk.linked} → ${sk.exe}`}>{sk.linked}<br />→ {sk.exe}</span>
 				</Row>
 			)}
 			<Row k={t("howTo")}><span style={{ whiteSpace: "normal", lineHeight: 1.55 }}>{t("howToText")}</span></Row>
