@@ -570,7 +570,7 @@ export const useDeck = create<S>()((set, get) => ({
 			const r = await api.claudeRun({
 				turn: turn.id,
 				dir,
-				prompt: turnPrompt(text, notes, cur ? { id: cur.id, no: current + 1 } : null, attachments, mentions, vlines),
+				prompt: turnPrompt(text, notes, cur ? { id: cur.id, no: current + 1 } : null, attachments, mentions, vlines, deck),
 				system: systemPrompt(s, deck),
 				claudePath: s.claude.path,
 				model: s.claude.model,
