@@ -69,7 +69,7 @@ export interface Settings {
 	shared: SharedDeck[];
 }
 /** mine — 이 덱 주인에게 내 PC 의 Claude 를 쓰게 한다 (runner.rs). 사람이 덱 주인마다 켠다 */
-export interface SharedDeck { url: string; at: number; mine?: boolean }
+export interface SharedDeck { url: string; at: number; mine?: boolean; title?: string }
 
 export const SCALE: Record<Level, TypeStep> = {
 	display: { size: 64, weight: 700 },
@@ -144,7 +144,7 @@ const merge = (v: any): Settings => {
 		remote: { ...DEFAULTS.remote, ...(v?.remote || {}) },
 		collab: { ...DEFAULTS.collab, ...(v?.collab || {}) },
 		me: typeof v?.me === "string" ? v.me : "",
-		shared: Array.isArray(v?.shared) ? v.shared.filter((x: any) => typeof x?.url === "string" && /^https?:\/\//.test(x.url)).map((x: any) => ({ url: x.url, at: +x.at || 0, mine: !!x.mine })).slice(0, 12) : [],
+		shared: Array.isArray(v?.shared) ? v.shared.filter((x: any) => typeof x?.url === "string" && /^https?:\/\//.test(x.url)).map((x: any) => ({ url: x.url, at: +x.at || 0, mine: !!x.mine, title: typeof x.title === "string" ? x.title.slice(0, 120) : undefined })).slice(0, 12) : [],
 	};
 };
 

@@ -128,8 +128,9 @@ export default function Home() {
 							{s.shared.map((x) => (
 								<span className="shared-item" key={x.url}>
 									<button onClick={() => joinShared(x.url)} title={x.url}>
-										<b>{x.url.replace(/^https?:\/\//, "").replace(/\/$/, "")}</b>
-										<span className="dim">{new Date(x.at).toLocaleDateString()}</span>
+										{/* 덱 제목은 「내 Claude」가 붙었을 때 덱 주인이 알려 준다 — 모르면 덱 주인 PC 주소 */}
+										<b className={x.title ? "t" : ""}>{x.title || x.url.replace(/^https?:\/\//, "").replace(/\/$/, "")}</b>
+										<span className="dim">{x.title ? `${x.url.replace(/^https?:\/\//, "").replace(/\/$/, "")} · ` : ""}{new Date(x.at).toLocaleDateString()}</span>
 									</button>
 									<MineToggle url={x.url} on={!!x.mine} />
 									<button className="x" onClick={() => useSettings.getState().set((v) => ({ ...v, shared: v.shared.filter((y) => y.url !== x.url) }))} aria-label={t("delete")} title={t("sharedForget")}>×</button>

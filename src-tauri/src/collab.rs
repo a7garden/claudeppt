@@ -80,6 +80,8 @@ pub struct Hub {
 	remote_runs: Mutex<HashMap<String, RemoteRun>>,
 	/// 세션 기록을 마지막으로 이어 쓴 기기와 그때 기록 길이 — 같은 기기가 그 뒤 아무도 안 쓴 세션을 이으면 기록을 다시 보내지 않는다
 	transcript_at: Mutex<HashMap<String, (String, usize)>>,
+	/// 파일 지문 캐시 — 경로 → (크기, 고친 시각, 지문)
+	hashes: Mutex<HashMap<PathBuf, (u64, std::time::SystemTime, String)>>,
 }
 
 /// 호스트가 올린 상태. turns 는 따로 — 글자가 흐르는 동안 바뀐 턴만 오간다
@@ -140,12 +142,16 @@ struct DeviceView {
 	online: bool,
 }
 
-/// 요청을 보낸 기기 — auth 가 쿠키로 찾아 요청에 붙인다
+/// 요청을 보낸 기기 — auth 가 쿠키(또는 「내 Claude」 열쇠)로 찾아 요청에 붙인다. key 면 열쇠로 들어왔다
 #[derive(Clone)]
 struct Who {
 	device: String,
 	name: String,
+	key: bool,
 }
+
+/// 「내 Claude」 전용 열쇠를 싣는 머리글 (runner.rs)
+const RUNNER_KEY: &str = "x-cppt-runner";
 
 fn now() -> i64 {
 	chrono::Utc::now().timestamp_millis()
@@ -288,6 +294,7 @@ pub async fn collab_start(app: AppHandle) -> Res<Info> {
 		runners: Mutex::new(HashMap::new()),
 		remote_runs: Mutex::new(HashMap::new()),
 		transcript_at: Mutex::new(HashMap::new()),
+		hashes: Mutex::new(HashMap::new()),
 	});
 	let (stop_tx, stop_rx) = oneshot::channel::<()>();
 	let router = routes(h.clone());
@@ -493,6 +500,7 @@ fn routes(h: Arc<Hub>) -> Router {
 		.route("/_/runner", get(runner_ws))
 		.route("/_/runner/manifest", get(runner_manifest))
 		.route("/_/runner/file", get(runner_file))
+		.route("/_/runner/key", post(runner_key))
 		.route("/_/d/{key}/{*rest}", get(deck))
 		.route("/__rt.js", get(deck_rt))
 		.route("/j/{token}", get(join_page).post(join))
@@ -519,7 +527,12 @@ async fn auth(Ax(h): Ax<Arc<Hub>>, mut req: Request, next: Next) -> Response {
 	if (path == "/_/ws" || path == "/_/rpc" || path.starts_with("/_/runner")) && !same_origin(req.headers(), public.as_deref()) {
 		return StatusCode::FORBIDDEN.into_response();
 	}
-	let who = cookie_of(req.headers()).and_then(|c| h.book.lock().unwrap().device(&c, now())).map(|d| Who { device: d.id, name: d.name });
+	let mut who = cookie_of(req.headers()).and_then(|c| h.book.lock().unwrap().device(&c, now())).map(|d| Who { device: d.id, name: d.name, key: false });
+	// 「내 Claude」(runner.rs)는 전용 열쇠로도 붙는다 — /_/runner 밖에서는 받지 않는다(화면 · 의도에는 못 쓴다)
+	if who.is_none() && path.starts_with("/_/runner") {
+		let key = req.headers().get(RUNNER_KEY).and_then(|v| v.to_str().ok()).map(String::from);
+		who = key.and_then(|k| h.book.lock().unwrap().device_by_runner(&k, now())).map(|d| Who { device: d.id, name: d.name, key: true });
+	}
 	match who {
 		Some(w) => {
 			req.extensions_mut().insert(w);
@@ -889,7 +902,7 @@ pub fn files_changed(app: &AppHandle, paths: &[String]) {
 	let Some((_, dir)) = h.deck_dir() else { return };
 	let mut files = Map::new();
 	for p in paths.iter().filter(|p| mirrored(p)) {
-		let hash = std::fs::read(dir.join(p)).ok().map(|b| etag(&b).trim_matches('"').to_string());
+		let hash = hash_of(&h.hashes, &dir.join(p));
 		files.insert(p.clone(), hash.map(Value::from).unwrap_or(Value::Null));
 	}
 	if files.is_empty() {
@@ -901,9 +914,39 @@ pub fn files_changed(app: &AppHandle, paths: &[String]) {
 	}
 }
 
+/// 「내 Claude」 전용 열쇠를 받는다 — 기기 쿠키로 들어온 요청만(열쇠로 새 열쇠를 만들지 못하게). 만들 때마다 앞의 것은 무효
+async fn runner_key(Ax(h): Ax<Arc<Hub>>, axum::Extension(who): axum::Extension<Who>) -> Response {
+	if who.key {
+		return StatusCode::FORBIDDEN.into_response();
+	}
+	let key = h.book.lock().unwrap().runner_key(&who.device);
+	match key {
+		Some(k) => {
+			h.save();
+			axum::Json(json!({ "key": k })).into_response()
+		}
+		None => StatusCode::NOT_FOUND.into_response(),
+	}
+}
+
+/// 파일 내용 지문 — 크기 · 고친 시각이 그대로면 지난번 값을 쓴다. 가져온 PPTX 덱은 원본 쪽 그림이 많아 턴마다 다시 읽으면 늦다
+fn hash_of(cache: &Mutex<HashMap<PathBuf, (u64, std::time::SystemTime, String)>>, p: &Path) -> Option<String> {
+	let m = std::fs::metadata(p).ok()?;
+	let (len, at) = (m.len(), m.modified().ok()?);
+	if let Some((l, t, h)) = cache.lock().unwrap().get(p) {
+		if *l == len && *t == at {
+			return Some(h.clone());
+		}
+	}
+	let h = etag(&std::fs::read(p).ok()?).trim_matches('"').to_string();
+	cache.lock().unwrap().insert(p.to_path_buf(), (len, at, h.clone()));
+	Some(h)
+}
+
 /// 사본에 넣을 파일 목록과 내용 지문
 async fn runner_manifest(Ax(h): Ax<Arc<Hub>>) -> Response {
 	let Some((id, dir)) = h.deck_dir() else { return (StatusCode::NOT_FOUND, "덱이 열려 있지 않다").into_response() };
+	let h2 = h.clone();
 	let files = tokio::task::spawn_blocking(move || {
 		let mut out = Map::new();
 		let mut stack = vec![dir.clone()];
@@ -916,8 +959,8 @@ async fn runner_manifest(Ax(h): Ax<Arc<Hub>>) -> Response {
 						stack.push(p);
 					}
 				} else if mirrored(&rel) {
-					if let Ok(b) = std::fs::read(&p) {
-						out.insert(rel, Value::from(etag(&b).trim_matches('"').to_string()));
+					if let Some(x) = hash_of(&h2.hashes, &p) {
+						out.insert(rel, Value::from(x));
 					}
 				}
 			}
@@ -926,7 +969,9 @@ async fn runner_manifest(Ax(h): Ax<Arc<Hub>>) -> Response {
 	})
 	.await
 	.unwrap_or_default();
-	axum::Json(json!({ "id": id, "files": files })).into_response()
+	// 덱 제목 — 팀원 앱의 「공유 덱」 목록이 주소 대신 보인다
+	let title = h.shared.lock().unwrap().set.get("deck").and_then(|d| d["title"].as_str()).unwrap_or("").to_string();
+	axum::Json(json!({ "id": id, "title": title, "files": files })).into_response()
 }
 
 #[derive(serde::Deserialize)]
@@ -1010,6 +1055,15 @@ fn rewrite(line: &str, dir: &Path) -> String {
 	line.replace(DECK_MARK, &host.replace('\\', "\\\\")).replace(DECK_MARK_FWD, &host.replace('\\', "/"))
 }
 
+/// 팀원 PC 가 보낸 기록 뒷부분을 덱의 기록에 잇는다 — base 0 이면 통째(새 세션). 아니면 덱 기록의 길이 · 내용 지문(prefix)이
+/// 그 PC 가 이어 쓰기 시작한 앞부분과 같을 때만. 다르면 None — 섞인 기록으로 덮지 않는다
+fn join_transcript(have: &str, base: usize, prefix: Option<&str>, tail: &str) -> Option<String> {
+	if base == 0 {
+		return Some(tail.to_string());
+	}
+	(have.len() == base && prefix.is_none_or(|p| etag(have.as_bytes()).trim_matches('"') == p)).then(|| format!("{have}{tail}"))
+}
+
 fn on_runner_message(h: &Arc<Hub>, device: &str, text: &str) {
 	let Ok(m) = serde_json::from_str::<Value>(text) else { return };
 	let turn = m["turn"].as_str().unwrap_or("").to_string();
@@ -1042,10 +1096,15 @@ fn on_runner_message(h: &Arc<Hub>, device: &str, text: &str) {
 			if let (Some(sid), Some(tail)) = (m["sid"].as_str(), m["tail"].as_str()) {
 				let base = m["base"].as_u64().unwrap_or(0) as usize;
 				let have = crate::claude::saved_transcript(&dir, sid).unwrap_or_default();
-				let full = if base == 0 { Some(tail.to_string()) } else if have.len() == base { Some(have + tail) } else { None };
-				if let Some(full) = full {
-					crate::claude::save_transcript(&dir, sid, &full);
-					h.transcript_at.lock().unwrap().insert(sid.to_string(), (device.to_string(), full.len()));
+				match join_transcript(&have, base, m["prefix"].as_str(), tail) {
+					Some(full) => {
+						crate::claude::save_transcript(&dir, sid, &full);
+						h.transcript_at.lock().unwrap().insert(sid.to_string(), (device.to_string(), full.len()));
+					}
+					// 앞부분이 맞지 않는다 — 덮지 않는다. 다음에 그 PC 가 이을 때 기록 전체를 다시 보낸다
+					None => {
+						h.transcript_at.lock().unwrap().remove(sid);
+					}
 				}
 			}
 			if let Some(d) = h.remote_runs.lock().unwrap().get_mut(&turn).and_then(|r| r.done.take()) {
@@ -1191,6 +1250,23 @@ mod tests {
 		let out = rewrite(line, Path::new(r"D:\d\덱"));
 		assert_eq!(out, r#"{"file_path":"D:\\d\\덱\\slides\\s1.html","p":"D:/d/덱/theme.css"}"#);
 		assert!(serde_json::from_str::<Value>(&out).is_ok());
+	}
+
+	#[test]
+	fn transcript_tail_joins_only_onto_the_same_start() {
+		let have = "{\"a\":1}
+";
+		let p = etag(have.as_bytes()).trim_matches('"').to_string();
+		assert_eq!(join_transcript(have, have.len(), Some(&p), "{\"b\":2}
+").as_deref(), Some("{\"a\":1}
+{\"b\":2}
+"));
+		assert_eq!(join_transcript("", 0, None, "new
+").as_deref(), Some("new
+"), "새 세션은 통째");
+		assert!(join_transcript(have, 3, Some(&p), "x").is_none(), "길이가 다르면 잇지 않는다");
+		assert!(join_transcript("{\"z\":9}
+", have.len(), Some(&p), "x").is_none(), "같은 길이라도 내용이 다르면 잇지 않는다");
 	}
 
 	#[test]

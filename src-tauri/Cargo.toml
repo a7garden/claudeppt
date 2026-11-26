@@ -1,6 +1,6 @@
 [package]
 name = "claudeppt"
-version = "0.11.0"
+version = "0.12.0"
 description = "Claude 와 대화하며 웹으로 PPT 를 짓고 PPTX 로 내보내는 작업대"
 authors = ["seesun"]
 license = "MIT"
@@ -51,8 +51,9 @@ tokio-tungstenite = { version = "0.29", default-features = false, features = ["c
 futures-util = { version = "0.3", default-features = false, features = ["sink"] }
 
 [target.'cfg(windows)'.dependencies]
+# 「내 Claude」 열쇠를 Windows 보호 저장(DPAPI)으로 싼다 (runner.rs).
 # claude 를 앱이 쥔 job 에 넣어, 앱이 어떻게 꺼지든(닫기 · 업데이트 설치 · 강제 종료) 함께 끈다 (claude.rs). tauri 가 이미 쓰는 판이라 새로 받는 것은 없다
-windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Security", "Win32_System_JobObjects"] }
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Security", "Win32_System_JobObjects", "Win32_Security_Cryptography"] }
 
 [profile.release]
 codegen-units = 1

@@ -39,6 +39,9 @@ pub struct Device {
 	pub link: String,
 	pub created: i64,
 	pub seen: i64,
+	/// 「내 Claude」 전용 열쇠의 해시 (runner.rs) — 공유 덱 창 없이 앱을 켜자마자 붙는다. 기기를 내보내면 함께 사라진다
+	#[serde(default)]
+	pub runner: Option<String>,
 }
 
 #[derive(Debug, PartialEq)]
@@ -114,7 +117,7 @@ impl Book {
 		let secret = random();
 		// 개인 링크는 호스트가 정한 한 사람이라 휴대폰 · 노트북으로 두 번 들어와도 같은 이름이다
 		let name = link.name.clone().unwrap_or_else(|| self.unique(&clean_name(name), reserved));
-		let d = Device { id: uuid::Uuid::new_v4().simple().to_string()[..10].to_string(), hash: hash(&secret), name, link: link.id.clone(), created: now, seen: now };
+		let d = Device { id: uuid::Uuid::new_v4().simple().to_string()[..10].to_string(), hash: hash(&secret), name, link: link.id.clone(), created: now, seen: now, runner: None };
 		self.devices.push(d.clone());
 		(d, secret)
 	}
@@ -133,6 +136,22 @@ impl Book {
 	pub fn device(&mut self, secret: &str, now: i64) -> Option<Device> {
 		let h = hash(secret);
 		let d = self.devices.iter_mut().find(|d| same(&d.hash, &h))?;
+		d.seen = now;
+		Some(d.clone())
+	}
+
+	/// 그 기기의 「내 Claude」 열쇠를 새로 만든다 — 앞의 열쇠는 무효가 된다. 열쇠 글은 이때 한 번만 돌려주고 해시만 남긴다
+	pub fn runner_key(&mut self, device: &str) -> Option<String> {
+		let d = self.devices.iter_mut().find(|d| d.id == device)?;
+		let secret = random();
+		d.runner = Some(hash(&secret));
+		Some(secret)
+	}
+
+	/// 「내 Claude」 열쇠로 기기를 찾는다
+	pub fn device_by_runner(&mut self, secret: &str, now: i64) -> Option<Device> {
+		let h = hash(secret);
+		let d = self.devices.iter_mut().find(|d| d.runner.as_deref().is_some_and(|r| same(r, &h)))?;
 		d.seen = now;
 		Some(d.clone())
 	}
@@ -226,6 +245,24 @@ mod tests {
 		assert_eq!(b.join(&l, "지호", &["지호".into()], 0).0.name, "지호 2", "호스트 이름과도 겹치지 않는다");
 		let p = b.new_link(Some("민수".into()), None, 0);
 		assert_eq!(b.join(&p, "", &[], 0).0.name, "민수", "개인 링크는 정한 이름 그대로");
+	}
+
+	#[test]
+	fn runner_key_replaces_and_dies_with_device() {
+		let mut b = Book::default();
+		b.ensure_public(0);
+		let l = b.links[0].clone();
+		let (d, cookie) = b.join(&l, "민수", &[], 0);
+		let k1 = b.runner_key(&d.id).unwrap();
+		assert_eq!(b.device_by_runner(&k1, 1).unwrap().id, d.id);
+		assert!(b.device_by_runner(&cookie, 1).is_none(), "기기 쿠키는 「내 Claude」 열쇠가 아니다");
+		let k2 = b.runner_key(&d.id).unwrap();
+		assert!(b.device_by_runner(&k1, 1).is_none(), "새로 만들면 앞 열쇠는 무효");
+		assert!(b.device_by_runner(&k2, 1).is_some());
+		assert!(!serde_json::to_string(&b).unwrap().contains(&k2), "열쇠 글은 장부에 남지 않는다");
+		b.remove_device(&d.id);
+		assert!(b.device_by_runner(&k2, 1).is_none(), "내보내면 열쇠도 사라진다");
+		assert!(b.runner_key("없는 기기").is_none());
 	}
 
 	#[test]

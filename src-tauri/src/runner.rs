@@ -2,7 +2,9 @@
 //
 // 덱 주인 앱이 턴을 지휘하고(줄 세우기 · 대화 · 판), 여기는 claude 프로세스만 돌린다 (덱 주인 쪽: collab.rs 「팀원 PC 의 Claude」).
 //
-//   붙기      공유 덱 창(collab_join)이 받은 기기 쿠키로 덱 주인의 /_/runner 에 붙는다. 쿠키는 웹뷰에서 읽고 메모리에만 둔다
+//   붙기      처음에는 공유 덱 창(collab_join)이 받은 기기 쿠키로 덱 주인의 /_/runner 에 붙고, 그때 「내 Claude」 전용 열쇠를 받는다.
+//             열쇠는 Windows 보호 저장(DPAPI · 이 PC 의 이 사용자만 푼다)으로 싸서 앱 데이터 runner-keys.json 에 둔다 — 다음부터는 창 없이 앱을 켜자마자 붙는다.
+//             열쇠는 /_/runner 에만 쓰인다(화면 · 의도에는 못 쓴다). 덱 주인이 기기를 내보내면 함께 무효 — 그때는 지우고 쿠키로 돌아간다
 //   사본      앱 데이터 shared/<호스트>/<덱 id>/ 에 덱 파일을 받아 둔다. 처음 · 턴 시작마다 목록(manifest)을 맞추고, 그 사이에는 바뀐 경로만 받는다
 //   실행      지시(run)를 받으면 사본에서 claude 를 돌린다 — 격리 인자는 덱 주인 PC 와 같다(claude.rs execute). 작업 폴더 밖은 읽지도 쓰지도 못한다.
 //             claude 경로 · 모델 · 생각 깊이는 이 PC 의 설정을 쓴다 (사용량도 이 PC 의 계정)
@@ -26,6 +28,96 @@ use tokio::sync::mpsc;
 use tokio_tungstenite::tungstenite::{Message, client::IntoClientRequest, http::HeaderValue};
 
 const COOKIE: &str = "cppt_d";
+/// 「내 Claude」 열쇠를 싣는 머리글 (collab.rs RUNNER_KEY)
+const KEY_HEADER: &str = "x-cppt-runner";
+/// 덱 주인이 열쇠 · 쿠키를 거절했다 — 열쇠면 지우고 쿠키로 다시 해 본다
+const UNAUTHORIZED: &str = "덱 주인이 이 기기를 받지 않았다";
+
+/// 덱 주인에게 보이는 이 기기 — 기기 쿠키(공유 덱 창에서 읽음) 또는 「내 Claude」 열쇠
+#[derive(Clone)]
+enum Cred {
+	Cookie(String),
+	Key(String),
+}
+
+impl Cred {
+	fn header(&self) -> (&'static str, String) {
+		match self {
+			Cred::Cookie(c) => ("cookie", format!("{COOKIE}={c}")),
+			Cred::Key(k) => (KEY_HEADER, k.clone()),
+		}
+	}
+}
+
+// ── 열쇠 보관 — DPAPI 로 싸서 앱 데이터에 ──
+
+fn keys_file() -> PathBuf {
+	crate::control::data_dir().join("runner-keys.json")
+}
+
+fn keys() -> serde_json::Map<String, Value> {
+	std::fs::read_to_string(keys_file()).ok().and_then(|t| serde_json::from_str(&t).ok()).unwrap_or_default()
+}
+
+fn load_key(origin: &str) -> Option<String> {
+	let b = base64::engine::general_purpose::STANDARD.decode(keys().get(origin)?.as_str()?).ok()?;
+	String::from_utf8(dpapi::unprotect(&b)?).ok()
+}
+
+fn save_key(origin: &str, key: Option<&str>) {
+	let mut m = keys();
+	match key.and_then(|k| dpapi::protect(k.as_bytes())) {
+		Some(b) => { m.insert(origin.to_string(), Value::from(base64::engine::general_purpose::STANDARD.encode(b))); }
+		None => { m.remove(origin); }
+	}
+	if let Some(d) = keys_file().parent() {
+		let _ = std::fs::create_dir_all(d);
+	}
+	let _ = std::fs::write(keys_file(), serde_json::to_string_pretty(&m).unwrap_or_default());
+}
+
+/// Windows 보호 저장 — 이 PC 의 이 사용자로만 푼다. 파일이 새어도 다른 PC · 다른 사용자는 열쇠를 못 꺼낸다
+#[cfg(windows)]
+mod dpapi {
+	use windows_sys::Win32::Foundation::LocalFree;
+	use windows_sys::Win32::Security::Cryptography::{CRYPT_INTEGER_BLOB, CryptProtectData, CryptUnprotectData};
+
+	fn call(data: &[u8], protect: bool) -> Option<Vec<u8>> {
+		let input = CRYPT_INTEGER_BLOB { cbData: data.len() as u32, pbData: data.as_ptr() as *mut u8 };
+		let mut out = CRYPT_INTEGER_BLOB { cbData: 0, pbData: std::ptr::null_mut() };
+		// 1 = CRYPTPROTECT_UI_FORBIDDEN — 묻는 창을 띄우지 않는다
+		let ok = unsafe {
+			if protect {
+				CryptProtectData(&input, std::ptr::null(), std::ptr::null(), std::ptr::null(), std::ptr::null(), 1, &mut out)
+			} else {
+				CryptUnprotectData(&input, std::ptr::null_mut(), std::ptr::null(), std::ptr::null(), std::ptr::null(), 1, &mut out)
+			}
+		};
+		if ok == 0 || out.pbData.is_null() {
+			return None;
+		}
+		let v = unsafe { std::slice::from_raw_parts(out.pbData, out.cbData as usize) }.to_vec();
+		unsafe { LocalFree(out.pbData as _) };
+		Some(v)
+	}
+	pub fn protect(data: &[u8]) -> Option<Vec<u8>> {
+		call(data, true)
+	}
+	pub fn unprotect(data: &[u8]) -> Option<Vec<u8>> {
+		call(data, false)
+	}
+}
+
+/// Windows 밖에서는 남기지 않는다 (이 앱은 Windows 용이다 — 시험 빌드만)
+#[cfg(not(windows))]
+mod dpapi {
+	pub fn protect(_: &[u8]) -> Option<Vec<u8>> {
+		None
+	}
+	pub fn unprotect(_: &[u8]) -> Option<Vec<u8>> {
+		None
+	}
+}
 
 #[derive(Default)]
 pub struct Runners {
@@ -43,6 +135,8 @@ pub struct Status {
 	/// waiting — 공유 덱 창에서 들어가기를 기다린다 · connected — 붙었다 · running — 턴을 돌린다 · error — 다시 붙는 중
 	state: &'static str,
 	detail: String,
+	/// 덱 주인이 연 덱의 제목 — 처음 화면 「공유 덱」 목록에 주소 대신 보인다
+	title: String,
 }
 
 fn set(app: &AppHandle, st: &Arc<Mutex<Status>>, state: &'static str, detail: impl Into<String>) {
@@ -64,7 +158,7 @@ pub fn runner_start(app: AppHandle, origin: String) -> Res<()> {
 		return Ok(());
 	}
 	let (stop, rx) = tokio::sync::watch::channel(false);
-	let status = Arc::new(Mutex::new(Status { origin: origin.clone(), state: "waiting", detail: String::new() }));
+	let status = Arc::new(Mutex::new(Status { origin: origin.clone(), state: "waiting", detail: String::new(), title: String::new() }));
 	r.list.lock().unwrap().insert(origin.clone(), Handle { stop, status: status.clone() });
 	let app2 = app.clone();
 	tauri::async_runtime::spawn(async move { keep(app2, origin, status, rx).await });
@@ -76,7 +170,7 @@ pub fn runner_stop(app: AppHandle, origin: String) {
 	let origin = tauri::Url::parse(origin.trim()).map(|u| u.origin().ascii_serialization()).unwrap_or(origin);
 	if let Some(h) = app.state::<Runners>().list.lock().unwrap().remove(&origin) {
 		let _ = h.stop.send(true);
-		let _ = app.emit("runner-status", Status { origin, state: "off", detail: String::new() });
+		let _ = app.emit("runner-status", Status { origin, state: "off", detail: String::new(), title: String::new() });
 	}
 }
 
@@ -92,25 +186,26 @@ fn cookie(app: &AppHandle, origin: &str) -> Option<String> {
 	w.cookies_for_url(url).ok()?.into_iter().find(|c| c.name() == COOKIE).map(|c| c.value().to_string())
 }
 
-/// 끌 때까지 붙어 있는다 — 끊기면 다시 붙는다
+/// 끌 때까지 붙어 있는다 — 끊기면 다시 붙는다. 남겨 둔 열쇠가 있으면 그것으로, 없으면 공유 덱 창의 쿠키로
 async fn keep(app: AppHandle, origin: String, status: Arc<Mutex<Status>>, mut stop: tokio::sync::watch::Receiver<bool>) {
-	let mut secret: Option<String> = None;
 	let mut wait = 1u64;
 	while !*stop.borrow() {
-		if let Some(c) = cookie(&app, &origin) {
-			secret = Some(c);
-		}
-		let Some(sec) = secret.clone() else {
+		let cred = load_key(&origin).map(Cred::Key).or_else(|| cookie(&app, &origin).map(Cred::Cookie));
+		let Some(cred) = cred else {
 			set(&app, &status, "waiting", "");
 			tokio::select! { _ = tokio::time::sleep(Duration::from_secs(2)) => {}, _ = stop.changed() => {} }
 			continue;
 		};
-		match session(&app, &origin, &sec, &status, &mut stop).await {
+		match session(&app, &origin, &cred, &status, &mut stop).await {
 			Ok(()) => wait = 1,
 			Err(e) => {
+				// 열쇠를 받지 않는다(기기를 내보냄 · 덱 주인이 장부를 지움) — 지우고 바로 쿠키로 다시 해 본다
+				if e == UNAUTHORIZED && matches!(cred, Cred::Key(_)) {
+					save_key(&origin, None);
+					wait = 1;
+					continue;
+				}
 				set(&app, &status, "error", e);
-				// 쿠키가 바뀌었을 수 있다(다시 들어옴) — 다음에는 창에서 다시 읽는다
-				secret = None;
 			}
 		}
 		tokio::select! { _ = tokio::time::sleep(Duration::from_secs(wait)) => {}, _ = stop.changed() => {} }
@@ -122,14 +217,29 @@ async fn keep(app: AppHandle, origin: String, status: Arc<Mutex<Status>>, mut st
 #[derive(Clone)]
 struct Host {
 	origin: String,
-	secret: String,
+	cred: Cred,
 	http: reqwest::Client,
 }
 
 impl Host {
 	async fn get(&self, path: &str) -> Res<reqwest::Response> {
-		let r = self.http.get(format!("{}{path}", self.origin)).header("cookie", format!("{COOKIE}={}", self.secret)).header("origin", &self.origin).send().await.map_err(err)?;
+		let (k, v) = self.cred.header();
+		let r = self.http.get(format!("{}{path}", self.origin)).header(k, v).header("origin", &self.origin).send().await.map_err(err)?;
 		Ok(r)
+	}
+
+	/// 「내 Claude」 열쇠를 받아 남긴다 — 쿠키로 붙었을 때만 (열쇠로는 새 열쇠를 못 받는다)
+	async fn take_key(&self) {
+		let Cred::Cookie(_) = &self.cred else { return };
+		let (k, v) = self.cred.header();
+		let r = self.http.post(format!("{}/_/runner/key", self.origin)).header(k, v).header("origin", &self.origin).send().await;
+		if let Ok(r) = r {
+			if let Ok(j) = r.json::<Value>().await {
+				if let Some(key) = j["key"].as_str() {
+					save_key(&self.origin, Some(key));
+				}
+			}
+		}
 	}
 }
 
@@ -139,6 +249,8 @@ struct Mirror {
 	id: String,
 	dir: PathBuf,
 	known: HashMap<String, String>,
+	/// 덱 제목 (덱 주인이 목록에 실어 준다)
+	title: String,
 }
 
 fn fnv(b: &[u8]) -> String {
@@ -159,6 +271,7 @@ impl Mirror {
 	/// 목록을 받아 다른 파일만 받고, 덱 주인에게 없는 파일은 지운다
 	async fn sync(&mut self, host: &Host) -> Res<()> {
 		let m: Value = host.get("/_/runner/manifest").await?.error_for_status().map_err(err)?.json().await.map_err(err)?;
+		self.title = m["title"].as_str().unwrap_or("").to_string();
 		let id = m["id"].as_str().unwrap_or("deck").chars().filter(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '_').collect::<String>();
 		if id != self.id {
 			self.id = id.clone();
@@ -287,19 +400,26 @@ fn walk(root: &Path) -> Vec<String> {
 }
 
 /// 붙어 있는 한 번 — 끊기면 Err 로 돌아가 다시 붙는다
-async fn session(app: &AppHandle, origin: &str, secret: &str, status: &Arc<Mutex<Status>>, stop: &mut tokio::sync::watch::Receiver<bool>) -> Res<()> {
-	let host = Host { origin: origin.to_string(), secret: secret.to_string(), http: reqwest::Client::builder().timeout(Duration::from_secs(60)).build().map_err(err)? };
+async fn session(app: &AppHandle, origin: &str, cred: &Cred, status: &Arc<Mutex<Status>>, stop: &mut tokio::sync::watch::Receiver<bool>) -> Res<()> {
+	let host = Host { origin: origin.to_string(), cred: cred.clone(), http: reqwest::Client::builder().timeout(Duration::from_secs(60)).build().map_err(err)? };
 	let ws_url = format!("{}/_/runner", origin.replacen("http", "ws", 1));
 	let mut req = ws_url.into_client_request().map_err(err)?;
-	req.headers_mut().insert("cookie", HeaderValue::from_str(&format!("{COOKIE}={secret}")).map_err(err)?);
+	let (k, v) = cred.header();
+	req.headers_mut().insert(k, HeaderValue::from_str(&v).map_err(err)?);
 	req.headers_mut().insert("origin", HeaderValue::from_str(origin).map_err(err)?);
-	let (ws, _) = tokio_tungstenite::connect_async(req).await.map_err(|e| format!("덱 주인에게 붙지 못했다: {e}"))?;
+	let (ws, _) = tokio_tungstenite::connect_async(req).await.map_err(|e| match e {
+		tokio_tungstenite::tungstenite::Error::Http(r) if r.status() == 401 || r.status() == 403 => UNAUTHORIZED.to_string(),
+		e => format!("덱 주인에게 붙지 못했다: {e}"),
+	})?;
 	let (mut sink, mut stream) = ws.split();
+	// 처음 붙었으면(쿠키) 열쇠를 받아 둔다 — 다음에는 공유 덱 창 없이 붙는다
+	host.take_key().await;
 
 	let key = crate::collab::join_label(origin);
-	let mirror = Arc::new(tokio::sync::Mutex::new(Mirror { root: crate::control::data_dir().join("shared").join(&key), id: String::new(), dir: PathBuf::new(), known: HashMap::new() }));
+	let mirror = Arc::new(tokio::sync::Mutex::new(Mirror { root: crate::control::data_dir().join("shared").join(&key), id: String::new(), dir: PathBuf::new(), known: HashMap::new(), title: String::new() }));
 	// 미리 받아 둔다 — 덱 주인이 아직 덱을 열지 않았으면 못 받아도 붙어 있는다(턴을 받을 때 다시 맞춘다)
 	let _ = mirror.lock().await.sync(&host).await;
+	status.lock().unwrap().title = mirror.lock().await.title.clone();
 	let (out, mut outbox) = mpsc::unbounded_channel::<String>();
 	set(app, status, "connected", "");
 
@@ -376,21 +496,30 @@ async fn session(app: &AppHandle, origin: &str, secret: &str, status: &Arc<Mutex
 }
 
 /// 턴 하나 — 사본을 맞추고, 이어 쓸 기록을 놓고, 이 PC 의 claude 로 돌린다
+/// 끝난 기록에서 보낼 것 — (base, 앞부분 지문, 뒷부분). 앞부분이 덱 주인이 가진 길이로 끊기면 뒷부분만, 아니면(새 세션 · 기록을 못 이음) 통째로
+fn split_transcript(text: Option<String>, base: usize) -> (usize, Option<String>, Option<String>) {
+	match text {
+		Some(t) if base > 0 && t.len() >= base && t.is_char_boundary(base) => (base, Some(fnv(t[..base].as_bytes())), Some(t[base..].to_string())),
+		Some(t) => (0, None, Some(t)),
+		None => (0, None, None),
+	}
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn run(app: AppHandle, host: Host, mirror: Arc<tokio::sync::Mutex<Mirror>>, out: mpsc::UnboundedSender<String>, pids: Arc<Mutex<HashMap<String, u32>>>, cancel: Arc<Mutex<std::collections::HashSet<String>>>, status: Arc<Mutex<Status>>, v: Value) {
 	let turn = v["turn"].as_str().unwrap_or("").to_string();
 	// base — 덱 주인이 가진 기록 길이. 그 뒤에 늘어난 것(tail)만 보낸다
-	let exit = |turn: &str, code: i64, stderr: String, sid: Option<String>, base: usize, tail: Option<String>| json!({ "t": "exit", "turn": turn, "code": code, "stderr": stderr, "sid": sid, "base": base, "tail": tail }).to_string();
+	let exit = |turn: &str, code: i64, stderr: String, sid: Option<String>, (base, prefix, tail): (usize, Option<String>, Option<String>)| json!({ "t": "exit", "turn": turn, "code": code, "stderr": stderr, "sid": sid, "base": base, "prefix": prefix, "tail": tail }).to_string();
 	let dir = {
 		let mut m = mirror.lock().await;
 		if let Err(e) = m.sync(&host).await {
-			let _ = out.send(exit(&turn, -1, format!("덱을 받지 못했다: {e}"), None, 0, None));
+			let _ = out.send(exit(&turn, -1, format!("덱을 받지 못했다: {e}"), None, (0, None, None)));
 			return;
 		}
 		m.dir.clone()
 	};
 	if cancel.lock().unwrap().remove(&turn) {
-		let _ = out.send(exit(&turn, -1, String::new(), None, 0, None));
+		let _ = out.send(exit(&turn, -1, String::new(), None, (0, None, None)));
 		return;
 	}
 	let resume = v["resume"].as_str().filter(|s| crate::claude::valid_sid(s)).map(String::from);
@@ -405,7 +534,7 @@ async fn run(app: AppHandle, host: Host, mirror: Arc<tokio::sync::Mutex<Mirror>>
 	let s = crate::project::settings_load(app.clone()).unwrap_or(Value::Null);
 	let c = &s["claude"];
 	let Some(exe) = crate::claude::resolve(c["path"].as_str().unwrap_or("")) else {
-		let _ = out.send(exit(&turn, -1, "이 PC 에서 claude 실행 파일을 찾지 못했다. 설정 › Claude 에서 경로를 준다".into(), None, 0, None));
+		let _ = out.send(exit(&turn, -1, "이 PC 에서 claude 실행 파일을 찾지 못했다. 설정 › Claude 에서 경로를 준다".into(), None, (0, None, None)));
 		return;
 	};
 	set(&app, &status, "running", "");
@@ -460,15 +589,10 @@ async fn run(app: AppHandle, host: Host, mirror: Arc<tokio::sync::Mutex<Mirror>>
 		Ok(e) => {
 			// 늘어난 뒷부분만 — 앞부분이 덱 주인이 가진 것과 같은 길이로 이어질 때. 아니면(새 세션 · 기록을 못 이음) 통째로
 			let text = e.sid.as_deref().and_then(|sid| crate::claude::transcript_text(&dir, sid));
-			let (base, tail) = match text {
-				Some(t) if base > 0 && t.len() >= base && t.is_char_boundary(base) => (base, Some(t[base..].to_string())),
-				Some(t) => (0, Some(t)),
-				None => (0, None),
-			};
-			let _ = out.send(exit(&turn, e.code as i64, e.stderr, e.sid, base, tail));
+			let _ = out.send(exit(&turn, e.code as i64, e.stderr, e.sid, split_transcript(text, base)));
 		}
 		Err(e) => {
-			let _ = out.send(exit(&turn, -1, e, None, 0, None));
+			let _ = out.send(exit(&turn, -1, e, None, (0, None, None)));
 		}
 	}
 }
@@ -484,7 +608,7 @@ mod tests {
 		std::fs::create_dir_all(d.join("slides")).unwrap();
 		std::fs::create_dir_all(d.join(".claudeppt/run")).unwrap();
 		std::fs::write(d.join("slides/s1.html"), "a").unwrap();
-		let mut m = Mirror { root: d.clone(), id: "x".into(), dir: d.clone(), known: HashMap::from([("slides/s1.html".to_string(), fnv(b"a"))]) };
+		let mut m = Mirror { root: d.clone(), id: "x".into(), dir: d.clone(), known: HashMap::from([("slides/s1.html".to_string(), fnv(b"a"))]), title: String::new() };
 		assert!(m.written(false).is_empty(), "받은 그대로면 보내지 않는다");
 		std::fs::write(d.join("slides/s1.html"), "b").unwrap();
 		std::fs::write(d.join("slides/s2.html"), "new").unwrap();
@@ -495,6 +619,119 @@ mod tests {
 		assert_eq!(w, ["slides/s1.html", "slides/s2.html"], "앱 상태 · 실행 자리는 보내지 않는다");
 		assert!(m.written(false).is_empty(), "한 번 보낸 것은 다시 보내지 않는다");
 		let _ = std::fs::remove_dir_all(&d);
+	}
+
+	#[test]
+	fn transcript_goes_back_as_tail_when_it_continues() {
+		assert_eq!(split_transcript(Some("abc\ndef\n".into()), 4), (4, Some(fnv(b"abc\n")), Some("def\n".into())));
+		assert_eq!(split_transcript(Some("new\n".into()), 0), (0, None, Some("new\n".into())), "새 세션은 통째");
+		assert_eq!(split_transcript(Some("ab".into()), 5), (0, None, Some("ab".into())), "받은 것보다 짧으면(다른 기록) 통째");
+		assert_eq!(split_transcript(Some("가나".into()), 1), (0, None, Some("가나".into())), "글자 가운데서 끊지 않는다");
+		assert_eq!(split_transcript(None, 3), (0, None, None));
+	}
+
+	/// 덱 주인 흉내 — collab.rs 의 /_/runner/manifest · file 과 같은 꼴로 답하고, 열쇠 머리글을 본다. 파일 요청 수를 센다
+	async fn fake_host(dir: PathBuf, gets: Arc<std::sync::atomic::AtomicUsize>) -> String {
+		use axum::extract::Query;
+		use axum::http::{HeaderMap, StatusCode};
+		use axum::response::IntoResponse;
+		let ok = |h: &HeaderMap| h.get(KEY_HEADER).and_then(|v| v.to_str().ok()) == Some("k") && h.get("origin").is_some();
+		let d1 = dir.clone();
+		let manifest = move |h: HeaderMap| {
+			let d = d1.clone();
+			async move {
+				if !ok(&h) {
+					return StatusCode::UNAUTHORIZED.into_response();
+				}
+				let files: serde_json::Map<String, Value> = walk(&d).into_iter().map(|r| { let b = std::fs::read(d.join(&r)).unwrap(); (r, Value::from(fnv(&b))) }).collect();
+				axum::Json(json!({ "id": "d1", "files": files })).into_response()
+			}
+		};
+		let file = move |h: HeaderMap, Query(q): Query<HashMap<String, String>>| {
+			let (d, gets) = (dir.clone(), gets.clone());
+			async move {
+				if !ok(&h) {
+					return StatusCode::UNAUTHORIZED.into_response();
+				}
+				gets.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+				match std::fs::read(d.join(&q["path"])) {
+					Ok(b) => b.into_response(),
+					Err(_) => StatusCode::NOT_FOUND.into_response(),
+				}
+			}
+		};
+		let app = axum::Router::new().route("/_/runner/manifest", axum::routing::get(manifest)).route("/_/runner/file", axum::routing::get(file));
+		let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+		let at = format!("http://{}", l.local_addr().unwrap());
+		tokio::spawn(async move { axum::serve(l, app).await.unwrap() });
+		at
+	}
+
+	#[tokio::test]
+	async fn mirror_follows_the_host_and_keeps_unsent_writes() {
+		use std::sync::atomic::Ordering::SeqCst;
+		let t = std::env::temp_dir().join(format!("cppt-mirror-{}", std::process::id()));
+		let _ = std::fs::remove_dir_all(&t);
+		let (hd, md) = (t.join("host"), t.join("mirror"));
+		for (r, c) in [("slides/s1.html", "one"), ("theme.css", "css"), (".claudeppt/attach/a.png", "img")] {
+			std::fs::create_dir_all(hd.join(r).parent().unwrap()).unwrap();
+			std::fs::write(hd.join(r), c).unwrap();
+		}
+		let gets = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+		let origin = fake_host(hd.clone(), gets.clone()).await;
+		let host = Host { origin: origin.clone(), cred: Cred::Key("k".into()), http: reqwest::Client::new() };
+		let mut m = Mirror { root: md.clone(), id: String::new(), dir: PathBuf::new(), known: HashMap::new(), title: String::new() };
+
+		// 처음 — 모두 받는다. 덱 id 폴더 아래에
+		m.sync(&host).await.unwrap();
+		assert_eq!(m.dir, md.join("d1"));
+		assert_eq!(std::fs::read_to_string(m.dir.join("slides/s1.html")).unwrap(), "one");
+		assert_eq!(std::fs::read_to_string(m.dir.join(".claudeppt/attach/a.png")).unwrap(), "img");
+		assert_eq!(gets.load(SeqCst), 3);
+
+		// 다시 맞춰도 같은 파일은 받지 않고, 덱 주인에게 없는 파일은 지운다
+		std::fs::write(m.dir.join("slides/old.html"), "x").unwrap();
+		m.sync(&host).await.unwrap();
+		assert_eq!(gets.load(SeqCst), 3);
+		assert!(!m.dir.join("slides/old.html").exists());
+
+		// 「바뀌었다」 알림 — 지문이 같으면(방금 이 PC 가 보낸 파일) 받지 않는다
+		m.changed(&host, "slides/s1.html", Some(&fnv(b"one"))).await.unwrap();
+		assert_eq!(gets.load(SeqCst), 3);
+		// 다르면 받는다
+		std::fs::write(hd.join("slides/s1.html"), "two").unwrap();
+		m.changed(&host, "slides/s1.html", Some(&fnv(b"two"))).await.unwrap();
+		assert_eq!(std::fs::read_to_string(m.dir.join("slides/s1.html")).unwrap(), "two");
+		assert_eq!(gets.load(SeqCst), 4);
+
+		// Claude 가 쓰고 아직 보내지 않은 파일은 덮지 않는다 — 곧 put 으로 나간다
+		std::fs::write(m.dir.join("slides/s1.html"), "claude").unwrap();
+		std::fs::write(hd.join("slides/s1.html"), "three").unwrap();
+		m.changed(&host, "slides/s1.html", Some(&fnv(b"three"))).await.unwrap();
+		assert_eq!(std::fs::read_to_string(m.dir.join("slides/s1.html")).unwrap(), "claude");
+		assert_eq!(m.written(false).into_iter().map(|(r, _)| r).collect::<Vec<_>>(), ["slides/s1.html"]);
+
+		// 덱 주인에게서 없어진 파일
+		m.changed(&host, "theme.css", None).await.unwrap();
+		assert!(!m.dir.join("theme.css").exists());
+
+		// 사본 밖을 가리키는 경로는 무시한다
+		m.changed(&host, "../escape.txt", Some("x")).await.unwrap();
+		assert!(!md.join("escape.txt").exists());
+
+		// 열쇠가 틀리면 받지 못한다
+		let bad = Host { origin, cred: Cred::Key("wrong".into()), http: reqwest::Client::new() };
+		assert!(m.sync(&bad).await.is_err());
+		let _ = std::fs::remove_dir_all(&t);
+	}
+
+	#[cfg(windows)]
+	#[test]
+	fn dpapi_round_trip() {
+		let sealed = dpapi::protect(b"secret-key").unwrap();
+		assert_ne!(sealed, b"secret-key", "싸지 않은 글이 그대로 남지 않는다");
+		assert_eq!(dpapi::unprotect(&sealed).unwrap(), b"secret-key");
+		assert!(dpapi::unprotect(b"not sealed").is_none());
 	}
 
 	#[test]

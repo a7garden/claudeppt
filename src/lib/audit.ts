@@ -40,7 +40,7 @@ export const readAuditNote = (dir: string) => api.readText(dir, NOTE).then((t) =
 export const writeAuditNote = (dir: string, text: string) => api.writeText(dir, NOTE, text.trim() + "\n");
 
 /** 런타임이 주는 요소 하나 (rt.js auditNodes) */
-interface Node {
+export interface Node {
 	path: number[] | null; tag: string; cls: string;
 	x: number; y: number; w: number; h: number;
 	text: string; tbox: { x: number; y: number; w: number; h: number } | null;
@@ -96,7 +96,7 @@ const list = (a: (string | number)[], n = 4) => a.slice(0, n).join(" · ") + (a.
 const boxOf = (ns: Node[], text = false): Box[] => ns.slice(0, 24).map((n) => (text && n.tbox ? n.tbox : { x: n.x, y: n.y, w: n.w, h: n.h }));
 
 /** 쪽 하나를 잰다 — 쪽 제목 자리는 덱 전체를 본 뒤 audit 끝에서 따로 짚는다. margins 는 여백을 잴 값(없으면 재지 않는다) */
-function auditSlide(nodes: Node[], W: number, H: number, tpl: Template | null, margins: Margins | null): Finding[] {
+export function auditSlide(nodes: Node[], W: number, H: number, tpl: Template | null, margins: Margins | null): Finding[] {
 	const out: Finding[] = [];
 	const add = (rule: string, kind: AuditKind, msg: string, fix: string, ns: Node[] = [], text = false) => out.push({ rule, kind, msg, fix, boxes: boxOf(ns, text) });
 	const texts = nodes.filter((n) => n.text);
@@ -159,8 +159,11 @@ function auditSlide(nodes: Node[], W: number, H: number, tpl: Template | null, m
 	const sizes = uniq(texts.map((n) => Math.round(n.size)));
 	if (own && sizes.length > 4) add("levels", "template", say("auditLevels", { n: sizes.length }), `${sizes.length} different font sizes (${sizes.sort((a, b) => b - a).join(", ")}px); use at most 4 levels.`);
 
-	// 넘침 — 쪽은 overflow:hidden 이라 넘친 글은 잘려 보이지 않는다
-	const over = nodes.filter((n) => n.path?.length && (n.text || n.fill) && (n.x < -2 || n.y < -2 || n.x + n.w > W + 2 || n.y + n.h > H + 2));
+	// 넘침 — 쪽은 overflow:hidden 이라 넘친 글은 잘려 보이지 않는다. 쪽 가장자리에 걸려 잘린 것만 짚는다.
+	// 2026.11.26 : 쪽 완전히 바깥에 놓인 요소는 화면에도 PowerPoint 에도 안 보여 그대로 둔다 — 가져온 PPTX 의 마스터 요소(쪽 왼쪽 바깥 쪽 번호 자리 등)가
+	//              「외부보고」 59쪽 중 58쪽에서 걸려, 정작 잘린 글이 묻혔다
+	const cut = (n: Node) => n.x < W && n.y < H && n.x + n.w > 0 && n.y + n.h > 0 && (n.x < -2 || n.y < -2 || n.x + n.w > W + 2 || n.y + n.h > H + 2);
+	const over = nodes.filter((n) => n.path?.length && (n.text || n.fill) && cut(n));
 	if (over.length) add("overflow", "layout", say("auditOverflow", { n: over.length }), `${over.length} elements run past the slide edge: ${over.slice(0, 3).map((n) => (n.text ? quote(n.text) : `<${n.tag}>`) + ` at x${n.x} y${n.y} ${n.w}×${n.h}`).join(", ")}.`, over);
 
 	// ── 표현 ──

@@ -26,6 +26,8 @@ jobs:
       - run: npm ci
       # Tauri 는 컴파일할 때 프런트엔드 빌드 결과를 읽으므로 먼저 빌드한다.
       - run: npm run build
+      # 화면 쪽 순수 함수 시험 (vitest) — 쪽 설정 · 점검 요청 · 덱 여백 규칙
+      - run: npm test
       - run: cargo check
         working-directory: src-tauri
       - run: cargo test --lib
