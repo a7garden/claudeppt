@@ -5,13 +5,14 @@
 //   Rail          쪽 목록 — 끌어서 순서 바꾸기 · Delete 로 빼기 · 쪽 사이 + 로 빈 쪽 · 판 비교 중이면 바뀐 쪽 · 새 쪽 표시
 //                 담당 — 맡은 담당 번호를 그 색으로, 담당이 방금 고쳤거나 고치는 중인 쪽은 미리보기 테두리를 그 색으로
 //   Stage         무대 — 도구(고르기 · 펜 · 화살표 · 상자) · 직접 편집 메시지 받기 · 지난 판 미리 보기 · 휠로 쪽 넘기기 · 판 비교 (VersionLens.tsx)
+//                 서식 띠(Ribbon.tsx) — 접어 두었다가 「서식」(F)으로 펼친다. 띠의 명령은 슬라이드 창이 받아 고친 뒤 편집 메시지로 돌려보낸다
 //   MarkLayer     표시 층 — 그어 놓은 표시를 그리고, 긋는 도구일 때 긋기를 받는다 · StageTools 도구 띠
 //   Flow          이어 보기 — 모든 쪽을 세로로 늘어놓고 스크롤로 넘긴다. 가운데 온 쪽이 지금 쪽이 된다
 //   우클릭 메뉴   slideItems(쪽 목록 · 이어 보기) · Stage 의 무대 메뉴 — 메뉴 틀은 ContextMenu.tsx
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { deckUrl } from "../lib/api";
 import { type Deck } from "../lib/deck";
-import { ask, onFrame } from "../lib/frames";
+import { ask, onFrame, tell } from "../lib/frames";
 import { useT } from "../lib/i18n";
 import { anchor, bbox, MARK, type Shape, shapePath, tiny, type Tool } from "../lib/markup";
 import { busy, TOUCH_MS } from "../lib/seats";
@@ -19,6 +20,7 @@ import { type Pin, useDeck } from "../lib/store";
 import { type MenuItem, openMenu } from "./ContextMenu";
 import { VersionBar, VersionLens } from "./VersionLens";
 import { seatColor, useTick } from "./Seats";
+import { Ribbon, type SelInfo, useRibbon } from "./Ribbon";
 import { SketchBoard } from "./Sketch";
 import Talk, { useTalkFold } from "./Talk";
 
@@ -56,7 +58,7 @@ export function SlideFrame({ file, rev, width, height, w, h, onWin, revHash }: {
  *  iframe 하나를 바로 갈아 끼우면 새 문서가 그려지기 전의 빈 흰 바탕이 매번 번쩍인다.
  *  읽는 중에 또 넘기면 읽던 것은 버리고 마지막 쪽만 읽는다 — 보이는 것은 끝까지 옛 쪽이다 */
 type Layer = { k: string; file: string; rev: number; revHash?: string };
-function SwapFrame({ file, rev, revHash, onWin, ...size }: { file: string; rev: number; revHash?: string; width: number; w: number; h: number; onWin: (win: Window) => void }) {
+function SwapFrame({ file, rev, revHash, onWin, ...size }: { file: string; rev: number; revHash?: string; width: number; w: number; h: number; onWin: (win: Window, file: string) => void }) {
 	const cur: Layer = { k: `${file}|${rev}|${revHash || ""}`, file, rev, revHash };
 	const [shown, setShown] = useState<Layer | null>(null);
 	const latest = useRef(cur.k);
@@ -71,7 +73,7 @@ function SwapFrame({ file, rev, revHash, onWin, ...size }: { file: string; rev: 
 						<SlideFrame file={l.file} rev={l.rev} revHash={l.revHash} {...size}
 							onWin={top ? undefined : (win) => {
 								if (!win) return; // 걷히는 옛 창이 null 을 알려도 지금 창을 지우지 않는다
-								onWin(win);
+								onWin(win, l.file);
 								// load 직후는 아직 첫 그림이 화면에 안 올라왔을 수 있어 두 프레임 기다린다. 그 사이 또 넘겼으면 이 쪽은 버린다
 								requestAnimationFrame(() => requestAnimationFrame(() => { if (latest.current === l.k) setShown(l); }));
 							}} />
@@ -95,7 +97,23 @@ function navKey(key: string): boolean {
 	return true;
 }
 
-/** 휠로 쪽 넘기기 — 한 칸 굴림(≈100)이나 터치패드로 조금씩 민 양이 모이면 한 쪽 넘기고, 잠깐 쉰다.
+/** 도구 키 — 앱 화면에서 누른 것도, 슬라이드 창이 넘겨준 것(rt.js key)도 여기서 처리한다. 처리했으면 true.
+ *  V 고르기 · 1 2 3 긋는 도구 · 4 스케치 (P 는 예전 「핀」 모드 손버릇 — 펜으로) · C 비교 · S 이어 보기 · F 서식 도구 */
+function toolKey(raw: string): boolean {
+	const st = useDeck.getState(), key = raw.toLowerCase();
+	if (key === "v" || key === "e") st.setTool("select");
+	else if (key === "p" || key === "1") st.setTool("pen");
+	else if (key === "2") st.setTool("arrow");
+	else if (key === "3") st.setTool("box");
+	else if (key === "4") st.setTool("sketch");
+	else if (key === "c") { if (st.vdiff) st.closeCompare(); else st.startCompare(); }
+	else if (key === "s") st.setFlow(!st.flow);
+	else if (key === "f") useRibbon.getState().toggle();
+	else return false;
+	return true;
+}
+
+/** 휠로 쪽 넘기기 —한 칸 굴림(≈100)이나 터치패드로 조금씩 민 양이 모이면 한 쪽 넘기고, 잠깐 쉰다.
  *  쉬지 않으면 터치패드 관성 한 번에 열 쪽씩 날아간다 */
 function useWheelNav() {
 	const acc = useRef(0);
@@ -200,16 +218,7 @@ export default function Workspace() {
 		const k = (e: KeyboardEvent) => {
 			const tgt = e.target as Element;
 			if (tgt.closest?.("input, textarea, [contenteditable]") || e.ctrlKey || e.altKey || e.metaKey) return;
-			const key = e.key.toLowerCase();
-			// V 고르기 · 1 2 3 긋는 도구 (P 는 예전 「핀」 모드 손버릇 — 펜으로)
-			if (key === "v" || key === "e") setTool("select");
-			else if (key === "p" || key === "1") setTool("pen");
-			else if (key === "2") setTool("arrow");
-			else if (key === "3") setTool("box");
-			else if (key === "4") setTool("sketch");
-			else if (key === "c") { const st = useDeck.getState(); if (st.vdiff) st.closeCompare(); else st.startCompare(); }
-			else if (key === "s") { const st = useDeck.getState(); st.setFlow(!st.flow); }
-			else if (!navKey(e.key)) {
+			if (!toolKey(e.key) && !navKey(e.key)) {
 				if (e.key === "Escape") { if (useDeck.getState().vdiff) useDeck.getState().closeCompare(); else setTool("select"); }
 				else return;
 			}
@@ -367,6 +376,14 @@ function Stage() {
 	const [box, setBox] = useState({ w: 0, h: 0 });
 	const [active, setActive] = useState<string | null>(null);
 	const win = useRef<Window | null>(null);
+	// 무대 슬라이드 창 → 그 쪽 id. 쪽을 넘긴 직후 옛 창이 늦게 보낸 편집(방향키 이동 · 그림 넣기)도 제 쪽에 쓴다 — 지금 쪽에 쓰면 엉뚱한 쪽이 고쳐진다
+	const owner = useRef(new WeakMap<Window, string>());
+	const [selInfo, setSelInfo] = useState<SelInfo | null>(null);
+	// 우클릭 메뉴가 여는 순간의 고른 것 — 메뉴는 고르기(sel) 바로 뒤에 와서 상태가 아직 다시 그려지지 않았다
+	const selNow = useRef<SelInfo | null>(null);
+	selNow.current = selInfo;
+	const [placing, setPlacing] = useState<string | null>(null);
+	const ribbon = useRibbon((s) => s.shown);
 	const slide = deck.slides[Math.min(current, deck.slides.length - 1)];
 
 	useLayoutEffect(() => {
@@ -381,17 +398,31 @@ function Stage() {
 
 	// 직접 편집 — 무대 iframe 이 보낸 것만 받는다
 	useEffect(() => onFrame((m, src) => {
-		if (src !== win.current || !slide) return;
-		// 슬라이드 창 위에서 굴린 휠 · 누른 넘김 키 (rt.js 가 넘겨준다)
-		if (m.t === "wheel") return wheel(m.dy);
-		if (m.t === "key") return void navKey(m.key);
+		const sid = owner.current.get(src as Window);
+		if (!sid) return;
+		const now = src === win.current;
+		// 슬라이드 창 위에서 굴린 휠 · 누른 넘김 키 (rt.js 가 넘겨준다) · 고른 것의 서식 · 넣는 중인 것
+		if (now && m.t === "wheel") return wheel(m.dy);
+		if (now && m.t === "key") return void (navKey(m.key) || toolKey(m.key));
+		if (now && m.t === "sel") { selNow.current = m.info; return setSelInfo(m.info); }
+		if (now && m.t === "placing") return setPlacing(m.kind);
 		if (preview) return;
 		if (m.t === "undo") return void useDeck.getState().undo();
 		if (m.t === "redo") return void useDeck.getState().redo();
-		if (m.t === "edit") applyDirect(slide.id, m.path, { t: "edit", html: m.html });
-		else if (m.t === "patch") applyDirect(slide.id, m.path, { t: "patch", style: m.style });
-		else if (m.t === "remove") applyDirect(slide.id, m.path, { t: "remove" });
-	}), [slide?.id, preview]);
+		if (m.t === "copy") clip = { html: m.html, slide: sid, n: 0 };
+		else if (m.t === "pasteReq") { if (now) paste(sid); }
+		else if (m.t === "edit") applyDirect(sid, m.path, { t: "edit", html: m.html });
+		else if (m.t === "patch") applyDirect(sid, m.path, { t: "patch", style: m.style });
+		else if (m.t === "remove") applyDirect(sid, m.path, { t: "remove" });
+		else if (m.t === "append") applyDirect(sid, [], { t: "append", html: m.html });
+		else if (m.t === "after") applyDirect(sid, m.path, { t: "after", html: m.html });
+		else if (m.t === "order") applyDirect(sid, m.path, { t: "order", to: m.to });
+	}), [preview]);
+	// 쪽을 넘기거나 지난 판을 보면 옛 쪽의 고른 것을 내려놓는다 — 새 창이 다시 알린다
+	useEffect(() => { setSelInfo(null); setPlacing(null); }, [slide?.id, preview]);
+	const cmd = (c: string, v?: unknown) => tell(win.current, { t: "cmd", cmd: c, v });
+	/** 복사해 둔 요소를 지금 쪽에 붙인다. 같은 쪽이면 붙일 때마다 20px 씩 비껴 놓는다 — 원본 위에 겹치면 붙었는지 안 보인다 */
+	const paste = (sid: string) => { if (clip) tell(win.current, { t: "cmd", cmd: "paste", v: clip.html, dx: clip.slide === sid ? 20 * ++clip.n : 0 }); };
 
 	/** 슬라이드 (x, y) 에 핀을 꽂고 의견 칸을 연다. 표시면 그 모양도 함께. 그 자리(표시면 가운데) 요소는 슬라이드 창에 물어 붙인다 */
 	const pinAt = async (x: number, y: number, shape?: Shape) => {
@@ -433,7 +464,13 @@ function Stage() {
 		openMenu(e, [
 			{ label: t("mention"), kbd: `@${i + 1}`, run: () => st.mentionSlide(i + 1) },
 			...(at && !flow && !compare ? [{ label: t("pinHere"), run: () => pinAt(at.x, at.y) }] : []),
-			...(mode === "edit" && hit?.path?.length ? [{ label: `${t("removeEl")} <${hit.tag}>`, kbd: "Delete", danger: true, run: () => applyDirect(slide.id, hit.path, { t: "remove" }) }] : []),
+			...(mode === "edit" && hit?.path?.length && !flow && !compare ? [
+				{ label: t("rbCopy"), kbd: "Ctrl+C", run: () => cmd("copy") },
+				{ label: t("rbDup"), kbd: "Ctrl+D", run: () => cmd("dup") },
+				...(selNow.current?.abs ? [{ label: t("rbFront"), run: () => cmd("arrange", "front") }, { label: t("rbBack"), run: () => cmd("arrange", "back") }] : []),
+				{ label: `${t("removeEl")} <${hit.tag}>`, kbd: "Delete", danger: true, run: () => applyDirect(slide.id, hit.path, { t: "remove" }) },
+			] : []),
+			...(mode === "edit" && clip && !flow && !compare ? [{ label: t("rbPaste"), kbd: "Ctrl+V", run: () => paste(slide.id) }] : []),
 			"-",
 			{ label: t("toolSelect"), kbd: "V", checked: tool === "select", run: () => setTool("select") },
 			{ label: t("toolPen"), kbd: "1", checked: tool === "pen", run: () => setTool("pen") },
@@ -453,6 +490,15 @@ function Stage() {
 
 	return (
 		<section className="stage" data-mode={preview ? "view" : mode} aria-label={t("slides")}>
+			{ribbon ? <Ribbon win={win} info={selInfo} placing={placing} off={!!preview || flow || compare} /> : <div />}
+			<div className="stage-main">
+			{/* 접어 둔 서식 도구를 다시 펴는 손잡이 — 접기 단추가 있던 오른쪽 위 그 자리에 둔다. 2026.11.26 : 도구 띠의 「T」 단추만으로는 다시 펴는 곳을 찾지 못했다 */}
+			{!ribbon && !preview && (
+				<button className="rb-tab" onClick={() => useRibbon.getState().toggle()} title={`${t("rbShow")} (F)`}>
+					<svg width="12" height="12" viewBox="0 0 16 16" aria-hidden><path d="M4 6l4 4 4-4" /></svg>
+					{t("rbShow")}
+				</button>
+			)}
 			<div className="stage-banner">
 				{compare && <VersionBar slideId={slide.id} />}
 				{preview && (
@@ -472,7 +518,8 @@ function Stage() {
 					<div className="sheet" style={{ left, top, width: deck.size.w * scale, height: deck.size.h * scale }}>
 						<div style={{ width: deck.size.w * scale, height: deck.size.h * scale, overflow: "hidden", position: "relative" }}>
 							<div style={{ position: "absolute", left: 0, top: 0 }}>
-								<SwapFrame file={slide.file} rev={rev[slide.id] || 0} w={deck.size.w} h={deck.size.h} width={deck.size.w * scale} revHash={preview?.hash} onWin={(w) => { win.current = w; }} />
+								<SwapFrame file={slide.file} rev={rev[slide.id] || 0} w={deck.size.w} h={deck.size.h} width={deck.size.w * scale} revHash={preview?.hash}
+									onWin={(w, file) => { win.current = w; const id = useDeck.getState().deck?.slides.find((s) => s.file === file)?.id; if (id) owner.current.set(w, id); }} />
 							</div>
 						</div>
 						{compare && <VersionLens slideId={slide.id} w={deck.size.w} h={deck.size.h} scale={scale} />}
@@ -487,9 +534,13 @@ function Stage() {
 				// 이어 보기에서는 띠를 무대 위쪽에 띄워 둔다 — 첫 쪽 위 여백(FLOW_PAD)에 들어가고, 스크롤해도 그 자리에 남는다
 				? <StageTools left={(box.w - flowWidth(box.w, deck)) / 2} top={52} right={(box.w + flowWidth(box.w, deck)) / 2} onUndo={undoMark} canUndo={mine.length > 0} />
 				: <StageTools left={left} top={top} right={left + deck.size.w * scale} onUndo={undoMark} canUndo={mine.length > 0} />)}
+			</div>
 		</section>
 	);
 }
+
+/** 복사한 요소 (Ctrl+C · 우클릭 복사) — 앱을 켠 동안만. 다른 쪽에도 붙인다. n 은 같은 쪽에 붙인 횟수 */
+let clip: { html: string; slide: string; n: number } | null = null;
 
 // ── 표시 ──
 /** 그 쪽 (x, y) 에 핀을 꽂고 id 를 돌려준다. 표시면 그 모양도 함께. 그 자리(표시면 가운데) 요소는 슬라이드 창에 물어 붙인다 */
@@ -569,6 +620,7 @@ function StageTools({ left, top, right, onUndo, canUndo }: { left: number; top: 
 	const compare = useDeck((s) => !!s.vdiff);
 	const canCompare = useDeck((s) => s.versions.length > 1);
 	const busy = useDeck((s) => !!s.busy);
+	const ribbon = useRibbon((s) => s.shown);
 	const y = top > 50 ? top - 44 : top + 8;
 	const tools: { k: Tool | "select" | "sketch"; key: string; label: string; icon: React.ReactNode }[] = [
 		{ k: "select", key: "V", label: t("toolSelect"), icon: <path d="M3.5 2.5l9 5-4 1.2-1.6 4.3z" /> },
@@ -586,6 +638,12 @@ function StageTools({ left, top, right, onUndo, canUndo }: { left: number; top: 
 						<svg width="16" height="16" viewBox="0 0 16 16" aria-hidden>{x.icon}</svg>
 					</button>
 				))}
+				<i />
+				{/* 서식 도구 — 처음에는 접혀 있다. 말로만 만드는 사람은 꺼낼 일이 없다 */}
+				<button className="wide" aria-pressed={ribbon} onClick={() => useRibbon.getState().toggle()} title={`${ribbon ? t("rbHide") : t("rbShow")} (F)`} aria-label={ribbon ? t("rbHide") : t("rbShow")}>
+					<svg width="16" height="16" viewBox="0 0 16 16" aria-hidden><path d="M3 5.5v-2h10v2M8 3.5v9M6 12.5h4" /></svg>
+					<span>{t("rbRibbon")}</span>
+				</button>
 				{tool !== "select" && tool !== "sketch" && (
 					<>
 						<i />
