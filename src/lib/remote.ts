@@ -8,7 +8,7 @@
 //   style                    덱이 따를 스타일 · 그림 규칙 — 앱 안 Claude 의 시스템 프롬프트와 같은 글(prompt.ts houseStyle · imageRules)
 //   pins · unpin             사용자가 꽂은 핀을 앱 안 턴과 같은 글(pinLine) · 같은 표시 그림(markedPictures)으로 / 다 고친 핀 지우기
 //   gen                      그림 자리(data-gen) 채우기 — 앱 안 턴 끝과 같은 함수(fillGenerated)
-//   touch                    CLI 가 덱을 다룰 때마다 알린다 → store.outside. 그 덱에서 보내기 전에 한 번 묻는다 · 맡은 담당이 있으면 담당 파일을 다시 읽는다
+//   touch                    CLI 가 덱을 다룰 때마다 알린다 → store.outside. 그 덱에서 보내기 전에 한 번 묻는다
 //
 // 열려 있지 않은 덱도 화면을 바꾸지 않고 처리한다 — deck:// 에 잠깐 올렸다가(api.open) 감시만 내린다.
 // 오래 걸리는 일은 오른쪽 아래 진행 막대(jobs)에 「CLI · …」 로 보인다 — 사용자가 밖에서 무엇을 시켰는지 알게.
@@ -17,11 +17,9 @@ import { listen } from "@tauri-apps/api/event";
 import { invoke } from "@tauri-apps/api/core";
 import { api, bytesFromB64, join } from "./api";
 import { createDeck, type Deck, readDeck } from "./deck";
-import { buildPptx } from "./exportPptx";
 import { freeDir, importDeck } from "./flows";
 import { linkFonts } from "./fonts";
 import { ask, offscreen } from "./frames";
-import { runCheck } from "./check";
 import { tNow } from "./i18n";
 import { fillGenerated } from "./imagegen";
 import { describe, markedPictures } from "./markup";
@@ -106,16 +104,13 @@ async function show(dir: string, slide?: number | null) {
 const handlers: Record<string, (a: Args) => Promise<unknown>> = {
 	status: async () => status(),
 
-	touch: async ({ dir, cmd, label }) => {
+	touch: async ({ dir, cmd }) => {
 		const st = useDeck.getState();
 		const prev = st.outside;
 		const fresh = !prev || !same(prev.dir, dir) || Date.now() - prev.at >= OUTSIDE_MS;
-		// 담당을 맡은 세션이면 그 담당 이름을 붙인다 — 「누가」 다루는지 보이게
-		const who = label ? `${label} · ${cmd || ""}` : String(cmd || "");
-		useDeck.setState({ outside: { dir, at: Date.now(), cmd: who } });
-		if (same(st.dir, dir)) st.loadSeats();
+		useDeck.setState({ outside: { dir, at: Date.now(), cmd: String(cmd || "") } });
 		// 처음 한 번만 알린다 — 명령마다 띄우면 알림이 쌓여 화면을 가린다
-		if (fresh && same(st.dir, dir)) st.notify(label ? `${label} · ${tNow("outsideNotice")}` : tNow("outsideNotice"));
+		if (fresh && same(st.dir, dir)) st.notify(tNow("outsideNotice"));
 		return null;
 	},
 
@@ -129,8 +124,9 @@ const handlers: Record<string, (a: Args) => Promise<unknown>> = {
 	pins: async ({ dir, slides, marks }) => {
 		const deck = await readDeck(dir);
 		const order = (id: string) => deck.slides.findIndex((x) => x.id === id) + 1;
-		// 번호는 앱 안 턴과 같다 — 꽂은 차례. --slides 로 걸러도 번호는 그대로라 pins --done 에 그대로 쓴다
-		const all: PinNote[] = (await pinsOf(dir)).map((p, i) => ({ n: i + 1, slide: p.slide, slideNo: order(p.slide), x: p.x, y: p.y, text: p.text, target: p.target, shape: p.shape }));
+		// 번호는 앱 안 턴과 같다 — 꽂은 차례. --slides 로 걸러도 번호는 그대로라 pins --done 에 그대로 쓴다.
+		// 해결된 의견(협업)은 빼고, 팀원이 남긴 의견이면 누구의 것인지 함께 준다
+		const all: PinNote[] = (await pinsOf(dir)).filter((p) => !p.done).map((p, i) => ({ n: i + 1, slide: p.slide, slideNo: order(p.slide), x: p.x, y: p.y, text: p.text, target: p.target, shape: p.shape, by: p.by }));
 		const want = Array.isArray(slides) ? all.filter((p) => slides.includes(p.slideNo)) : all;
 		// 표시 그림 — 좌표 글만으로는 「어디를 가리키는지」를 자주 잘못 짚는다. 앱 안 턴과 같은 그림을 .claudeppt/attach 에 굽는다
 		const pictures = marks && want.length ? await withDeck(dir, (id, d) => markedPictures(dir, id, d, want)) : [];
@@ -145,25 +141,24 @@ const handlers: Record<string, (a: Args) => Promise<unknown>> = {
 				text: p.text,
 				target: p.target ? { tag: p.target.tag, text: p.target.text } : null,
 				mark: p.shape ? describe(p.shape) : null,
+				by: p.by ?? null,
 			})),
 			text: want.map(pinLine).join("\n"),
 			marks: pictures.map((rel) => join(dir, rel)),
 		};
 	},
 
-	unpin: async ({ dir, nums, only }) => {
-		const all = await pinsOf(dir);
+	unpin: async ({ dir, nums }) => {
+		const every = await pinsOf(dir);
+		// 번호는 pins 와 같이 열린 의견 차례
+		const all = every.filter((p) => !p.done);
 		const bad = Array.isArray(nums) ? nums.filter((n: number) => n < 1 || n > all.length) : [];
 		if (bad.length) throw new Error(`없는 핀: ${bad.join(", ")} (핀 ${all.length}개)`);
-		// only — 맡은 쪽이 정해진 담당이 부르면 그 쪽 id. 남의 쪽 핀은 지우지 않는다 (all 이면 맡은 쪽 핀만)
-		const mine = (p: Pin) => !Array.isArray(only) || only.includes(p.slide);
-		const foreign = Array.isArray(nums) ? all.filter((p, i) => nums.includes(i + 1) && !mine(p)).map((p) => all.indexOf(p) + 1) : [];
-		if (foreign.length) throw new Error(`맡지 않은 쪽의 핀이다: ${foreign.join(", ")} — 그 쪽 담당이 지운다`);
-		const drop = (Array.isArray(nums) ? all.filter((_, i) => nums.includes(i + 1)) : all).filter(mine);
+		const drop = Array.isArray(nums) ? all.filter((_, i) => nums.includes(i + 1)) : all;
 		const st = useDeck.getState();
 		// 화면에 열린 덱은 앱이 핀을 쥐고 있다 — 파일만 고치면 다음 핀 변경 때 앱이 옛 목록으로 덮어쓴다
 		if (same(st.dir, dir)) for (const p of drop) useDeck.getState().removePin(p.id);
-		else await api.writeText(dir, ".claudeppt/pins.json", JSON.stringify(all.filter((p) => !drop.includes(p)), null, 1));
+		else await api.writeText(dir, ".claudeppt/pins.json", JSON.stringify(every.filter((p) => !drop.includes(p)), null, 1));
 		return { removed: drop.length, left: all.length - drop.length };
 	},
 
@@ -182,7 +177,6 @@ const handlers: Record<string, (a: Args) => Promise<unknown>> = {
 		const st = useDeck.getState();
 		if (!same(st.dir, dir)) return { refreshed: false };
 		await st.refreshVersions();
-		await st.loadSeats();
 		try { useDeck.setState({ releases: JSON.parse(await api.readText(st.dir, "releases/releases.json")) }); } catch {}
 		return { refreshed: true };
 	},
@@ -224,6 +218,7 @@ const handlers: Record<string, (a: Args) => Promise<unknown>> = {
 	export: async ({ dir, out, exact }) =>
 		withDeck(dir, (id, deck) =>
 			job(`${titleOf(dir, deck)} → PPTX`, async (step) => {
+				const { buildPptx } = await import("./exportPptx");
 				const b = await buildPptx(deck, id, step, !!exact);
 				await api.absWriteBytes(out, b.data);
 				return { out, slides: deck.slides.length, exact: !!exact, missingFonts: b.missingFonts };
@@ -286,6 +281,7 @@ const handlers: Record<string, (a: Args) => Promise<unknown>> = {
 			job(`${titleOf(dir, deck)} · 비교`, async (step) => {
 				const log = await api.log(dir, 1);
 				let k = 0;
+				const { runCheck } = await import("./check");
 				const report = await runCheck(dir, id, deck, log[0]?.n ?? 0, () => step(++k, 0));
 				return { ...report, slides: report.slides.map((x) => ({ ...x, web: join(dir, x.web), ppt: join(dir, x.ppt), diff: join(dir, x.diff) })) };
 			}),

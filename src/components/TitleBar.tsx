@@ -1,5 +1,5 @@
 // 사용자 제목 줄 — 끌어서 창 옮기기 · 두 번 눌러 최대화. 왼쪽에 처음 · 덱 이름 · 판 번호(누르면 판 목록), 가운데에 한 쪽 · 이어 보기,
-// 오른쪽에 담당 점(Seats.tsx) · 내보내기 · 릴리즈 · 설정 · 창 단추.
+// 오른쪽에 내보내기 · 릴리즈 · 설정 · 창 단추.
 // 2026.11.18 : 가운데의 보기 · 핀 · 편집 모드를 걷었다 — 무대 도구 띠(고르기 · 펜 · 화살표 · 범위) 하나로 합쳤다.
 //              무대 아래 판 줄기(눈금 띠)도 걷고 판 번호를 누르면 여는 판 목록으로 옮겼다 — 눈금이 거의 안 보이면서 자리만 먹었다.
 import { getCurrentWindow } from "@tauri-apps/api/window";
@@ -7,10 +7,11 @@ import { useEffect, useRef, useState } from "react";
 import type { Commit } from "../lib/api";
 import { useT } from "../lib/i18n";
 import { useDeck } from "../lib/store";
+import { remote } from "../lib/transport";
 import { useUpdate } from "../lib/updater";
 import { openMenu } from "./ContextMenu";
+import { CollabChip } from "./Collab";
 import DeckActions from "./DeckActions";
-import { SeatDots, seatColor } from "./Seats";
 
 export const Mark = () => (
 	<svg className="mark" viewBox="0 0 16 16" aria-hidden>
@@ -28,10 +29,12 @@ export default function TitleBar({ onSettings, settingsOpen }: { onSettings: () 
 	const setFlow = useDeck((s) => s.setFlow);
 	const close = useDeck((s) => s.closeProject);
 	const saveDeck = useDeck((s) => s.saveDeck);
-	const win = getCurrentWindow();
+	// 협업 브라우저에는 창이 없다 — 창 단추 · 끌기는 호스트 앱만
+	const win = remote ? null : getCurrentWindow();
 	const [max, setMax] = useState(false);
 	const [list, setList] = useState(false);
 	useEffect(() => {
+		if (!win) return;
 		win.isMaximized().then(setMax);
 		const un = win.onResized(() => win.isMaximized().then(setMax));
 		return () => { un.then((f) => f()); };
@@ -41,18 +44,18 @@ export default function TitleBar({ onSettings, settingsOpen }: { onSettings: () 
 	const titleRef = useRef<HTMLInputElement>(null);
 
 	return (
-		<header className="titlebar" data-tauri-drag-region onDoubleClick={(e) => { if (e.target === e.currentTarget) win.toggleMaximize(); }}>
+		<header className="titlebar" data-tauri-drag-region onDoubleClick={(e) => { if (e.target === e.currentTarget) win?.toggleMaximize(); }}>
 			<div className="left" data-tauri-drag-region>
 				<Mark />
 				<div className="crumb">
 					{deck ? (
 						<>
-							<button className="crumb-home" onClick={close}>{t("home")}</button>
-							<span className="dim">/</span>
+							{!remote && <><button className="crumb-home" onClick={close}>{t("home")}</button><span className="dim">/</span></>}
 							<input
 								ref={titleRef}
 								className="title"
 								defaultValue={deck.title}
+								readOnly={remote}
 								key={deck.title}
 								size={Math.max(4, deck.title.length + 1)}
 								aria-label={t("name")}
@@ -87,19 +90,19 @@ export default function TitleBar({ onSettings, settingsOpen }: { onSettings: () 
 				)}
 			</div>
 			<div className="right" data-tauri-drag-region>
-				<UpdateChip />
-				{deck && <SeatDots />}
-				{deck && <DeckActions />}
-				<button className={"tb-btn" + (settingsOpen ? " on" : "")} onClick={onSettings} title={t("settings") + " (Ctrl+,)"} aria-label={t("settings")}>
+				<CollabChip />
+				{!remote && <UpdateChip />}
+				{deck && !remote && <DeckActions />}
+				{!remote && <button className={"tb-btn" + (settingsOpen ? " on" : "")} onClick={onSettings} title={t("settings") + " (Ctrl+,)"} aria-label={t("settings")}>
 					<svg width="15" height="15" viewBox="0 0 16 16" aria-hidden><path d="M2 4.5h7M12 4.5h2M2 11.5h2M7 11.5h7" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" /><circle cx="10.5" cy="4.5" r="1.6" fill="none" stroke="currentColor" strokeWidth="1.4" /><circle cx="5.5" cy="11.5" r="1.6" fill="none" stroke="currentColor" strokeWidth="1.4" /></svg>
-				</button>
-				<div className="win">
+				</button>}
+				{win && <div className="win">
 					<button onClick={() => win.minimize()} aria-label={t("minimize")}><svg width="10" height="10" aria-hidden><path d="M0 5.5h10" stroke="currentColor" /></svg></button>
 					<button onClick={() => win.toggleMaximize()} aria-label={t("maximize")}>
 						{max ? <svg width="10" height="10" aria-hidden><path d="M2.5.5h7v7M.5 2.5h7v7h-7z" fill="none" stroke="currentColor" /></svg> : <svg width="10" height="10" aria-hidden><rect x=".5" y=".5" width="9" height="9" fill="none" stroke="currentColor" /></svg>}
 					</button>
 					<button className="x" onClick={() => win.close()} aria-label={t("quit")}><svg width="10" height="10" aria-hidden><path d="M.5.5l9 9M9.5.5l-9 9" stroke="currentColor" /></svg></button>
-				</div>
+				</div>}
 			</div>
 		</header>
 	);
@@ -133,7 +136,6 @@ function VersionList({ onClose }: { onClose: () => void }) {
 	const setPreview = useDeck((s) => s.setPreview);
 	const restore = useDeck((s) => s.restore);
 	const running = useDeck((s) => s.running);
-	const seats = useDeck((s) => s.seats);
 	const ref = useRef<HTMLDivElement>(null);
 	useEffect(() => {
 		const k = (e: MouseEvent) => { if (!ref.current?.contains(e.target as Node) && !(e.target as Element).closest?.(".stamp")) onClose(); };
@@ -160,9 +162,9 @@ function VersionList({ onClose }: { onClose: () => void }) {
 						])}>
 						{/* 대화의 판 알약과 같은 모양 — 지금 판만 채운다 */}
 						<span className={"node" + (c === head ? " head" : "")}>v{c.n}</span>
-						{/* 담당이 남긴 판은 그 담당 번호를 담당 색으로 — 누가 고쳤는지 */}
-						<span className="s">{c.seat != null && <i className="sd" style={{ "--c": seatColor(seats, c.seat) } as React.CSSProperties} title={c.author}>{c.seat}</i>}<span>{c.subject}</span>{rel && <i className="rtag">{rel}</i>}</span>
-						<span className="d">{c.date.slice(5, 16)}</span>
+						<span className="s"><span>{c.subject}</span>{rel && <i className="rtag">{rel}</i>}</span>
+						{/* 누가 시킨 판인지 — 팀원 이름. 바깥 CLI 처럼 이름 없이 남은 판(ClaudePPT)은 때만 */}
+						<span className="d">{c.author && c.author !== "ClaudePPT" ? `${c.author} · ` : ""}{c.date.slice(5, 16)}</span>
 					</button>
 				);
 			})}

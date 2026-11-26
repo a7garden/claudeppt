@@ -9,16 +9,20 @@
 // 2026.11.25 : 요청칸 아랫줄을 「범위 줄」(ScopeLine)로 바꿨다. 보내기 바로 옆에 이 요청이 닿는 곳(덱 전체 · @쪽 · @판)을 보인다.
 //              전에는 범위가 어디에도 안 보였고, @쪽을 쓰면 아랫줄에 같은 칩이 한 번 더 나올 뿐이었다. 「@ 로 쪽 지정」은 안내 글에만 있어
 //              글을 쓰기 시작하면 사라졌다. 빈 대화의 큰 제목 · 단추 셋도 걷고 범위 줄이 하지 않는 일 둘만 요청칸 바로 위에 남겼다.
-import { Fragment, useEffect, useMemo, useRef, useState } from "react";
+import { Fragment, memo, useEffect, useMemo, useRef, useState } from "react";
 import { create } from "zustand";
 import { open as pickFiles } from "@tauri-apps/plugin-dialog";
 import { api, deckUrl, join } from "../lib/api";
 import { ATTACH_EXT, attachName, isImage, useAttach } from "../lib/attach";
 import { useT } from "../lib/i18n";
 import { isVersionQuery, mentionCandidates, mentionTokens, typingMention, versionCandidates, versionTokens } from "../lib/mention";
+import { CommentsButton } from "./Collab";
 import { copyText, openMenu } from "./ContextMenu";
 import { SLIDE_MIME, SlideFrame } from "./Workspace";
-import { type Turn, useDeck } from "../lib/store";
+import { useSettings } from "../lib/settings";
+import { isMine, routeOf, type Turn, useDeck } from "../lib/store";
+import { noteDraft } from "../lib/updater";
+import { remote } from "../lib/transport";
 
 /** 사이드바 접힘 — 보는 사람의 편의라 이 PC 에만 남긴다. seen 은 접을 때 본 마지막 턴(그 뒤 끝난 턴이 「새 답」) */
 interface Fold { folded: boolean; seen: string | null; draft: boolean; set: (v: boolean) => void }
@@ -42,10 +46,16 @@ export function openTalk(focus = true) {
 
 export default function Talk() {
 	const t = useT();
-	const turns = useDeck((s) => s.turns);
+	const all = useDeck((s) => s.turns);
+	const sessions = useDeck((s) => s.sessions);
+	const talkKey = useDeck((s) => s.talkKey);
 	const versions = useDeck((s) => s.versions);
-	const setPreview = useDeck((s) => s.setPreview);
 	const folded = useTalkFold((s) => s.folded);
+	const [list, setList] = useState(false);
+	// 「설정 › 협업」을 켰을 때만 세션을 나눠 보인다. 꺼져 있으면 전처럼 대화 하나
+	const team = useSettings((x) => x.s.collab.on);
+	// 대화칸은 한 세션의 대화만 — 「새 대화」면 빈 대화가 열린다. 세션을 고르면 그 세션의 대화
+	const turns = useMemo(() => (team && talkKey ? all.filter((x) => (x.session ?? sessions[0]?.key) === talkKey) : all), [team, all, sessions, talkKey]);
 	const logRef = useRef<HTMLDivElement>(null);
 	const stick = useRef(true);
 	useEffect(() => {
@@ -71,17 +81,27 @@ export default function Talk() {
 			<div className="talk-body" hidden={folded}>
 				<header className="talk-head">
 					<b>{t("talk")}</b>
-					{/* 지금 판 번호는 제목 줄에 있다 — 여기서는 턴 수만 */}
+					{/* 지금 보는 세션 — 누르면 세션 목록 */}
+					{team && talkKey && (
+						<button className={"talk-sess" + (list ? " on" : "")} onClick={() => setList(!list)} aria-expanded={list} title={t("sessionList")}>
+							{t("sessionN").replace("{n}", talkKey.slice(1))}<span aria-hidden>▾</span>
+						</button>
+					)}
+					{/* 지금 판 번호는 제목 줄에 있다 — 여기서는 이 대화의 턴 수만 */}
 					{turns.length > 0 && <span className="mono">{turns.length}{t("talkTurns")}</span>}
+					{/* 협업 중이면 덱의 열린 의견 — 누가 · 몇 쪽 · 무엇 (Collab.tsx) */}
+					<CommentsButton />
+					{team && turns.length > 0 && <button className="talk-new" onClick={() => { setList(false); useDeck.getState().newTalk(); }} title={t("newTalkHint")}>{t("newTalk")}</button>}
 					<button className="talk-fold" onClick={() => useTalkFold.getState().set(true)} aria-expanded={true} title={`${t("talkFold")} (Ctrl+B)`} aria-label={t("talkFold")}>
 						<PanelIcon open />
 					</button>
+					{team && list && <SessionList onClose={() => setList(false)} />}
 				</header>
 				<div className="log" ref={logRef} onScroll={(e) => { const el = e.currentTarget; stick.current = el.scrollHeight - el.scrollTop - el.clientHeight < 40; }}>
 					{turns.length === 0 ? (
 						<EmptyTalk />
 					) : (
-						turns.map((x) => <TurnView key={x.id} turn={x} head={!!head && x.version?.hash === head.hash} onVersion={() => { const c = versions.find((v) => v.hash === x.version?.hash); if (c) setPreview(c); }} />)
+						turns.map((x) => <TurnView key={x.id} turn={x} head={!!head && x.version?.hash === head.hash} />)
 					)}
 				</div>
 				<Composer />
@@ -164,7 +184,48 @@ function EmptyTalk() {
 	);
 }
 
-function TurnView({ turn, head: isHead, onVersion }: { turn: Turn; head: boolean; onVersion: () => void }) {
+/** 세션 목록 — 새 세션이 위. 세션마다 처음 고친 쪽(그 쪽은 그 뒤에도 이 세션이 이어 고친다) · 마지막 요청자 · 때 · 턴 수.
+ *  누르면 그 세션의 대화를 보고, 처음 고치는 쪽은 그 세션으로 간다 */
+function SessionList({ onClose }: { onClose: () => void }) {
+	const t = useT();
+	const sessions = useDeck((s) => s.sessions);
+	const turns = useDeck((s) => s.turns);
+	const bind = useDeck((s) => s.bind);
+	const talkKey = useDeck((s) => s.talkKey);
+	const deck = useDeck((s) => s.deck)!;
+	const ref = useRef<HTMLDivElement>(null);
+	useEffect(() => {
+		const k = (e: MouseEvent) => { if (!ref.current?.contains(e.target as Node) && !(e.target as Element).closest?.(".talk-sess")) onClose(); };
+		const esc = (e: KeyboardEvent) => { if (e.key === "Escape") onClose(); };
+		addEventListener("mousedown", k);
+		addEventListener("keydown", esc);
+		return () => { removeEventListener("mousedown", k); removeEventListener("keydown", esc); };
+	}, [onClose]);
+	const pad = (n: number) => String(n).padStart(2, "0");
+	const when = (at: number) => { const d = new Date(at); return `${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`; };
+	return (
+		<div className="pop sessions" ref={ref} role="listbox" aria-label={t("sessionList")}>
+			{[...sessions].reverse().map((s) => {
+				const mine = turns.filter((x) => (x.session ?? sessions[0]?.key) === s.key);
+				const last = mine.at(-1);
+				const nos = deck.slides.map((x, i) => (bind[x.id] === s.key ? i + 1 : 0)).filter((n) => n > 0);
+				const on = s.key === talkKey;
+				return (
+					<button key={s.key} role="option" aria-selected={on} className={on ? "on" : ""} onClick={() => { useDeck.getState().viewSession(s.key); onClose(); }}>
+						<span className="s">
+							<b>{t("sessionN").replace("{n}", s.key.slice(1))}</b>
+							<span>{nos.length ? `${nos.join(" · ")}${t("slideN") === "쪽" ? "쪽" : ""}` : t("sessionNoSlides")}</span>
+						</span>
+						<span className="d">{last ? `${last.by ? last.by + " · " : ""}${when(last.at)} · ${mine.length}${t("talkTurns")}` : t("sessionEmpty")}</span>
+					</button>
+				);
+			})}
+		</div>
+	);
+}
+
+/** 턴 하나. memo — 글자가 흐르는 동안 바뀌는 것은 도는 턴 하나라 나머지 턴은 다시 그리지 않는다 (판 열기도 안에서 해 props 가 매번 새로 생기지 않게) */
+const TurnView = memo(function TurnView({ turn, head: isHead }: { turn: Turn; head: boolean }) {
 	const t = useT();
 	const deck = useDeck((s) => s.deck)!;
 	const setCurrent = useDeck((s) => s.setCurrent);
@@ -173,6 +234,8 @@ function TurnView({ turn, head: isHead, onVersion }: { turn: Turn; head: boolean
 	const running = useDeck((s) => s.running);
 	const head = useDeck((s) => s.versions[0]?.hash);
 	const commit = useDeck((s) => s.versions.find((v) => v.hash === turn.version?.hash));
+	const setPreview = useDeck((s) => s.setPreview);
+	const onVersion = () => { if (commit) setPreview(commit); };
 	const menu = (e: React.MouseEvent) => openMenu(e, [
 		{ label: t("rewrite"), run: () => refill(turn.request), disabled: !turn.request },
 		{ label: t("copyReply"), run: () => copyText(turn.reply.trim()), disabled: !turn.reply.trim() },
@@ -198,6 +261,8 @@ function TurnView({ turn, head: isHead, onVersion }: { turn: Turn; head: boolean
 			{/* 요청 — 내가 쓴 것은 옅은 칸에 담아 답과 가른다. 핀은 그 칸 안에 */}
 			{(turn.request || turn.pins.length > 0 || !!turn.attach?.length) && (
 				<div className="req">
+					{/* 보낸 팀원 — 같은 세션을 여럿이 이어 쓰므로 요청마다 누가 시켰는지 남긴다 */}
+					{turn.by && <div className="req-by">{turn.by}</div>}
 					{turn.request && <div className="req-text"><Mentioned text={turn.request} turn={turn} /></div>}
 					{!!turn.attach?.length && <div className="attach-row">{turn.attach.map((a) => <AttachTile key={a} rel={a} />)}</div>}
 					{turn.pins.length > 0 && (
@@ -210,8 +275,10 @@ function TurnView({ turn, head: isHead, onVersion }: { turn: Turn; head: boolean
 			{(turn.reply || live) && <div className="reply">{turn.reply}</div>}
 			{turn.error && <div className="err">{turn.error}</div>}
 			{/* 끝줄 — 이 턴이 남긴 판(지금 판은 채움) · 고친 쪽. 도는 중이면 뛰는 점과 지금 하는 일 */}
-			{(live || turn.version || changed || turn.status === "stopped" || turn.phase) && (
+			{(live || turn.version || changed || turn.status === "stopped" || turn.status === "queued" || turn.phase) && (
 				<div className="foot" title={detail}>
+					{/* 기다리는 턴 — 같은 세션의 앞 턴이 끝나면(또는 동시에 도는 수에 자리가 나면) 돈다. 멈춤으로 줄에서 뺄 수 있다 */}
+					{turn.status === "queued" && <><span className="phase">{t("queued")}</span><button className="more" onClick={() => useDeck.getState().stop(turn.id)}>{t("cancel")}</button></>}
 					{live && <span className="run" aria-label={t("working")} />}
 					{turn.version && <button className={"node" + (isHead ? " head" : "")} onClick={onVersion} title={`${turn.version.short}${turn.cost != null ? ` · $${turn.cost.toFixed(3)}` : ""}`}>v{turn.version.n}</button>}
 					{turn.phase && <span className="phase">{turn.phase}</span>}
@@ -223,7 +290,7 @@ function TurnView({ turn, head: isHead, onVersion }: { turn: Turn; head: boolean
 			)}
 		</article>
 	);
-}
+});
 
 /** 요청 글의 @쪽 을 눌러 그 쪽으로 가는 칩으로 그린다. 지난 턴은 보낼 때 푼 쪽(id)을 따른다 — 그 뒤 순서가 바뀌어도 같은 쪽으로 간다.
  *  @v<n> 은 누르면 그 판을 무대에서 본다 */
@@ -260,9 +327,14 @@ const GLYPH = { pen: "〰", arrow: "→", box: "▭" } as const;
 
 function Composer() {
 	const t = useT();
-	const pins = useDeck((s) => s.pins);
+	// 요청칸 위 초안은 내가 꽂은 열린 핀만 — 다른 사람의 의견은 무대 · 의견 목록에 (Collab.tsx)
+	const allPins = useDeck((s) => s.pins);
+	const meName = useSettings((x) => x.s.me).trim();
+	const pins = useMemo(() => allPins.filter((p) => isMine(p, meName)), [allPins, meName]);
 	const deck = useDeck((s) => s.deck)!;
-	const running = useDeck((s) => s.running);
+	// 지금 대화에서 도는 턴 — 멈춤은 이 턴만. 다른 세션이 돌고 있어도 보낼 수 있다(기다리거나 함께 돈다)
+	const myRun = useDeck((s) => (s.talkKey ? s.runs[s.talkKey] : undefined));
+	const running = useDeck((s) => !!s.running);
 	const send = useDeck((s) => s.send);
 	const stop = useDeck((s) => s.stop);
 	const update = useDeck((s) => s.updatePin);
@@ -272,6 +344,15 @@ function Composer() {
 	const insertReq = useDeck((s) => s.insertReq);
 	const rev = useDeck((s) => s.rev);
 	const [text, setText] = useState("");
+	// 이 기기를 쓰는 팀원 — 정하기 전에는 요청칸 위에 이름 칸이 뜨고 보내기가 막힌다
+	const team = useSettings((x) => x.s.collab.on);
+	const myName = useSettings((x) => x.s.me).trim();
+	const needName = team && !myName;
+	const saveName = (v: string) => { if (v.trim()) useSettings.getState().set((x) => ({ ...x, me: v.trim() })); };
+	// 보낼 곳 — 보내기와 같은 규칙(routeOf). 보고 있는 대화와 다른 세션으로 가면 그 까닭(그 쪽을 처음 고친 세션)을 보인다
+	const bind = useDeck((s) => s.bind);
+	const sessions = useDeck((s) => s.sessions);
+	const talkKey = useDeck((s) => s.talkKey);
 	// 쪽 목록 · 이어 보기에서 쪽을 끌어 요청칸 위에 올린 동안 — 놓으면 @쪽 이 들어간다
 	const [dropping, setDropping] = useState(false);
 	const mentionSlide = useDeck((s) => s.mentionSlide);
@@ -322,9 +403,10 @@ function Composer() {
 		el.style.height = "auto";
 		el.style.height = Math.min(220, el.scrollHeight) + "px";
 	}, [text]);
-	// 접힌 등뼈가 「쓰던 글이 있다」를 보이게 알린다
+	// 접힌 등뼈가 「쓰던 글이 있다」를 보이게 알린다. 쉬는 틈 자동 설치도 미룬다 — 다시 켜면 이 글이 사라진다 (updater.ts)
 	const hasDraft = !!text.trim();
-	useEffect(() => { useTalkFold.setState({ draft: hasDraft }); }, [hasDraft]);
+	useEffect(() => { useTalkFold.setState({ draft: hasDraft }); noteDraft(hasDraft); }, [hasDraft]);
+	useEffect(() => () => noteDraft(false), []);
 	// 핀이 새로 꽂히면 대화를 편다 — 접힌 채로 두면 의견을 적을 칸이 보이지 않는다
 	const pinCount = useRef(pins.length);
 	useEffect(() => { if (pins.length > pinCount.current) openTalk(false); pinCount.current = pins.length; }, [pins.length]);
@@ -340,7 +422,10 @@ function Composer() {
 		return () => removeEventListener("keydown", k);
 	}, []);
 
-	const can = !running && (text.trim() || pins.length || attach.length);
+	const route = useMemo(() => routeOf({ deck, current, pins, bind, sessions, talkKey }, text), [deck, current, pins, bind, sessions, talkKey, text, team]);
+	const routeText = !route.key ? t("routeNew") : (route.via ? t("routeVia").replace("{no}", String(route.via)) : t("routeTalk")).replace("{n}", route.key.slice(1));
+	// 협업을 켜면 세션마다 줄을 서므로 도는 중에도 보낼 수 있다. 꺼져 있으면 전처럼 도는 동안은 막는다
+	const can = (team || !running) && !needName && (text.trim() || pins.length || attach.length);
 	const go = () => {
 		if (!can) return;
 		send(text, attach);
@@ -357,8 +442,9 @@ function Composer() {
 	};
 	const slideNo = (id: string) => deck.slides.findIndex((s) => s.id === id) + 1;
 
-	const sendBtn = running ? (
-		<button className="send stop" onClick={stop}>{t("stop")}</button>
+	// 지금 대화가 돌고 있고 쓴 것이 없으면 멈춤. 쓰고 있으면 보내기(그 세션 앞 턴이 끝난 뒤 돈다)
+	const sendBtn = myRun && !can ? (
+		<button className="send stop" onClick={() => stop(myRun)}>{t("stop")}</button>
 	) : (
 		<button className={"send" + (pins.length ? " pins" : "")} disabled={!can} onClick={go}>
 			{pins.length ? `${t("sendPins")} ${pins.length}` : t("send")}<kbd>↵</kbd>
@@ -366,6 +452,13 @@ function Composer() {
 	);
 	return (
 		<div className="composer">
+			{needName && (
+				<div className="whoami" title={t("myNameNote")}>
+					<span>{t("myName")}</span>
+					<input className="field" placeholder={t("myNamePh")} aria-label={t("myName")}
+						onBlur={(e) => saveName(e.target.value)} onKeyDown={(e) => { if (e.key === "Enter") saveName(e.currentTarget.value); }} />
+				</div>
+			)}
 			{pins.length > 0 && (
 				<div className="tray" aria-label={t("pins")}>
 					{pins.map((p, i) => (
@@ -435,6 +528,13 @@ function Composer() {
 					onKeyUp={(e) => { if (["ArrowLeft", "ArrowRight", "Home", "End"].includes(e.key)) sense(text, e.currentTarget.selectionStart); }} />
 				<div className="bar">
 					<ScopeLine text={text} setText={setText} ta={ta} />
+					{/* 보낼 곳(세션). 범위 줄이 「어디에」면 이것은 「어느 세션으로」. 세션이 생긴 뒤부터 보이고, 보고 있는 대화와 다른 세션으로 가면 진하게.
+					    줄에는 세션 번호만, 까닭(어느 쪽을 처음 고친 세션인지)은 툴팁에. 까닭까지 적으면 좁은 사이드바에서 범위 줄이 두 줄로 밀린다 */}
+					{team && sessions.length > 0 && (
+						<span className={"route" + (route.key && route.key !== talkKey ? " away" : "")} title={`${routeText}\n${t("sessionHint")}`}>
+							{route.key ? `→ ${t("sessionN").replace("{n}", route.key.slice(1))}` : t("routeNew")}
+						</span>
+					)}
 					{sendBtn}
 				</div>
 			</div>
@@ -507,9 +607,9 @@ function ScopeLine({ text, setText, ta }: { text: string; setText: (v: string) =
 				})
 			)}
 			<button className="scope-btn at" onClick={pickSlide} title={t("scopePick")} aria-label={t("scopePick")}>@</button>
-			<button className="scope-btn clip" onClick={choose} title={t("attachAdd")} aria-label={t("attachAdd")}>
+			{!remote && <button className="scope-btn clip" onClick={choose} title={t("attachAdd")} aria-label={t("attachAdd")}>
 				<svg width="14" height="14" viewBox="0 0 16 16" aria-hidden><path d="M10.5 4.5 5.4 9.6a1.6 1.6 0 0 0 2.3 2.3l5.4-5.4a3 3 0 0 0-4.3-4.3L3.3 7.7a4.4 4.4 0 0 0 6.2 6.2l4-4" fill="none" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" strokeLinejoin="round" /></svg>
-			</button>
+			</button>}
 		</div>
 	);
 }

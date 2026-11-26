@@ -1,9 +1,8 @@
-// 백엔드(src-tauri) 명령을 부르는 얇은 층. 이름은 Rust 명령과 같다.
-import { invoke } from "@tauri-apps/api/core";
-import type { Seat } from "./seats";
+// 백엔드(src-tauri) 명령을 부르는 얇은 층. 이름은 Rust 명령과 같다. 길(Tauri · 협업 브라우저)은 transport.ts 가 고른다.
+import { call as invoke, remote, remoteDeck } from "./transport";
 
-/** author — 남긴 이(앱은 ClaudePPT) · seat — 담당이 남긴 판이면 그 번호 (seats.ts) */
-export interface Commit { n: number; hash: string; short: string; date: string; subject: string; tags: string[]; author: string; seat: number | null }
+/** author — 이 판을 시킨 팀원 이름 (직접 편집 · 바깥 CLI 의 판은 ClaudePPT) */
+export interface Commit { n: number; hash: string; short: string; date: string; subject: string; tags: string[]; author: string }
 export interface LibItem { dir: string; deck: any; modified: number }
 /** 설정 「바깥 연결」 — 통로 · 최근 바깥 명령 · 스킬 상태 (control.rs remote_info) */
 export interface RemoteInfo {
@@ -18,20 +17,14 @@ export interface Tool { name: string; path: string | null; version: string }
 /** metrics = [winAscent, winDescent, typoAscender, typoDescender, typoLineGap] (em 비율) · typo = USE_TYPO_METRICS */
 export interface FontFace { file: string; family: string[]; full: string[]; local: string; bold: boolean; italic: boolean; weight: number; metrics: number[]; typo: boolean }
 
-/** 앱이 마지막으로 덱 파일을 쓴 때 — 폴더 감시가 잡은 변경이 앱이 쓴 것인지, 밖(담당 세션)이 쓴 것인지 가른다 (store.ts attribute) */
-let wroteAt = 0;
-export const localWriteAt = () => wroteAt;
-export const noteLocalWrite = () => { wroteAt = Date.now(); };
-const wrote = <T,>(p: Promise<T>) => { wroteAt = Date.now(); return p.finally(() => { wroteAt = Date.now(); }); };
-
 export const api = {
 	readText: (root: string, rel: string) => invoke<string>("fs_read_text", { root, rel }),
 	clipText: () => invoke<string>("clip_text"),
-	writeText: (root: string, rel: string, text: string) => wrote(invoke<void>("fs_write_text", { root, rel, text })),
-	writeB64: (root: string, rel: string, data: string) => wrote(invoke<void>("fs_write_base64", { root, rel, data })),
+	writeText: (root: string, rel: string, text: string) => invoke<void>("fs_write_text", { root, rel, text }),
+	writeB64: (root: string, rel: string, data: string) => invoke<void>("fs_write_base64", { root, rel, data }),
 	exists: (root: string, rel: string) => invoke<boolean>("fs_exists", { root, rel }),
 	/** 큰 파일은 base64 를 거치지 않고 날바이트로 — 그림 · 동영상 · 원본 PPTX */
-	writeBytes: (root: string, rel: string, data: Uint8Array) => wrote(invoke<void>("fs_write_bytes", data, { headers: { "x-root": encodeURIComponent(root), "x-rel": encodeURIComponent(rel) } })),
+	writeBytes: (root: string, rel: string, data: Uint8Array) => invoke<void>("fs_write_bytes", data, { headers: { "x-root": encodeURIComponent(root), "x-rel": encodeURIComponent(rel) } }),
 	absReadBytes: (path: string) => invoke<ArrayBuffer>("abs_read_bytes", { path }),
 	absWriteBytes: (path: string, data: Uint8Array) => invoke<void>("abs_write_bytes", data, { headers: { "x-path": encodeURIComponent(path) } }),
 	absCopyIn:(src: string, root: string, rel: string) => invoke<void>("abs_copy_in", { src, root, rel }),
@@ -47,17 +40,16 @@ export const api = {
 	reveal: (path: string) => invoke<void>("reveal", { path }),
 
 	vcsInit: (dir: string) => invoke<void>("vcs_init", { dir }),
-	/** exclude — 판에 넣지 않을 파일 (담당이 고치는 중이라고 알린 쪽) */
-	commit: (dir: string, message: string, exclude?: string[]) => invoke<Commit | null>("vcs_commit", { dir, message, exclude: exclude?.length ? exclude : null }),
+	/** author — 이 판을 시킨 팀원 이름. 주면 git 작성자로 남는다 */
+	commit: (dir: string, message: string, author?: string) => invoke<Commit | null>("vcs_commit", { dir, message, author: author || null }),
+	/** 이 파일들만 한 판으로 — 여러 세션의 턴이 함께 돌 때 끝난 턴의 판에 다른 턴의 파일이 섞이지 않게 */
+	commitPaths: (dir: string, message: string, author: string | undefined, paths: string[]) => invoke<Commit | null>("vcs_commit_paths", { dir, message, author: author || null, paths }),
 	log: (dir: string, limit?: number) => invoke<Commit[]>("vcs_log", { dir, limit }),
 	tag: (dir: string, name: string) => invoke<void>("vcs_tag", { dir, name }),
-	restore: (dir: string, hash: string, message: string) => wrote(invoke<Commit | null>("vcs_restore", { dir, hash, message })),
-	/** 「담당」 창이 고친 것을 파일에 합친다 — 바깥 세션과 같은 잠금 안에서, 화면이 바꾼 칸만 (seats.rs update) */
-	seatsUpdate: (dir: string, before: Seat[], after: Seat[]) => invoke<Seat[]>("seats_update", { dir, before, after }),
-	seatsVacate: (dir: string, seat: number) => invoke<void>("seats_vacate", { dir, seat }),
+	restore: (dir: string, hash: string, message: string, author?: string) => invoke<Commit | null>("vcs_restore", { dir, hash, message, author: author || null }),
 
 	claudeDetect: (path: string) => invoke<{ path: string; version: string } | null>("claude_detect", { path }),
-	claudeRun: (spec: { turn: string; dir: string; prompt: string; system: string; claudePath: string; model: string; effort: string; resume?: string | null; mode?: "fonts" }) => invoke<{ code: number; stderr: string }>("claude_run", { spec }),
+	claudeRun: (spec: { turn: string; dir: string; prompt: string; system: string; claudePath: string; model: string; effort: string; resume?: string | null; sessionId?: string | null; mode?: "fonts" }) => invoke<{ code: number; stderr: string }>("claude_run", { spec }),
 	claudeStop: (turn: string) => invoke<void>("claude_stop", { turn }),
 
 	toolsDetect: () => invoke<Tool[]>("tools_detect"),
@@ -71,9 +63,9 @@ export const api = {
 	pptSnapshot: (pptx: string, outDir: string, width = 1280, height = 720) => invoke<number>("ppt_snapshot", { pptx, outDir, width, height }),
 };
 
-/** 슬라이드 주소. Windows WebView2 는 사용자 프로토콜을 http://<이름>.localhost 로 연다. */
+/** 슬라이드 주소. Windows WebView2 는 사용자 프로토콜을 http://<이름>.localhost 로 연다. 협업 브라우저는 호스트 서버의 /_/d/<덱 열쇠> */
 export const deckUrl = (id: string, rel: string, rev?: string) => {
-	const base = navigator.userAgent.includes("Windows") ? "http://deck.localhost" : "deck://localhost";
+	const base = remote ? `${location.origin}/_/d/${remoteDeck.key}` : navigator.userAgent.includes("Windows") ? "http://deck.localhost" : "deck://localhost";
 	return `${base}/${id}${rev ? "@" + rev : ""}/${rel.split("/").map(encodeURIComponent).join("/")}`;
 };
 

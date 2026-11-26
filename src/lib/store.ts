@@ -9,8 +9,6 @@
 //   쪽 손보기            addSlide · duplicateSlide · moveSlide · removeSlide — 쪽 목록 · 우클릭 메뉴가 같이 쓴다
 //   대화                 send → claude 한 턴 → 그림 채우기 → 한 판으로 남김 → .claudeppt/talk.json
 //   바깥 작업            outside · OUTSIDE_MS — 앱 밖 Claude Code 가 방금 다룬 덱이면 send 가 보내기 전에 한 번 묻는다 (remote.ts touch)
-//   담당                 seats · presence · activity — 덱을 나눠 고치는 세션들 (seats.ts). attribute 가 폴더 감시의 변경을 담당에 잇고,
-//                        맡은 담당이 없는 변경은 strays 로 모은다. 담당이 고치는 중이라고 알린 쪽은 앱의 판에 섞지 않는다(heldFiles)
 //   직접 편집            applyDirect → 원본 HTML 에 되쓰고 잠시 뒤 한 판으로 남김
 //   판 · 릴리즈          refreshVersions · preview · restore · release (릴리즈 본체는 파일 끝 makeRelease — 바깥 CLI 도 쓴다)
 //   판 비교              startCompare · closeCompare · restoreSlide — 고른 판과 지금을 쪽마다 견주고 한 쪽만 되돌린다 (versions.ts)
@@ -18,11 +16,12 @@
 //   내보낸 PPTX 확인     verifyPptx — 내보내기 · 릴리즈 뒤 PowerPoint 가 그린 모양을 웹과 견주어 다를 때만 알린다 (check.ts) · fixDiff
 import { listen } from "@tauri-apps/api/event";
 import { create } from "zustand";
-import { api, type Commit, localWriteAt } from "./api";
+import { api, type Commit } from "./api";
 import { type Deck, newId, readDeck, slideHtml, writeDeck } from "./deck";
 import { applyOp, type Op } from "./edits";
-import { type Built, buildPptx } from "./exportPptx";
-import { type Report, SAME, needsFix, runCheck } from "./check";
+// 내보내기 · 검사(pptxgenjs · jszip)는 쓸 때 불러온다 — 시작 청크를 가볍게
+import type { Built } from "./exportPptx";
+import type { Report } from "./check";
 import { tell } from "./frames";
 import { tNow } from "./i18n";
 import { askClaude, linkFonts } from "./fonts";
@@ -31,11 +30,13 @@ import { markedPictures, type Shape, type Tool } from "./markup";
 import { type Mention, type VersionMention, mentionsIn, versionMentionsIn } from "./mention";
 import { type PinNote, systemPrompt, turnPrompt } from "./prompt";
 import { useSettings } from "./settings";
-import { type Activity, busy, owns, type Presence, readSeats, type Seat } from "./seats";
 import { type VersionDiff, diffVersion, restoreSlide as restoreSlideFile, versionContext } from "./versions";
 
 /** 핀 하나 — shape 가 있으면 그어 놓은 표시(펜 · 화살표 · 상자)이고 x, y 는 그 번호 표식 자리다 (markup.ts) */
-export interface Pin { id: string; slide: string; x: number; y: number; text: string; target?: PinNote["target"]; shape?: Shape; at: number }
+/** by — 꽂은 사람 (협업 의견). done — 해결됨 (무대 · 목록에서 감춘다). 바깥 CLI 가 읽는 꼴은 그대로 — 칸만 더했다 */
+export interface Pin { id: string; slide: string; x: number; y: number; text: string; target?: PinNote["target"]; shape?: Shape; at: number; by?: string; done?: boolean }
+/** 내 핀인가 — 요청칸 위 초안 · 보내기에 드는 것은 내가 꽂은 열린 핀만 (다른 사람 의견은 무대 · 의견 목록에) */
+export const isMine = (p: Pin, who: string) => !p.done && (!p.by || p.by === who);
 export interface ToolUse { name: string; file?: string }
 export interface Turn {
 	id: string;
@@ -50,12 +51,25 @@ export interface Turn {
 	attach?: string[];
 	reply: string;
 	tools: ToolUse[];
-	status: "running" | "done" | "failed" | "stopped";
+	/** queued — 같은 세션의 앞 턴이 돌고 있거나 동시에 돌 수 있는 수가 찼다. 자리가 나면 돈다 */
+	status: "queued" | "running" | "done" | "failed" | "stopped";
 	cost?: number;
 	version?: { n: number; short: string; hash: string };
 	error?: string;
 	phase?: string;
+	/** 보낸 팀원 — 그 기기의 설정 「내 이름」 */
+	by?: string;
+	/** 이 턴이 이어 쓴 세션 (Session.key) */
+	session?: string;
 }
+/**
+ * 대화 세션 하나 — 팀원은 같은 Claude 계정을 쓰므로 세션을 사람마다 두지 않는다.
+ * 쪽은 처음 고친 세션으로 확정되고(bind), 그 뒤 누가 그 쪽을 고치든 그 세션을 이어 쓴다. 세션 하나가 여러 쪽을 맡을 수 있다.
+ * key 는 앱이 붙인 이름(s1 · s2 …), claude 는 Claude Code 의 세션 id (첫 턴이 돌아야 생긴다)
+ */
+export interface Session { key: string; claude: string | null; at: number }
+/** 협업 브라우저에서 온 요청 — by 는 서버가 정한 기기 이름. onStart 는 턴이 만들어지자마자(끝나기 전에) 부른다 */
+export interface SendFrom { by: string; current: string | null; talkKey: string | null; pins: Pin[]; onStart?: (r: { key: string; via?: number; turn: string }) => void }
 /** 화면 뒤에서 도는 긴 일(PPTX 가져오기) 하나. n 이 0 이면 아직 전체 양을 모른다 */
 export interface Job { id: string; label: string; i: number; n: number; note?: string }
 export interface Release { name: string; tag: string; n: number; hash: string; file: string; notes: string; at: string }
@@ -77,13 +91,25 @@ interface S {
 	insertReq: { text: string; whole?: boolean; k: number } | null;
 	pins: Pin[];
 	turns: Turn[];
-	sessionId: string | null;
+	sessions: Session[];
+	/** 쪽 id → 그 쪽을 처음 고친 세션 key */
+	bind: Record<string, string>;
+	/** 지금 대화 — 대화칸에 보이는 세션이자, 아직 어느 세션도 고치지 않은 쪽에 대한 요청이 가는 세션.
+	 *  마지막에 쓰인 세션 · 「새 대화」로 연 세션 · 세션 목록에서 고른 세션 */
+	talkKey: string | null;
+	/** 도는 턴이 하나라도 있으면 그중 하나 (직접 편집 · 되돌리기 · 판 되돌리기를 막는 데 쓴다) */
 	running: string | null;
+	/** 세션 key → 그 세션에서 도는 턴 — 다른 세션끼리는 함께 돈다 */
+	runs: Record<string, string>;
 	versions: Commit[];
 	releases: Release[];
 	preview: Commit | null;
 	/** 되돌릴 수 있는 걸음 수 · 다시 할 수 있는 걸음 수 — 제목 줄 단추가 켜고 끈다 */
 	hist: { u: number; r: number };
+	/** 협업: 사람마다 되돌릴 수 있는 걸음 수 (브라우저 팀원의 제목 줄 단추) */
+	histBy: Record<string, { u: number; r: number }>;
+	/** 협업: 쪽마다 마지막으로 손으로 고친 사람 · 때 — 「○○ 님이 고치는 중」 */
+	editing: Record<string, { by: string; at: number }>;
 	busy: string | null;
 	/** busy 와 달리 화면을 막지 않는 일. 프로젝트를 닫아도 남는다 */
 	jobs: Job[];
@@ -95,14 +121,6 @@ interface S {
 	vdiffMask: boolean;
 	/** 앱 밖 Claude Code 가 CLI 로 마지막에 다룬 덱 · 때 · 명령 (remote.ts touch). OUTSIDE_MS 안이면 그 덱에서 보내기 전에 한 번 묻는다 */
 	outside: { dir: string; at: number; cmd: string } | null;
-	/** 담당 정의 · 맡은 세션 · 한 일 (seats.ts) */
-	seats: Seat[];
-	presence: Record<string, Presence>;
-	activity: Activity[];
-	/** 담당이 방금 고친 쪽 — 쪽 id → 담당 번호 · 때. 쪽 목록이 담당 색으로 보인다 */
-	touched: Record<string, { seat: number; at: number }>;
-	/** 맡은 담당이 없는 변경 — 일하던 담당 누구의 범위에도 들지 않는 파일이 바뀌었다 */
-	strays: { path: string; at: number; seats: number[] }[];
 
 	openProject: (dir: string) => Promise<void>;
 	closeProject: () => Promise<void>;
@@ -115,16 +133,28 @@ interface S {
 	duplicateSlide: (i: number) => Promise<void>;
 	moveSlide: (from: number, to: number) => void;
 	removeSlide: (i: number) => void;
-	addPin: (p: Omit<Pin, "id" | "at">) => string;
+	/** by · id — 협업 브라우저 팀원이 꽂은 핀 (그 사람 이름 · 브라우저가 정한 id) */
+	addPin: (p: Omit<Pin, "id" | "at" | "by">, by?: string, id?: string) => string;
 	updatePin: (id: string, text: string) => void;
 	removePin: (id: string) => void;
-	/** force — 앱 밖 Claude Code 가 방금 이 덱을 다뤘어도 보낸다 (알림의 「그래도 보내기」) */
-	send: (text: string, attachments?: string[], force?: boolean) => Promise<void>;
-	stop: () => void;
-	applyDirect: (slideId: string, path: number[] | null, op: Op) => Promise<void>;
-	/** 손으로 고친 것(끌기 · 방향키 이동 · 글 고치기 · 지우기)을 한 걸음 되돌린다 (Ctrl+Z) · 다시 한다 (Ctrl+Y) */
-	undo: () => Promise<void>;
-	redo: () => Promise<void>;
+	/** 의견 해결 · 다시 열기 */
+	resolvePin: (id: string, done: boolean) => void;
+	/** 의견 하나를 그 쪽의 세션에 보낸다 — 「○○ 님 의견을 반영해 줘」. from 이 없으면 이 기기 사람이 보낸다 */
+	sendPin: (id: string, from?: { by: string; talkKey: string | null }) => Promise<void>;
+	/** force — 앱 밖 Claude Code 가 방금 이 덱을 다뤘어도 보낸다 (알림의 「그래도 보내기」).
+	 *  from — 협업 브라우저 팀원이 보낸 요청 (collab.ts). 보낸 사람 · 그 사람이 보던 쪽 · 그 사람의 지금 대화로 처리하고, 호스트 화면(보는 대화 · 핀)은 건드리지 않는다 */
+	send: (text: string, attachments?: string[], force?: boolean, from?: SendFrom) => Promise<void>;
+	/** turn 을 주지 않으면 지금 대화의 도는 턴 */
+	stop: (turn?: string) => void;
+	/** 새 세션을 열어 지금 대화로 삼는다 — 대화칸이 빈 새 대화가 된다 */
+	newTalk: () => void;
+	/** 그 세션의 대화를 본다 — 지금 대화가 된다 (처음 고치는 쪽이 이 세션으로 간다) */
+	viewSession: (key: string) => void;
+	/** by — 고친 사람 (협업 브라우저 팀원이면 그 이름, 없으면 이 기기의 이름) */
+	applyDirect: (slideId: string, path: number[] | null, op: Op, by?: string) => Promise<void>;
+	/** 손으로 고친 것(끌기 · 방향키 이동 · 글 고치기 · 지우기)을 한 걸음 되돌린다 (Ctrl+Z) · 다시 한다 (Ctrl+Y). by 의 걸음만 */
+	undo: (by?: string) => Promise<void>;
+	redo: (by?: string) => Promise<void>;
 	refreshVersions: () => Promise<void>;
 	setPreview: (c: Commit | null) => void;
 	restore: (c: Commit) => Promise<void>;
@@ -143,33 +173,34 @@ interface S {
 	/** 요청칸에 @v<n> 을 넣는다 */
 	mentionVersion: (n: number) => void;
 	fixDiff: (report: Report) => void;
-	/** 담당 파일을 다시 읽는다 — 덱을 열 때 · CLI 가 알릴 때(remote.ts touch · refresh) · 몇 초마다 */
-	loadSeats: () => Promise<void>;
-	saveSeats: (seats: Seat[]) => Promise<void>;
-	/** 맡은 세션을 내보낸다 — 그 세션이 다시 join 하기 전까지 비어 있다 */
-	vacate: (no: number) => Promise<void>;
-	clearStrays: () => void;
 }
 
-let unlisten: (() => void)[] = [];
+/** 사건 리스너(deck-fs · claude)는 앱에 한 벌만 — 덱을 열 때마다 붙였다 떼면, openProject 가 겹쳐 불릴 때(다시 켠 뒤 덱 열기 + 사용자 클릭 등)
+ *  두 벌 붙어 Claude 글자가 두 번 찍혔다. 받은 사건은 지금 연 덱(id) · 지금 도는 턴 것만 쓴다 */
+let listening: Promise<unknown> | null = null;
 /** 이 앱을 켜 둔 동안 글꼴을 물어본 프로젝트 — 열 때마다 같은 것을 다시 묻지 않는다 */
 const fontAsked = new Set<string>();
 let directTimer: ReturnType<typeof setTimeout> | undefined;
 // 되돌리기 — 손으로 고치기 전의 슬라이드 파일 글을 쌓는다. 파일을 통째로 되쓰면 감시가 쪽을 다시 그린다.
 // Claude 턴 · 판 되돌리기 · 다른 덱 열기 때 비운다 — 그 뒤에 옛 글을 되쓰면 Claude 가 고친 것이 함께 사라진다.
 // Claude 의 턴 자체는 「판」으로 되돌린다
-type Snap = { file: string; text: string };
+// 협업: 걸음마다 고친 사람(by)을 단다 — 되돌리기는 사람마다 제 것만 (팀원의 Ctrl+Z 가 다른 사람이 고친 것을 걷지 않게)
+// 협업: after 는 그 걸음 직후의 파일 글 — 되돌릴 때 파일이 아직 그 글이어야 되쓴다. 그 사이 다른 사람이 같은 쪽을 고쳤으면
+// 파일을 통째로 되쓰면 그 사람이 고친 것까지 사라진다 (2026.11.25 협업 시험에서 찾음) — 그때는 되돌리지 않고 알린다
+type Snap = { file: string; text: string; after: string | null; by: string };
 let undoStack: Snap[] = [];
 let redoStack: Snap[] = [];
 const UNDO_MAX = 100;
 // 쌓임은 모듈 변수라 화면이 모른다 — 바뀔 때마다 걸음 수를 상태로 알린다
-const syncHist = () => useDeck.setState({ hist: { u: undoStack.length, r: redoStack.length } });
+const histOf = (by: string) => ({ u: undoStack.filter((x) => x.by === by).length, r: redoStack.filter((x) => x.by === by).length });
+const syncHist = () => {
+	const names = new Set([...undoStack, ...redoStack].map((x) => x.by));
+	useDeck.setState({ hist: histOf(me()), histBy: Object.fromEntries([...names].map((n) => [n, histOf(n)])) });
+};
 const clearUndo = () => { undoStack = []; redoStack = []; syncHist(); };
 // 손 편집 · 되돌리기는 한 줄로 차례대로 돈다 — 방향키 이동을 쓰는 중에 Ctrl+Z 가 같은 파일을 읽고 쓰면 하나가 다른 것을 덮는다
 let queue: Promise<unknown> = Promise.resolve();
 const serial = (f: () => Promise<void>) => { const r = queue.then(f, f); queue = r.catch(() => {}); return r; };
-// 담당 저장도 한 줄로 — 이름을 치는 동안 연달아 불려도 앞의 저장이 뒤의 것을 덮지 않게
-let seatWrites: Promise<unknown> = Promise.resolve();
 
 let compareTimer: ReturnType<typeof setTimeout> | undefined;
 /** 비교 중에 파일이 바뀌면(Claude 턴 · 손 편집 · 되돌리기) 잠잠해진 뒤 다시 견준다 */
@@ -195,7 +226,7 @@ function verifyPptx(get: () => S, deck: Deck, built: Built) {
 		jobs: st.jobs.some((j) => j.id === job) ? st.jobs.map((j) => (j.id === job ? { ...j, note: n } : j)) : [...st.jobs, { id: job, label: tNow("verifying"), i: 0, n: 0, note: n }],
 	}));
 	note("PowerPoint");
-	runCheck(dir, id, deck, versions[0]?.n ?? 0, note, built)
+	import("./check").then(({ runCheck, needsFix, SAME }) => runCheck(dir, id, deck, versions[0]?.n ?? 0, note, built)
 		.then((report) => {
 			if (get().dir !== dir) return;
 			const bad = report.slides.filter(needsFix);
@@ -207,36 +238,58 @@ function verifyPptx(get: () => S, deck: Deck, built: Built) {
 			get().notify(msg, differ.length ? "err" : "ok", { action: { label: tNow("fixDiff"), run: () => get().fixDiff(report) } });
 		})
 		.catch((e) => { if (get().dir === dir) get().notify(`${tNow("pptxNoCheck")}. ${String(e)}`, "err"); })
-		.finally(() => { useDeck.setState((st) => ({ jobs: st.jobs.filter((j) => j.id !== job) })); });
+		.finally(() => { useDeck.setState((st) => ({ jobs: st.jobs.filter((j) => j.id !== job) })); }))
+		// 검사 모듈을 불러오지 못했을 때
+		.catch((e) => { useDeck.setState((st) => ({ jobs: st.jobs.filter((j) => j.id !== job) })); get().notify(String(e), "err"); });
 }
 
 /** 손으로 고친 것은 몇 번이고 이어서 하므로 잠잠해지면 한 판으로 묶는다. 그새 턴이 돌면 끝난 뒤로 미룬다 */
-function directCommit(dir: string, get: () => S) {
+/** 잠잠해지기 전까지 손으로 고친 사람들 — 그 판의 작성자 */
+let directBy = new Set<string>();
+function directCommit(dir: string, get: () => S, by: string) {
 	clearTimeout(directTimer);
+	directBy.add(by);
 	const flush = async () => {
 		if (get().dir !== dir) return;
 		if (get().running) { directTimer = setTimeout(flush, 2000); return; }
-		await api.commit(dir, tNow("direct"), heldFiles(get())).catch(() => null);
+		const authors = [...directBy].filter(Boolean).join(" · ");
+		directBy = new Set();
+		await api.commit(dir, tNow("direct"), authors || me()).catch(() => null);
 		get().refreshVersions();
 	};
 	directTimer = setTimeout(flush, 4000);
 }
 
 /** from 에서 하나 꺼내 그 파일을 되쓰고, 지금 글은 to 에 쌓는다 — undo · redo 가 같은 길을 반대로 쓴다 */
-async function step(get: () => S, from: Snap[], to: Snap[]) {
+async function step(get: () => S, from: Snap[], to: Snap[], by: string) {
 	const { dir, deck } = get();
 	if (!dir || !deck || get().preview) return;
 	if (get().running) return get().notify(tNow("working"), "err");
-	const snap = from.pop();
-	if (!snap) return;
+	// 이 사람의 마지막 걸음 — 다른 사람의 걸음은 건너뛴다
+	const k = from.map((x) => x.by).lastIndexOf(by);
+	if (k < 0) return;
+	const [snap] = from.splice(k, 1);
 	const now = await api.readText(dir, snap.file).catch(() => null);
+	if (snap.after != null && now !== snap.after) {
+		syncHist();
+		const msg = tNow("undoBlocked");
+		if (by !== me()) throw new Error(msg);
+		return get().notify(msg, "err");
+	}
 	await api.writeText(dir, snap.file, snap.text);
-	if (now != null) to.push({ file: snap.file, text: now });
+	if (now != null) to.push({ file: snap.file, text: now, after: snap.text, by });
 	syncHist();
-	// 되돌린 쪽이 다른 쪽이면 그 쪽으로 간다 — 보이지 않는 곳에서 바뀌면 되돌렸는지 알 수 없다
+	// 되돌린 쪽이 다른 쪽이면 그 쪽으로 간다 — 보이지 않는 곳에서 바뀌면 되돌렸는지 알 수 없다 (호스트 화면만 — 팀원의 되돌리기로 호스트가 보는 쪽이 넘어가지 않게)
 	const i = deck.slides.findIndex((x) => x.file === snap.file);
-	if (i >= 0 && i !== get().current) get().setCurrent(i);
-	directCommit(dir, get);
+	if (by === me() && i >= 0 && i !== get().current) get().setCurrent(i);
+	markEditing(get, deck.slides[i]?.id, by);
+	directCommit(dir, get, by);
+}
+
+/** 이 쪽을 지금 손으로 고친 사람 — 협업 화면이 「○○ 님이 고치는 중」을 보인다 */
+function markEditing(get: () => S, slideId: string | undefined, by: string) {
+	if (!slideId) return;
+	useDeck.setState({ editing: { ...get().editing, [slideId]: { by, at: Date.now() } } });
 }
 
 /** 앱 밖 Claude Code 의 마지막 명령 뒤 이 시간 안이면 그 덱에서 보내기 전에 묻는다.
@@ -249,8 +302,83 @@ export const sameDir = (a: string, b: string) => {
 };
 
 const persistPins = (dir: string, pins: Pin[]) => api.writeText(dir, ".claudeppt/pins.json", JSON.stringify(pins, null, 1)).catch(() => {});
-const persistTalk = (dir: string, turns: Turn[], sessionId: string | null) =>
-	api.writeText(dir, ".claudeppt/talk.json", JSON.stringify({ sessionId, turns: turns.map((t) => (t.status === "running" ? { ...t, status: "stopped" } : t)) }, null, 1)).catch(() => {});
+/** .claudeppt/talk.json — sessionId 는 세션이 하나뿐이던 때(2026.11.25 전)의 칸. 옛 앱도 읽게 지금 대화의 세션을 적어 둔다 */
+type TalkFile = { turns: Turn[]; sessions?: Session[]; bind?: Record<string, string>; talkKey?: string | null; sessionId?: string | null };
+export const persistTalk = (dir: string, st: Pick<S, "turns" | "sessions" | "bind" | "talkKey">) => {
+	const file: TalkFile = {
+		sessions: st.sessions,
+		bind: st.bind,
+		talkKey: st.talkKey,
+		sessionId: st.sessions.find((x) => x.key === st.talkKey)?.claude ?? null,
+		turns: st.turns.map((t) => (t.status === "running" ? { ...t, status: "stopped" } : t)),
+	};
+	return api.writeText(dir, ".claudeppt/talk.json", JSON.stringify(file, null, 1)).catch(() => {});
+};
+/** 다음 세션 — s1 · s2 … */
+export const nextSession = (list: Session[]): Session => ({ key: "s" + (Math.max(0, ...list.map((x) => Number(x.key.slice(1)) || 0)) + 1), claude: null, at: Date.now() });
+/** 「설정 › 협업」이 켜져 있나 — 꺼져 있으면 세션 하나 · 이름 없이 전처럼 돈다 */
+export const team = () => useSettings.getState().s.collab.on;
+/** 이 기기를 쓰는 팀원 — 협업을 켰을 때만. 판의 작성자로도 남긴다 (꺼져 있으면 빈 글 → 판 작성자는 전처럼 ClaudePPT) */
+export const me = () => (team() ? useSettings.getState().s.me.trim() : "");
+/** 새 Claude 세션 id (--session-id) */
+const uuid = (): string =>
+	crypto.randomUUID?.() ??
+	[...crypto.getRandomValues(new Uint8Array(16))]
+		.map((b, i) => (i === 6 ? (b & 15) | 64 : i === 8 ? (b & 63) | 128 : b).toString(16).padStart(2, "0"))
+		.join("")
+		.replace(/^(.{8})(.{4})(.{4})(.{4})/, "$1-$2-$3-$4-");
+/** 세션 기록을 잃었을 때 새 세션 앞에 붙일 요약 — 이 세션의 최근 요청 · 답 · 고친 파일과 시킨 사람 (오래된 것부터) */
+export function recapOf(turns: Turn[], key: string, skip: string): string {
+	const mine = turns.filter((t) => t.session === key && t.id !== skip && t.status !== "running").slice(-8);
+	if (!mine.length) return "";
+	const cut = (s: string, n: number) => {
+		const one = s.replace(/\s+/g, " ").trim();
+		return one.length > n ? one.slice(0, n) + "…" : one;
+	};
+	const lines = mine.map((t) => {
+		const files = [...new Set(t.tools.map((x) => x.file).filter(Boolean))];
+		return `- ${t.by ? `${t.by}: ` : ""}${cut(t.request || t.pins.map((p) => p.text).join(" · "), 300)}\n  → ${cut(t.reply || t.error || "", 400)}` + (files.length ? `\n  files: ${files.join(", ")}` : "");
+	});
+	return `The earlier Claude session for these slides could not be restored. Recent requests in this session, oldest first:\n${lines.join("\n")}\n\n`;
+}
+
+/**
+ * 이 요청이 갈 세션 — 보내기와 요청칸의 「보낼 곳」 미리보기가 같은 규칙을 쓴다.
+ * 협업을 켜면: 요청이 가리키는 쪽(@쪽 → 핀을 꽂은 쪽 → 지금 보는 쪽)을 처음 고친 세션이 있으면 그 세션을 잇는다 — 다른 팀원이 쓰던 세션이어도.
+ * 처음 보는 쪽이면 지금 대화(마지막에 쓰인 세션 · 「새 대화」로 연 세션). 꺼져 있으면 늘 지금 대화.
+ * 세션이 하나도 없으면 key 가 null — 보낼 때 새로 연다.
+ * via 는 세션을 정한 쪽의 번호 (지금 대화로 가면 없음)
+ */
+export function routeOf(st: Pick<S, "deck" | "current" | "pins" | "bind" | "sessions" | "talkKey">, text: string): { key: string | null; via?: number; targets: string[] } {
+	const live = (k?: string | null) => !!k && st.sessions.some((x) => x.key === k);
+	const talk = live(st.talkKey) ? st.talkKey : st.sessions.at(-1)?.key ?? null;
+	const deck = st.deck;
+	if (!deck) return { key: talk, targets: [] };
+	const mentions = mentionsIn(text, deck);
+	const cur = deck.slides[st.current];
+	const targets = mentions.length ? mentions.map((m) => m.id) : st.pins.length ? st.pins.map((p) => p.slide) : cur ? [cur.id] : [];
+	if (!team()) return { key: talk, targets };
+	const hit = targets.find((id) => live(st.bind[id]));
+	if (hit) return { key: st.bind[hit], via: deck.slides.findIndex((x) => x.id === hit) + 1, targets };
+	return { key: talk, targets };
+}
+/** 답 글자 조각을 잠깐(30ms) 모았다 한 번에 넣는다. 조각마다 turns 를 바꾸면 대화 · 쪽 목록이 조각 수만큼 다시 그려진다.
+ *  requestAnimationFrame 이 아니라 타이머 — 창을 내리거나 가려도 글자가 쌓이게 */
+const pendingText = new Map<string, string>();
+let textTimer: ReturnType<typeof setTimeout> | undefined;
+function flushText(get: () => S, set: (p: Partial<S>) => void) {
+	clearTimeout(textTimer);
+	textTimer = undefined;
+	if (!pendingText.size) return;
+	const add = new Map(pendingText);
+	pendingText.clear();
+	set({ turns: get().turns.map((t) => (add.has(t.id) ? { ...t, reply: t.reply + add.get(t.id) } : t)) });
+}
+function queueText(get: () => S, set: (p: Partial<S>) => void, turn: string, text: string) {
+	pendingText.set(turn, (pendingText.get(turn) ?? "") + text);
+	textTimer ??= setTimeout(() => flushText(get, set), 30);
+}
+
 const readJson = async <T,>(dir: string, rel: string, d: T): Promise<T> => {
 	try { return JSON.parse(await api.readText(dir, rel)); } catch { return d; }
 };
@@ -262,36 +390,183 @@ const relOf = (dir: string, p?: string) => {
 	return a.toLowerCase().startsWith(d.toLowerCase()) ? a.slice(d.length) : a;
 };
 
-/** 담당이 「고치는 중」이라고 알린 쪽 파일 — 앱의 판(대화 턴 · 직접 편집)에 넣지 않는다. 넣으면 그 담당의 반쯤 고친 쪽이 앱 이름으로 남는다 */
-function heldFiles(st: S): string[] {
-	if (!st.deck) return [];
-	const ids = new Set(st.seats.flatMap((x) => (busy(st.presence[x.no]) ? st.presence[x.no].doing?.slides || [] : [])));
-	return st.deck.slides.filter((x) => ids.has(x.id)).map((x) => x.file);
+/** 동시에 도는 턴의 가장 많은 수 — Claude 프로세스 · 사용량이 한꺼번에 몰리지 않게 */
+const MAX_RUNS = 3;
+/** 턴이 고친 파일을 알려 주는 도구 — 함께 돈 턴의 판에 이 파일들만 담는다 */
+const EDIT_TOOLS = ["Write", "Edit", "MultiEdit", "NotebookEdit"];
+type Waiting = { turn: string; key: string; exec: () => Promise<void>; done: () => void };
+/** 기다리는 턴 — 앞에서부터, 그 세션이 비고 자리가 나면 돈다 */
+let waiting: Waiting[] = [];
+/** 턴 세우기는 한 줄로 — 「도는 중 · 기다리는 턴」을 본 뒤 턴을 세우기까지 판 남기기를 기다리는 틈에 다른 요청(다른 팀원 · 같은 요청 두 번)이
+ *  끼어들면 한 세션에 턴 둘이 함께 돌았다 (2026.11.25 협업 시험에서 찾음). 실행은 세션마다 따로 돈다 */
+let sendChain: Promise<unknown> = Promise.resolve();
+
+const setRuns = (set: (p: Partial<S>) => void, runs: Record<string, string>) => set({ runs, running: Object.values(runs)[0] ?? null });
+
+function startRun(get: () => S, set: (p: Partial<S>) => void, w: Waiting) {
+	setRuns(set, { ...get().runs, [w.key]: w.turn });
+	set({ turns: get().turns.map((t) => (t.id === w.turn && t.status === "queued" ? { ...t, status: "running" } : t)) });
+	const dir = get().dir;
+	w.exec().finally(() => {
+		const runs = { ...get().runs };
+		delete runs[w.key];
+		setRuns(set, runs);
+		if (get().dir === dir) {
+			persistTalk(dir, get());
+			get().refreshVersions();
+		}
+		w.done();
+		pump(get, set);
+	});
 }
 
-/**
- * 폴더 감시가 잡은 변경을 담당에 잇는다. 앱이 쓴 변경(직접 편집 · 앱 안 Claude · 되돌리기)은 건너뛴다.
- * 누가 고쳤는지 파일만으로는 모른다 — 「고치는 중」이라고 알린 담당, 아니면 그 파일을 맡은 일하는 담당이 하나뿐일 때 그 담당으로 본다.
- * 일하는 담당이 있는데 누구의 범위에도 들지 않으면 strays 에 남긴다 (CLI 의 commit 도 그 파일을 판에 넣지 않는다)
- */
-function attribute(get: () => S, set: (p: Partial<S>) => void, paths: string[]) {
-	const { seats, presence, deck, running } = get();
-	if (!seats.length || !deck || running || Date.now() - localWriteAt() < 2500) return;
-	const live = seats.filter((x) => busy(presence[x.no]));
-	if (!live.length) return;
-	const now = Date.now();
-	const touched = { ...get().touched };
-	const strays = get().strays.filter((x) => !paths.includes(x.path));
-	// 덱 파일만 본다 — 편집기 · 셸이 잠깐 쓰는 임시 파일(slides/sedXXXX · *.tmp)과 폴더 자체의 변경까지 잡으면 헛경보가 쏟아진다.
-	// 2026.11.25 : 두 세션 동시 수정 시험에서 sed -i 의 임시 파일 20개가 「맡은 담당이 없는 변경」으로 떴다
-	for (const p of paths.filter((x) => /^slides\/[^/]+\.html$/.test(x) || x === "theme.css" || x === "deck.json")) {
-		const sl = deck.slides.find((x) => x.file === p);
-		const said = sl ? live.filter((x) => presence[x.no].doing?.slides.includes(sl.id)) : [];
-		const who = said.length ? said : live.filter((x) => owns(x, deck, p));
-		if (sl && who.length === 1) touched[sl.id] = { seat: who[0].no, at: now };
-		if (!who.length) strays.unshift({ path: p, at: now, seats: live.map((x) => x.no) });
+/** 자리가 났다 — 기다리는 턴을 앞에서부터 돌린다 (그 세션이 비어 있고 동시 상한 안이면) */
+function pump(get: () => S, set: (p: Partial<S>) => void) {
+	for (const w of [...waiting]) {
+		const runs = get().runs;
+		if (Object.keys(runs).length >= MAX_RUNS) break;
+		if (runs[w.key]) continue;
+		waiting = waiting.filter((x) => x !== w);
+		startRun(get, set, w);
 	}
-	set({ touched, strays: strays.slice(0, 20) });
+}
+
+/** 요청 한 턴을 세운다 — 세션 고르기 · 턴 만들기. 바로 돌거나 기다린다. 돌려주는 약속은 그 턴이 끝날 때 풀린다 */
+async function sendTurn(get: () => S, set: (p: Partial<S>) => void, text: string, attachments: string[], force: boolean, from?: SendFrom): Promise<{ done: Promise<void> } | undefined> {
+	const { dir, deck } = get();
+	if (!deck) return;
+	const deck0 = deck;
+	// 협업 팀원의 요청은 그 사람이 보던 쪽 · 그 사람의 핀으로
+	const pins = from ? from.pins : get().pins.filter((p) => isMine(p, me()));
+	const current = from ? Math.max(0, deck.slides.findIndex((x) => x.id === from.current)) : get().current;
+	if (!text.trim() && !pins.length && !attachments.length) return;
+	// 협업을 켰으면 누가 보냈는지 남겨야 한다 — 이름이 없으면 보내지 않는다 (요청칸 위에 이름 칸이 뜬다).
+	// 브라우저 팀원의 요청은 서버가 기기마다 정한 이름
+	const by = from ? from.by : me();
+	if (!from && team() && !by) {
+		if (text.trim()) get().refill(text);
+		get().notify(tNow("myNameAsk"), "err");
+		return;
+	}
+	// 앱 밖 Claude Code 가 방금 이 덱을 다뤘으면 한 번 묻는다 — 그쪽이 고치던 파일이 이 턴의 판에 섞이고, 같은 쪽을 둘이 고치면 한쪽이 덮인다.
+	// 요청칸은 보내며 비워지므로 글을 되돌려 놓는다
+	const out = get().outside;
+	if (!force && !from && out && sameDir(out.dir, dir) && Date.now() - out.at < OUTSIDE_MS) {
+		if (text.trim()) get().refill(text);
+		const run = () => {
+			if (text.trim()) get().refill("");
+			get().send(text, attachments, true);
+		};
+		get().notify(tNow("outsideBusy").replace("{cmd}", out.cmd), "err", { action: { label: tNow("sendAnyway"), run } });
+		return;
+	}
+	clearUndo();
+	const s = useSettings.getState().s;
+	// 직접 편집이 남아 있으면 먼저 판으로 — Claude 의 판과 섞이지 않게. 도는 턴이 있으면 하지 않는다
+	// (그동안은 직접 편집을 받지 않아 남은 것이 없고, 하면 도는 턴이 고치던 파일을 「직접 편집」 판에 쓸어 담는다)
+	clearTimeout(directTimer);
+	if (!get().running) await api.commit(dir, tNow("direct"), by).catch(() => {});
+	const order = (id: string) => deck.slides.findIndex((x) => x.id === id) + 1;
+	// 다른 사람이 남긴 의견이면 Claude 에게 누구의 의견인지 알린다
+	const notes: PinNote[] = pins.map((p, i) => ({ n: i + 1, slide: p.slide, slideNo: order(p.slide), x: p.x, y: p.y, text: p.text, target: p.target, shape: p.shape, by: p.by && p.by !== by ? p.by : undefined }));
+	const cur = deck.slides[current];
+	const mentions = mentionsIn(text, deck);
+	const versionMentions = versionMentionsIn(text, get().versions);
+	// 세션 고르기 (routeOf). 보고 있던 대화와 다른 세션으로 가면 알리고, 대화칸도 그 세션으로 옮긴다 — 보낸 요청이 보이게
+	const route = routeOf(from ? { ...get(), current, talkKey: from.talkKey, pins } : get(), text);
+	let { sessions } = get();
+	let key = route.key;
+	if (!key) {
+		const ns = nextSession(sessions);
+		sessions = [...sessions, ns];
+		key = ns.key;
+		set({ sessions });
+	}
+	// 이 요청이 가리킨 쪽(@쪽 · 핀 · 보던 쪽)을 바로 이 세션에 붙인다 — 턴이 끝나기 전에 같은 쪽 요청이 오면 다른 세션으로 가서
+	// 두 세션이 같은 파일을 함께 고치지 않게 (같은 세션이면 차례로 기다린다). 이미 다른 세션에 붙은 쪽은 그대로
+	const claim = { ...get().bind };
+	for (const id of route.targets) if (!claim[id]) claim[id] = key;
+	set({ bind: claim });
+	if (!from && get().talkKey && key !== get().talkKey && route.via) get().notify(tNow("routedTo").replace("{no}", String(route.via)).replace("{n}", key.slice(1)), "ok");
+	// 같은 세션의 앞 턴이 돌거나 기다리는 중이면, 또는 동시에 도는 수가 찼으면 기다린다 — 같은 세션은 차례로, 다른 세션끼리는 함께
+	const wait = !!get().runs[key] || waiting.some((w) => w.key === key) || Object.keys(get().runs).length >= MAX_RUNS;
+	const turn: Turn = { id: "t" + Date.now().toString(36) + Math.random().toString(36).slice(2, 5), at: Date.now(), request: text.trim(), pins: notes, mentions, versionMentions, attach: attachments.length ? [...attachments] : undefined, reply: "", tools: [], status: wait ? "queued" : "running", by: by || undefined, session: key };
+	// 지금 대화 = 마지막에 쓰인 세션. 팀원의 요청이면 호스트가 보는 대화는 그대로 두고 그 팀원의 핀만 걷는다
+	set(from ? { turns: [...get().turns, turn], pins: get().pins.filter((p) => !pins.includes(p)) } : { turns: [...get().turns, turn], pins: get().pins.filter((p) => !pins.includes(p)), talkKey: key });
+	persistPins(dir, get().pins);
+	persistTalk(dir, get());
+	from?.onStart?.({ key, via: route.via, turn: turn.id });
+	const patch = (fn: (t: Turn) => Turn) => set({ turns: get().turns.map((t) => (t.id === turn.id ? fn(t) : t)) });
+
+	// 실행 — 자리가 나면 돈다. 세션의 Claude id · 덱은 돌 때 읽는다 (앞 턴이 그 세션을 열었거나 쪽을 바꿨을 수 있다)
+	const exec = async () => {
+		const session = get().sessions.find((x) => x.key === key)!;
+		const deck = get().deck ?? deck0;
+		try {
+			// 표시가 있으면 그 쪽 그림 위에 그려 붙인다. 못 만들어도 좌표 글은 가므로 턴은 그대로 돈다
+			if (notes.some((n) => n.shape)) {
+				patch((t) => ({ ...t, phase: tNow("marking") }));
+				attachments = [...attachments, ...(await markedPictures(dir, get().id, deck, notes).catch(() => []))];
+				patch((t) => ({ ...t, phase: undefined }));
+			}
+			// 판 멘션 — 그 판 파일을 .claudeppt/versions/v<n>/ 에 펼치고 지금과 다른 쪽을 적어 넘긴다. 못 펼친 판은 번호만이라도 알린다
+			const vlines: string[] = [];
+			for (const v of versionMentions) {
+				const c = get().versions.find((x) => x.hash === v.hash);
+				vlines.push(c ? await versionContext(dir, get().id, deck, c).catch((e) => `- @v${v.n}: could not be read (${e})`) : `- @v${v.n}: not found`);
+			}
+			// 협업을 켜면 한 세션을 여러 팀원이 이어 쓰므로 누가 시킨 것인지 알린다 — 「아까 말한 것」이 누구 말인지 가린다
+			const prompt = (by ? `Request from teammate: ${by}\n\n` : "") + turnPrompt(text, notes, cur ? { id: cur.id, no: current + 1 } : null, attachments, mentions, vlines, deck);
+			// 새 세션은 앱이 id 를 정한다 — 턴이 멈춰도 그 세션의 기록을 찾아 덱에 남긴다 (claude.rs)
+			const run = (p: string, resume: string | null) =>
+				api.claudeRun({ turn: turn.id, dir, prompt: p, system: systemPrompt(s, deck), claudePath: s.claude.path, model: s.claude.model, effort: s.claude.effort, resume, sessionId: resume ? null : uuid() });
+			let r = await run(prompt, session.claude);
+			flushText(get, set);
+			// 세션 기록을 claude 쪽에서도 덱에서도 찾지 못했다 (기록 없이 옮겨 온 덱 · 지운 기록 · UUID 가 아닌 옛 id). 그대로 두면 이 세션을 이을 때마다 실패하고
+			// 장표의 맥락이 끊긴다 — 이 세션의 지난 요청 · 답을 요약해 앞에 붙여 새 Claude 세션으로 한 번 더 돌린다
+			if (session.claude && r.code !== 0 && /No conversation found|requires a valid session ID/i.test(r.stderr) && get().turns.find((t) => t.id === turn.id)?.status !== "stopped") {
+				set({ sessions: get().sessions.map((x) => (x.key === key ? { ...x, claude: null } : x)) });
+				patch((t) => ({ ...t, error: undefined, reply: "", tools: [], cost: undefined, phase: tNow("sessionRecovering") }));
+				r = await run(recapOf(get().turns, key, turn.id) + prompt, null);
+				flushText(get, set);
+				patch((t) => ({ ...t, phase: undefined }));
+				// 협업이 꺼져 있으면 세션 번호가 화면에 없다 — 번호 없이 알린다
+				get().notify(team() ? tNow("sessionRecovered").replace("{n}", key.slice(1)) : tNow("sessionRecoveredOne"), "ok");
+			}
+			const t0 = get().turns.find((t) => t.id === turn.id)!;
+			let status: Turn["status"] = t0.status === "stopped" ? "stopped" : r.code === 0 && !t0.error ? "done" : "failed";
+			if (status === "failed" && !t0.error) patch((t) => ({ ...t, error: r.stderr.trim().split("\n").slice(-3).join("\n") || `exit ${r.code}` }));
+			// 그림 자리 채우기
+			const fresh = await readDeck(dir).catch(() => get().deck!);
+			set({ deck: fresh });
+			if (status !== "stopped" && s.image.provider !== "svg") {
+				const errs = await fillGenerated(dir, fresh, s, (p) => patch((t) => ({ ...t, phase: `${tNow("generating")} · ${p}` })));
+				if (errs.length) patch((t) => ({ ...t, error: [t.error, ...errs].filter(Boolean).join("\n") }));
+			}
+			// 이 턴이 처음 고친 쪽은 이 세션으로 확정한다 — 이미 다른 세션에 확정된 쪽은 그대로 둔다
+			const wrote = new Set(get().turns.find((t) => t.id === turn.id)!.tools.filter((x) => x.name === "Write" || x.name === "Edit" || x.name === "MultiEdit").map((x) => x.file));
+			const bind = { ...get().bind };
+			for (const sl of fresh.slides) if (wrote.has(sl.file) && !bind[sl.id]) bind[sl.id] = key;
+			set({ bind });
+			const summary = (text.trim() || notes.map((n) => n.text).join(" · ") || "핀").replace(/\s+/g, " ").slice(0, 72);
+			// 다른 세션의 턴이 함께 돌고 있으면 이 턴이 고친 파일만 판에 담는다 — 아직 도는 턴이 고치던 파일이 섞이지 않게.
+			// 혼자 돌았으면 전처럼 통째로 (그림 채우기가 만든 파일 · 함께 돌던 턴이 남긴 것까지)
+			const others = Object.keys(get().runs).filter((k) => k !== key).length > 0;
+			const touched = [...new Set(get().turns.find((t) => t.id === turn.id)!.tools.filter((x) => EDIT_TOOLS.includes(x.name)).map((x) => x.file).filter((x): x is string => !!x))];
+			const c = await (others ? api.commitPaths(dir, summary, by, touched) : api.commit(dir, summary, by)).catch(() => null);
+			patch((t) => ({ ...t, status, phase: undefined, version: c ? { n: c.n, short: c.short, hash: c.hash } : undefined }));
+		} catch (e) {
+			patch((t) => ({ ...t, status: "failed", error: String(e) }));
+		}
+	};
+	// 약속을 바로 돌려주면 async 함수가 그것을 풀어 끝날 때까지 기다린다 — 감싸서 돌려준다 (턴 세우기 줄이 턴이 끝날 때까지 막혔다)
+	return {
+		done: new Promise<void>((done) => {
+			const w: Waiting = { turn: turn.id, key, exec, done };
+			if (wait) waiting.push(w);
+			else startRun(get, set, w);
+		}),
+	};
 }
 
 export const useDeck = create<S>()((set, get) => ({
@@ -306,12 +581,17 @@ export const useDeck = create<S>()((set, get) => ({
 	insertReq: null,
 	pins: [],
 	turns: [],
-	sessionId: null,
+	sessions: [],
+	bind: {},
+	talkKey: null,
 	running: null,
+	runs: {},
 	versions: [],
 	releases: [],
 	preview: null,
 	hist: { u: 0, r: 0 },
+	histBy: {},
+	editing: {},
 	busy: null,
 	jobs: [],
 	toast: null,
@@ -319,11 +599,6 @@ export const useDeck = create<S>()((set, get) => ({
 	vdiff: null,
 	vdiffMask: true,
 	outside: null,
-	seats: [],
-	presence: {},
-	activity: [],
-	touched: {},
-	strays: [],
 
 	openProject: async (dir) => {
 		await get().closeProject();
@@ -331,21 +606,22 @@ export const useDeck = create<S>()((set, get) => ({
 		const id = await api.open(dir);
 		await api.vcsInit(dir);
 		const pins = await readJson<Pin[]>(dir, ".claudeppt/pins.json", []);
-		const talk = await readJson<{ sessionId: string | null; turns: Turn[] }>(dir, ".claudeppt/talk.json", { sessionId: null, turns: [] });
+		const talk = await readJson<TalkFile>(dir, ".claudeppt/talk.json", { turns: [] });
+		// 2026.11.25 전 talk.json 은 세션 하나(sessionId)뿐이었다 — 그 세션을 세션 1 로 옮기고 지난 턴을 그 세션에 단다.
+		// 쪽 확정(bind)은 비워 둔다 — 그 쪽들은 다음에 고칠 때 지금 대화(= 세션 1)로 가서 확정된다
+		const sessions: Session[] = talk.sessions ?? (talk.sessionId ? [{ key: "s1", claude: talk.sessionId, at: 0 }] : []);
+		const turns = talk.sessions ? talk.turns : talk.turns.map((t) => ({ ...t, session: t.session ?? sessions[0]?.key }));
+		const talkKey = talk.talkKey ?? sessions.at(-1)?.key ?? null;
 		const releases = await readJson<Release[]>(dir, "releases/releases.json", []);
 		clearUndo();
-		set({ dir, id, deck, rev: {}, current: 0, mode: "edit", tool: "select", pins, turns: talk.turns, sessionId: talk.sessionId, versions: [], releases, preview: null, vdiff: null, touched: {}, strays: [] });
-		await get().loadSeats();
-		// 담당 세션은 앱이 꺼져 있어도 일한다 — CLI 의 알림(touch)이 없어도 몇 초마다 다시 읽어 「일하는 중」이 풀리는 것까지 보인다
-		const poll = setInterval(() => { if (get().dir === dir) get().loadSeats(); }, 8000);
-		unlisten.push(() => clearInterval(poll));
+		set({ dir, id, deck, rev: {}, current: 0, mode: "edit", tool: "select", pins, turns, sessions, bind: talk.bind ?? {}, talkKey, versions: [], releases, preview: null, vdiff: null });
 		useSettings.getState().remember(dir);
 		// 처음 여는 프로젝트(가져오기 직후)면 첫 판을 남긴다
 		const log = await api.log(dir, 1);
-		if (!log.length) await api.commit(dir, deck.source?.kind === "pptx" ? "PPTX 가져옴" : "새로 만듦");
+		if (!log.length) await api.commit(dir, deck.source?.kind === "pptx" ? "PPTX 가져옴" : "새로 만듦", me());
 		await get().refreshVersions();
-		unlisten.push(
-			await listen<{ id: string; paths: string[] }>("deck-fs", async (e) => {
+		listening ??= Promise.all([
+			listen<{ id: string; paths: string[] }>("deck-fs", async (e) => {
 				if (e.payload.id !== get().id) return;
 				const paths = e.payload.paths;
 				if (paths.includes("deck.json")) {
@@ -364,21 +640,26 @@ export const useDeck = create<S>()((set, get) => ({
 				if (all) for (const s of deck.slides) rev[s.id] = now;
 				if (paths.some((p) => p.endsWith(".css"))) for (const w of get().frames) tell(w, { t: "css" });
 				set({ rev });
-				attribute(get, set, paths);
 				if (get().vdiff) refreshCompare(get, set);
 			}),
-		);
-		unlisten.push(
-			await listen<{ turn: string; line: string }>("claude", (e) => {
+			listen<{ turn: string; line: string }>("claude", (e) => {
 				const { turn, line } = e.payload;
 				let m: any;
 				try { m = JSON.parse(line); } catch { return; }
 				// 지금 이 프로젝트에서 돌고 있는 턴의 사건만 받는다 — 다른 턴의 세션 id 가 섞이면 다음 턴이 엉뚱한 대화를 잇는다
-				if (turn !== get().running) return;
+				if (!Object.values(get().runs).includes(turn)) return;
+				const delta = m.type === "stream_event" && m.event?.type === "content_block_delta" && m.event.delta?.type === "text_delta";
+				// 글자가 아닌 사건(새 말 덩이 · 도구 · 끝) 앞에서는 모아 둔 글자를 먼저 넣는다 — 순서가 바뀌지 않게
+				if (!delta) flushText(get, set);
 				const patch = (fn: (t: Turn) => Turn) => set({ turns: get().turns.map((t) => (t.id === turn ? fn(t) : t)) });
-				if (m.type === "system" && m.subtype === "init" && m.session_id) set({ sessionId: m.session_id });
+				// Claude Code 의 세션 id 는 이 턴이 이어 쓴 세션에 적는다 — 다음에 그 세션을 이을 때 쓴다
+				const keep = (sid: string) => {
+					const key = get().turns.find((t) => t.id === turn)?.session;
+					if (key) set({ sessions: get().sessions.map((x) => (x.key === key ? { ...x, claude: sid } : x)) });
+				};
+				if (m.type === "system" && m.subtype === "init" && m.session_id) keep(m.session_id);
 				else if (m.type === "stream_event" && m.event?.type === "content_block_delta" && m.event.delta?.type === "text_delta") {
-					patch((t) => ({ ...t, reply: t.reply + m.event.delta.text }));
+					queueText(get, set, turn, m.event.delta.text);
 				} else if (m.type === "stream_event" && m.event?.type === "message_start") {
 					// 도구를 쓴 뒤 새 말 덩이 — 앞 덩이와 띄운다
 					patch((t) => ({ ...t, reply: t.reply && !t.reply.endsWith("\n\n") ? t.reply + "\n\n" : t.reply }));
@@ -386,11 +667,12 @@ export const useDeck = create<S>()((set, get) => ({
 					const uses = (m.message?.content || []).filter((c: any) => c.type === "tool_use");
 					if (uses.length) patch((t) => ({ ...t, tools: [...t.tools, ...uses.map((u: any) => ({ name: u.name, file: relOf(get().dir, u.input?.file_path || u.input?.path || u.input?.pattern) }))] }));
 				} else if (m.type === "result") {
-					if (m.session_id) set({ sessionId: m.session_id });
+					if (m.session_id) keep(m.session_id);
 					patch((t) => ({ ...t, cost: m.total_cost_usd, reply: (t.reply.trim() || m.result || "").trim(), error: m.is_error ? m.result || "error" : t.error }));
 				}
 			}),
-		);
+		]);
+		await listening;
 		// 글꼴 잇기 — 화면을 막지 않고 뒤에서 한다 (깔린 글꼴을 처음 읽을 때 몇 초 걸린다).
 		// 폴더 감시 사건을 받기 시작한 뒤에 돌린다. 2026.11.20 : 전에는 받기 전에 돌려, 글꼴 목록을 이미 읽어 둔 두 번째 가져오기에서
 		// theme.css 를 먼저 고쳐 버렸다 — 그 사건을 놓친 쪽들이 대체 글꼴로 남아 「목차」가 두 줄로 꺾였다.
@@ -411,16 +693,17 @@ export const useDeck = create<S>()((set, get) => ({
 
 	closeProject: async () => {
 		// 턴이 도는 중에 닫으면 끝난 턴이 다음에 연 프로젝트의 덱 · 대화를 덮어쓴다 — 먼저 멈추고 끝나기를 기다린다
-		if (get().running) {
-			get().stop();
+		if (get().running || waiting.length) {
+			for (const w of [...waiting]) get().stop(w.turn);
+			for (const id of Object.values(get().runs)) get().stop(id);
 			while (get().running) await new Promise((r) => setTimeout(r, 200));
 		}
 		clearTimeout(directTimer);
-		unlisten.forEach((f) => f());
-		unlisten = [];
 		const { id } = get();
 		if (id) await api.close(id).catch(() => {});
-		set({ dir: "", id: "", deck: null, turns: [], pins: [], versions: [], preview: null, running: null, vdiff: null, seats: [], presence: {}, activity: [], touched: {}, strays: [] });
+		set({ dir: "", id: "", deck: null, turns: [], sessions: [], bind: {}, talkKey: null, pins: [], versions: [], preview: null, running: null, runs: {}, vdiff: null });
+		// 닫은 덱의 슬라이드 창은 더 말을 받지 않는다 — 남은 것을 비운다
+		get().frames.clear();
 	},
 
 	setCurrent: (i) => set({ current: Math.max(0, Math.min(i, (get().deck?.slides.length || 1) - 1)) }),
@@ -481,8 +764,8 @@ export const useDeck = create<S>()((set, get) => ({
 		get().setCurrent(Math.min(get().current > i ? get().current - 1 : get().current, deck.slides.length - 2));
 	},
 
-	addPin: (p) => {
-		const pin: Pin = { ...p, id: Math.random().toString(36).slice(2, 9), at: Date.now() };
+	addPin: (p, by = me(), id) => {
+		const pin: Pin = { ...p, id: id && /^[a-z0-9]{4,16}$/.test(id) && !get().pins.some((x) => x.id === id) ? id : Math.random().toString(36).slice(2, 9), at: Date.now(), by: by || undefined };
 		const pins = [...get().pins, pin];
 		set({ pins });
 		persistPins(get().dir, pins);
@@ -498,145 +781,84 @@ export const useDeck = create<S>()((set, get) => ({
 		set({ pins });
 		persistPins(get().dir, pins);
 	},
-
-	send: async (text, attachments = [], force = false) => {
-		const { dir, deck, pins, running, current } = get();
-		if (!deck || running) return;
-		if (!text.trim() && !pins.length && !attachments.length) return;
-		// 앱 밖 Claude Code 가 방금 이 덱을 다뤘으면 한 번 묻는다 — 그쪽이 고치던 파일이 이 턴의 판에 섞이고, 같은 쪽을 둘이 고치면 한쪽이 덮인다.
-		// 요청칸은 보내며 비워지므로 글을 되돌려 놓는다
-		const out = get().outside;
-		if (!force && out && sameDir(out.dir, dir) && Date.now() - out.at < OUTSIDE_MS) {
-			if (text.trim()) get().refill(text);
-			const run = () => {
-				if (text.trim()) get().refill("");
-				get().send(text, attachments, true);
-			};
-			get().notify(tNow("outsideBusy").replace("{cmd}", out.cmd), "err", { action: { label: tNow("sendAnyway"), run } });
-			return;
-		}
-		clearUndo();
-		const s = useSettings.getState().s;
-		// 직접 편집이 남아 있으면 먼저 판으로 — Claude 의 판과 섞이지 않게
-		clearTimeout(directTimer);
-		await api.commit(dir, tNow("direct"), heldFiles(get())).catch(() => {});
-		const order = (id: string) => deck.slides.findIndex((x) => x.id === id) + 1;
-		const notes: PinNote[] = pins.map((p, i) => ({ n: i + 1, slide: p.slide, slideNo: order(p.slide), x: p.x, y: p.y, text: p.text, target: p.target, shape: p.shape }));
-		const cur = deck.slides[current];
-		const mentions = mentionsIn(text, deck);
-		const versionMentions = versionMentionsIn(text, get().versions);
-		const turn: Turn = { id: "t" + Date.now().toString(36), at: Date.now(), request: text.trim(), pins: notes, mentions, versionMentions, attach: attachments.length ? [...attachments] : undefined, reply: "", tools: [], status: "running" };
-		set({ turns: [...get().turns, turn], running: turn.id, pins: [] });
-		persistPins(dir, []);
-		const patch = (fn: (t: Turn) => Turn) => set({ turns: get().turns.map((t) => (t.id === turn.id ? fn(t) : t)) });
-
-		try {
-			// 표시가 있으면 그 쪽 그림 위에 그려 붙인다. 못 만들어도 좌표 글은 가므로 턴은 그대로 돈다
-			if (notes.some((n) => n.shape)) {
-				patch((t) => ({ ...t, phase: tNow("marking") }));
-				attachments = [...attachments, ...(await markedPictures(dir, get().id, deck, notes).catch(() => []))];
-				patch((t) => ({ ...t, phase: undefined }));
-			}
-			// 판 멘션 — 그 판 파일을 .claudeppt/versions/v<n>/ 에 펼치고 지금과 다른 쪽을 적어 넘긴다. 못 펼친 판은 번호만이라도 알린다
-			const vlines: string[] = [];
-			for (const v of versionMentions) {
-				const c = get().versions.find((x) => x.hash === v.hash);
-				vlines.push(c ? await versionContext(dir, get().id, deck, c).catch((e) => `- @v${v.n}: could not be read (${e})`) : `- @v${v.n}: not found`);
-			}
-			const r = await api.claudeRun({
-				turn: turn.id,
-				dir,
-				prompt: turnPrompt(text, notes, cur ? { id: cur.id, no: current + 1 } : null, attachments, mentions, vlines),
-				system: systemPrompt(s, deck),
-				claudePath: s.claude.path,
-				model: s.claude.model,
-				effort: s.claude.effort,
-				resume: get().sessionId,
-			});
-			const t0 = get().turns.find((t) => t.id === turn.id)!;
-			let status: Turn["status"] = t0.status === "stopped" ? "stopped" : r.code === 0 && !t0.error ? "done" : "failed";
-			if (status === "failed" && !t0.error) patch((t) => ({ ...t, error: r.stderr.trim().split("\n").slice(-3).join("\n") || `exit ${r.code}` }));
-			// 그림 자리 채우기
-			const fresh = await readDeck(dir).catch(() => get().deck!);
-			set({ deck: fresh });
-			if (status !== "stopped" && s.image.provider !== "svg") {
-				const errs = await fillGenerated(dir, fresh, s, (p) => patch((t) => ({ ...t, phase: `${tNow("generating")} · ${p}` })));
-				if (errs.length) patch((t) => ({ ...t, error: [t.error, ...errs].filter(Boolean).join("\n") }));
-			}
-			const summary = (text.trim() || notes.map((n) => n.text).join(" · ") || "핀").replace(/\s+/g, " ").slice(0, 72);
-			const c = await api.commit(dir, summary, heldFiles(get())).catch(() => null);
-			patch((t) => ({ ...t, status, phase: undefined, version: c ? { n: c.n, short: c.short, hash: c.hash } : undefined }));
-		} catch (e) {
-			patch((t) => ({ ...t, status: "failed", error: String(e) }));
-		} finally {
-			set({ running: null });
-			persistTalk(dir, get().turns, get().sessionId);
-			get().refreshVersions();
-		}
+	resolvePin: (id, done) => {
+		const pins = get().pins.map((p) => (p.id === id ? { ...p, done: done || undefined } : p));
+		set({ pins });
+		persistPins(get().dir, pins);
+	},
+	sendPin: async (id, from) => {
+		const p = get().pins.find((x) => x.id === id);
+		if (!p) return;
+		const by = from?.by ?? me();
+		await get().send(tNow("pinSendText").replace("{name}", p.by || by), [], true, { by, current: p.slide, talkKey: from ? from.talkKey : get().talkKey, pins: [p] });
 	},
 
-	stop: () => {
-		const r = get().running;
+	send: async (text, attachments = [], force = false, from) => {
+		const made = sendChain.then(() => sendTurn(get, set, text, attachments, force, from));
+		sendChain = made.catch(() => {});
+		// 세워졌으면 그 턴이 끝날 때까지 기다린다 (부른 쪽이 끝을 기다리게 — 그림판 · 처음 만들기)
+		await (await made)?.done;
+	},
+
+	newTalk: () => {
+		const { dir, sessions, talkKey, turns } = get();
+		if (!dir) return;
+		// 지금 대화가 아직 한 번도 쓰이지 않았으면 새로 만들지 않는다 — 빈 세션이 쌓이지 않게
+		const cur = sessions.find((x) => x.key === talkKey);
+		const ns = cur && !cur.claude && !turns.some((t) => t.session === cur.key) ? cur : nextSession(sessions);
+		if (ns !== cur) set({ sessions: [...sessions, ns], talkKey: ns.key });
+		persistTalk(dir, get());
+		get().notify(tNow("newTalkDone").replace("{n}", ns.key.slice(1)), "ok");
+	},
+
+	viewSession: (key) => {
+		const { dir, sessions } = get();
+		if (!dir || !sessions.some((x) => x.key === key)) return;
+		set({ talkKey: key });
+		persistTalk(dir, get());
+	},
+
+	stop: (turn) => {
+		const st = get();
+		const r = turn ?? (st.talkKey ? st.runs[st.talkKey] : undefined) ?? st.running;
 		if (!r) return;
 		set({ turns: get().turns.map((t) => (t.id === r ? { ...t, status: "stopped" } : t)) });
+		// 기다리던 턴이면 줄에서 빼고 끝낸다
+		const w = waiting.find((x) => x.turn === r);
+		if (w) {
+			waiting = waiting.filter((x) => x !== w);
+			persistTalk(st.dir, get());
+			w.done();
+			return;
+		}
 		api.claudeStop(r);
 	},
 
-	applyDirect: (slideId, path, op) => serial(async () => {
+	applyDirect: (slideId, path, op, by = me()) => serial(async () => {
 		const { dir, deck } = get();
 		const ref = deck?.slides.find((s) => s.id === slideId);
 		if (!ref) return;
 		// Claude 가 파일을 고치는 중에는 화면의 요소 번호 길이 원본과 어긋날 수 있다 — 받지 않는다
-		if (get().running) return get().notify(tNow("working"), "err");
+		if (get().running) {
+			if (by !== me()) throw new Error(tNow("working"));
+			return get().notify(tNow("working"), "err");
+		}
 		const before = await api.readText(dir, ref.file).catch(() => null);
 		if (!(await applyOp(dir, ref.file, path, op))) return;
 		if (before != null) {
-			undoStack.push({ file: ref.file, text: before });
+			const after = await api.readText(dir, ref.file).catch(() => null);
+			undoStack.push({ file: ref.file, text: before, after, by });
 			if (undoStack.length > UNDO_MAX) undoStack.shift();
-			redoStack = [];
+			// 새로 고치면 그 사람의 「다시 하기」만 버린다
+			redoStack = redoStack.filter((x) => x.by !== by);
 			syncHist();
 		}
-		directCommit(dir, get);
+		markEditing(get, slideId, by);
+		directCommit(dir, get, by);
 	}),
 
-	undo: () => serial(() => step(get, undoStack, redoStack)),
-	redo: () => serial(() => step(get, redoStack, undoStack)),
-
-	loadSeats: async () => {
-		const { dir } = get();
-		if (!dir) return;
-		const r = await readSeats(dir);
-		if (get().dir !== dir) return;
-		// 몇 초마다 읽는다 — 바뀐 것이 없으면 상태를 건드리지 않아 화면이 다시 그려지지 않게
-		const st = get();
-		const same = JSON.stringify([r.seats, r.presence]) === JSON.stringify([st.seats, st.presence]) && r.activity.length === st.activity.length && r.activity.at(-1)?.at === st.activity.at(-1)?.at;
-		if (!same) set(r);
-	},
-	saveSeats: (seats) => {
-		const { dir } = get();
-		// 화면이 본 담당 — Rust 가 이것과 고친 것의 차이만 지금 파일에 얹는다 (그 사이 바깥 세션이 한 일을 덮지 않게)
-		const before = get().seats;
-		set({ seats });
-		const r = seatWrites.then(async () => {
-			try {
-				const merged = await api.seatsUpdate(dir, before, seats);
-				// 그 사이 화면에서 또 고쳤으면 그 저장이 뒤따르므로 지금 것은 화면에 덮지 않는다
-				if (get().dir === dir && get().seats === seats) set({ seats: merged });
-			} catch (e) {
-				get().notify(String(e), "err");
-			}
-		});
-		seatWrites = r;
-		return r;
-	},
-	vacate: async (no) => {
-		const { dir } = get();
-		const presence = { ...get().presence };
-		delete presence[no];
-		set({ presence });
-		await api.seatsVacate(dir, no).catch((e) => get().notify(String(e), "err"));
-	},
-	clearStrays: () => set({ strays: [] }),
+	undo: (by = me()) => serial(() => step(get, undoStack, redoStack, by)),
+	redo: (by = me()) => serial(() => step(get, redoStack, undoStack, by)),
 
 	refreshVersions: async () => {
 		const { dir } = get();
@@ -651,7 +873,7 @@ export const useDeck = create<S>()((set, get) => ({
 		set({ busy: tNow("restore") });
 		clearUndo();
 		try {
-			await api.restore(dir, c.hash, `v${c.n} 판으로 되돌림`);
+			await api.restore(dir, c.hash, `v${c.n} 판으로 되돌림`, me());
 			set({ preview: null, vdiff: null, deck: await readDeck(dir) });
 			await get().refreshVersions();
 		} catch (e) {
@@ -666,6 +888,7 @@ export const useDeck = create<S>()((set, get) => ({
 		if (!deck) return;
 		set({ busy: tNow("exporting") });
 		try {
+			const { buildPptx } = await import("./exportPptx");
 			const b = await buildPptx(deck, id, (i, n) => set({ busy: `${tNow("exporting")} ${i}/${n}` }), exact);
 			await api.absWriteBytes(path, b.data);
 			// 깔리지 않은 글꼴은 PowerPoint 에서 다른 글꼴로 보인다 — 알린다
@@ -732,7 +955,7 @@ export const useDeck = create<S>()((set, get) => ({
 		// 손으로 고친 것이 남아 있으면 먼저 판으로 — 「지금」이 판 목록의 맨 위와 같아야 헷갈리지 않는다.
 		// 직전 판은 그 뒤에 고른다 — 먼저 고르면 방금 남긴 판 하나를 건너뛴다
 		clearTimeout(directTimer);
-		if (!get().running) { await api.commit(dir, tNow("direct")).catch(() => null); await get().refreshVersions(); }
+		if (!get().running) { await api.commit(dir, tNow("direct"), me()).catch(() => null); await get().refreshVersions(); }
 		const versions = get().versions;
 		const c = base ?? versions[1];
 		if (!c || c.hash === versions[0]?.hash) return get().notify(tNow("vsNoBase"), "err");
@@ -760,11 +983,11 @@ export const useDeck = create<S>()((set, get) => ({
 		clearUndo();
 		clearTimeout(directTimer);
 		try {
-			await api.commit(dir, tNow("direct")).catch(() => null);
+			await api.commit(dir, tNow("direct"), me()).catch(() => null);
 			const next = await restoreSlideFile(dir, id, deck, vdiff, slideId);
 			if (next !== deck) await get().saveDeck(next);
 			const no = next.slides.findIndex((x) => x.id === slideId) + 1;
-			await api.commit(dir, `${no}쪽을 v${vdiff.base.n} 판으로 되돌림`);
+			await api.commit(dir, `${no}쪽을 v${vdiff.base.n} 판으로 되돌림`, me());
 			await get().refreshVersions();
 			if (no > 0) get().setCurrent(no - 1);
 			set({ vdiff: await diffVersion(dir, id, get().deck!, vdiff.base) });
@@ -779,22 +1002,24 @@ export const useDeck = create<S>()((set, get) => ({
 	// 고칠 곳은 HTML 쪽이다 — PowerPoint 가 같게 그릴 수 있는 꼴(프롬프트 「PPTX export」 절)로 바꾸게 한다.
 	// 2026.11.24 : 굳은 요소도 함께 넘긴다. 전에는 「그림이 되는 것은 괜찮다」고 해서, 글 덩어리가 통째 그림이 되어도 고치지 않았다
 	fixDiff: (report) => {
-		if (!get().deck) return;
-		const bad = report.slides.filter(needsFix);
-		if (!bad.length) return;
-		const lines = bad.map((x) => {
-			const parts = [`- slide ${x.no} (slides/${x.id}.html):`];
-			if (x.score > SAME) parts.push(`${x.score}% of pixels differ — web ${x.web}, PowerPoint ${x.ppt}, red mask ${x.diff}.`);
-			if (x.locked?.length) parts.push(`baked as a non-editable picture (${x.stiff}% of the slide): ${x.locked.map((b) => `<${b.tag}> at x${b.x} y${b.y} ${b.w}×${b.h}px`).join(", ")}.`);
-			return parts.join(" ");
-		});
-		const text = [
-			"The exported PPTX is not yet a faithful, editable copy of the web slides. Fix each slide below by changing its HTML/CSS while keeping the same look.",
-			"Pixel differences: Read the web picture, the PowerPoint picture and the red difference mask, and find what renders differently in PowerPoint. Typical causes: text that wraps or sits at a different height (give text boxes enough width, use explicit line-height, avoid mixing block children with bare text), fonts not installed on this PC" + (report.missingFonts.length ? ` (missing: ${report.missingFonts.join(", ")})` : "") + ".",
-			"Baked elements: the element and everything inside it become one flat picture, so its text and shapes cannot be edited in PowerPoint. This happens with transform/rotation, filter, blend modes, clip-path, mask, text-shadow, vertical writing-mode, background-clip:text and list markers. Rewrite them with editable means (flat colors, solid borders, explicit bullet spans, no effect on text containers) when the same look can be kept; if the effect is essential to the design (a rotated badge, a decorative shape), leave it and say so.",
-			...lines,
-		].join("\n");
-		get().send(text);
+		import("./check").then(({ needsFix, SAME }) => {
+			if (!get().deck) return;
+			const bad = report.slides.filter(needsFix);
+			if (!bad.length) return;
+			const lines = bad.map((x) => {
+				const parts = [`- slide ${x.no} (slides/${x.id}.html):`];
+				if (x.score > SAME) parts.push(`${x.score}% of pixels differ — web ${x.web}, PowerPoint ${x.ppt}, red mask ${x.diff}.`);
+				if (x.locked?.length) parts.push(`baked as a non-editable picture (${x.stiff}% of the slide): ${x.locked.map((b) => `<${b.tag}> at x${b.x} y${b.y} ${b.w}×${b.h}px`).join(", ")}.`);
+				return parts.join(" ");
+			});
+			const text = [
+				"The exported PPTX is not yet a faithful, editable copy of the web slides. Fix each slide below by changing its HTML/CSS while keeping the same look.",
+				"Pixel differences: Read the web picture, the PowerPoint picture and the red difference mask, and find what renders differently in PowerPoint. Typical causes: text that wraps or sits at a different height (give text boxes enough width, use explicit line-height, avoid mixing block children with bare text), fonts not installed on this PC" + (report.missingFonts.length ? ` (missing: ${report.missingFonts.join(", ")})` : "") + ".",
+				"Baked elements: the element and everything inside it become one flat picture, so its text and shapes cannot be edited in PowerPoint. This happens with transform/rotation, filter, blend modes, clip-path, mask, text-shadow, vertical writing-mode, background-clip:text and list markers. Rewrite them with editable means (flat colors, solid borders, explicit bullet spans, no effect on text containers) when the same look can be kept; if the effect is essential to the design (a rotated badge, a decorative shape), leave it and say so.",
+				...lines,
+			].join("\n");
+			get().send(text);
+		}).catch((e) => get().notify(String(e), "err"));
 	},
 
 	saveDeck: async (deck) => {
@@ -806,7 +1031,7 @@ export const useDeck = create<S>()((set, get) => ({
 /** 릴리즈 하나 — 남은 변경을 판으로 남기고, PPTX 를 releases/ 에 굽고, 기록 · 태그를 단다.
  *  앱의 「릴리즈」 단추와 바깥 CLI(remote.ts)가 함께 쓴다. prev 는 지금까지의 releases.json */
 export async function makeRelease(dir: string, id: string, deck: Deck, prev: Release[], name: string, notes: string, progress: (i: number, n: number) => void, onBuilt?: (b: Built) => void): Promise<Release> {
-	await api.commit(dir, tNow("direct")).catch(() => null);
+	await api.commit(dir, tNow("direct"), me()).catch(() => null);
 	const log = await api.log(dir);
 	const head = log[0];
 	// 번호는 git 태그에서 — releases.json 이 지워지거나 어긋나도 같은 r<k> 를 두 번 달지 않는다
@@ -815,12 +1040,13 @@ export async function makeRelease(dir: string, id: string, deck: Deck, prev: Rel
 	const tag = `r${k}`;
 	// 릴리즈가 가리키는 것은 내용 판(head)이다. 릴리즈 판은 PPTX 와 기록만 더한다
 	const file = `releases/${tag}-v${head.n}.pptx`;
+	const { buildPptx } = await import("./exportPptx");
 	const b = await buildPptx(deck, id, progress);
 	await api.writeBytes(dir, file, b.data);
 	onBuilt?.(b);
 	const rel: Release = { name: name.trim() || tag, tag, n: head.n, hash: head.hash, file, notes: notes.trim(), at: new Date().toISOString() };
 	await api.writeText(dir, "releases/releases.json", JSON.stringify([...prev, rel], null, 2) + "\n");
-	await api.commit(dir, `릴리즈 ${tag} · ${rel.name}`);
+	await api.commit(dir, `릴리즈 ${tag} · ${rel.name}`, me());
 	await api.tag(dir, tag);
 	return rel;
 }

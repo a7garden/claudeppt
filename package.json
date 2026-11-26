@@ -1,7 +1,7 @@
 {
   "name": "claudeppt",
   "private": true,
-  "version": "0.7.3",
+  "version": "0.8.0",
   "license": "MIT",
   "type": "module",
   "engines": { "node": ">=24" },
@@ -32,5 +32,8 @@
     "@vitejs/plugin-react": "^6.0.2",
     "typescript": "~6.0.3",
     "vite": "^8.0.16"
+  },
+  "overrides": {
+    "image-size": "^2.0.3"
   }
 }

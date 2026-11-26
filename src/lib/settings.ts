@@ -1,6 +1,10 @@
 // 앱 설정 — %APPDATA%/com.seesun.claudeppt/settings.json 한 파일. 모양은 여기서 정하고 Rust 는 읽고 쓰기만 한다.
 import { create } from "zustand";
 import { api } from "./api";
+import { remote } from "./transport";
+
+/** 협업 브라우저의 설정 — 그 브라우저에만 남긴다 (이름 · 말 · 테마). 호스트 설정 파일은 원격에서 읽지도 쓰지도 않는다 */
+const REMOTE_KEY = "claudeppt.remote.settings";
 
 export type ImageProvider = "svg" | "codex-cli" | "gemini-cli" | "openai" | "gemini";
 
@@ -38,6 +42,11 @@ export interface Settings {
 	update: { auto: boolean; install: boolean };
 	/** 앱 밖 Claude Code 가 CLI 로 이 앱을 부리는 것을 받을지 (control.rs · remote.ts) */
 	remote: { enabled: boolean };
+	/** 「설정 › 협업」(기본 꺼짐). on 이면 팀원 세션 — 쪽마다 처음 고친 세션을 이어 쓰고, 요청 · 판에 보낸 사람이 남는다.
+	 *  꺼져 있으면 전처럼 대화 세션 하나 · 이름 없이 돈다 */
+	collab: { on: boolean };
+	/** 이 기기를 쓰는 팀원 이름 — 협업을 켰을 때 대화의 요청과 판(git 작성자)에 남는다. 기기마다 한 번 정한다 */
+	me: string;
 }
 
 export const BASIC: Template = {
@@ -56,6 +65,8 @@ export const DEFAULTS: Settings = {
 	template: BASIC.id,
 	update: { auto: true, install: true },
 	remote: { enabled: true },
+	collab: { on: false },
+	me: "",
 };
 
 export const templateId = () => "t" + Math.random().toString(36).slice(2, 8);
@@ -83,6 +94,8 @@ const merge = (v: any): Settings => {
 		template: templates.some((x) => x.id === v?.template) ? v.template : templates[0].id,
 		update: { ...DEFAULTS.update, ...(v?.update || {}) },
 		remote: { ...DEFAULTS.remote, ...(v?.remote || {}) },
+		collab: { ...DEFAULTS.collab, ...(v?.collab || {}) },
+		me: typeof v?.me === "string" ? v.me : "",
 	};
 };
 
@@ -100,6 +113,14 @@ export const useSettings = create<Store>()((set, get) => ({
 	s: DEFAULTS,
 	loaded: false,
 	load: async () => {
+		if (remote) {
+			let raw: any = null;
+			try { raw = JSON.parse(localStorage.getItem(REMOTE_KEY) || "null"); } catch {}
+			const s = merge(raw);
+			s.collab = { on: true };
+			if (!raw?.lang && !navigator.language.startsWith("ko")) s.lang = "en";
+			return set({ s, loaded: true });
+		}
 		const raw = await api.settingsLoad().catch(() => null);
 		const s = merge(raw);
 		if (!s.library) s.library = (await api.paths()).library;
@@ -109,6 +130,10 @@ export const useSettings = create<Store>()((set, get) => ({
 		const s = fn(get().s);
 		set({ s });
 		clearTimeout(saveTimer);
+		if (remote) {
+			try { localStorage.setItem(REMOTE_KEY, JSON.stringify({ me: s.me, lang: s.lang, theme: s.theme })); } catch {}
+			return;
+		}
 		saveTimer = setTimeout(() => api.settingsSave(s).catch(() => {}), 300);
 	},
 	remember: (dir) => get().set((s) => ({ ...s, recent: [dir, ...s.recent.filter((d) => d !== dir)].slice(0, 12) })),

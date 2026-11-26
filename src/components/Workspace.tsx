@@ -3,7 +3,6 @@
 // 목차
 //   SlideFrame    슬라이드 iframe 하나. 크기를 맞춰 줄이고, 다시 그릴 표식(rev)이 바뀌면 새로 읽는다
 //   Rail          쪽 목록 — 끌어서 순서 바꾸기 · Delete 로 빼기 · 쪽 사이 + 로 빈 쪽 · 판 비교 중이면 바뀐 쪽 · 새 쪽 표시
-//                 담당 — 맡은 담당 번호를 그 색으로, 담당이 방금 고쳤거나 고치는 중인 쪽은 미리보기 테두리를 그 색으로
 //   Stage         무대 — 도구(고르기 · 펜 · 화살표 · 상자) · 직접 편집 메시지 받기 · 지난 판 미리 보기 · 휠로 쪽 넘기기 · 판 비교 (VersionLens.tsx)
 //                 서식 띠(Ribbon.tsx) — 접어 두었다가 「서식」(F)으로 펼친다. 띠의 명령은 슬라이드 창이 받아 고친 뒤 편집 메시지로 돌려보낸다
 //   MarkLayer     표시 층 — 그어 놓은 표시를 그리고, 긋는 도구일 때 긋기를 받는다 · StageTools 도구 띠
@@ -15,13 +14,14 @@ import { type Deck } from "../lib/deck";
 import { ask, onFrame, tell } from "../lib/frames";
 import { useT } from "../lib/i18n";
 import { anchor, bbox, MARK, type Shape, shapePath, tiny, type Tool } from "../lib/markup";
-import { busy, TOUCH_MS } from "../lib/seats";
 import { type Pin, useDeck } from "../lib/store";
 import { type MenuItem, openMenu } from "./ContextMenu";
 import { VersionBar, VersionLens } from "./VersionLens";
-import { seatColor, useTick } from "./Seats";
 import { Ribbon, type SelInfo, useRibbon } from "./Ribbon";
 import { SketchBoard } from "./Sketch";
+import { EditingNote, SlideFaces, StageFaces } from "./Collab";
+import { remote } from "../lib/transport";
+import { useSettings } from "../lib/settings";
 import Talk, { useTalkFold } from "./Talk";
 
 export function SlideFrame({ file, rev, width, height, w, h, onWin, revHash }: { file: string; rev: number; width: number; height?: number; w: number; h: number; onWin?: (win: Window | null) => void; revHash?: string }) {
@@ -29,16 +29,25 @@ export function SlideFrame({ file, rev, width, height, w, h, onWin, revHash }: {
 	const frames = useDeck((s) => s.frames);
 	const mode = useDeck((s) => s.mode);
 	const ref = useRef<HTMLIFrameElement>(null);
+	// 읽힌 창 — 떼어 낼 때는 iframe.contentWindow 가 이미 null 이라 그것으로는 frames 에서 지우지 못하고 쌓였다
+	const winRef = useRef<Window | null>(null);
 	const s = width / w;
 	const src = deckUrl(id, file, revHash) + `?v=${rev}`;
 	useEffect(() => {
 		const f = ref.current;
-		return () => { if (f?.contentWindow) frames.delete(f.contentWindow); onWin?.(null); };
+		return () => {
+			const win = winRef.current ?? f?.contentWindow;
+			if (win) frames.delete(win);
+			winRef.current = null;
+			onWin?.(null);
+		};
 	}, [src]);
 	return (
 		<iframe
 			ref={ref}
 			src={src}
+			// 협업 브라우저에서는 슬라이드를 다른 출처로 — 슬라이드 안 스크립트가 앱 화면에 손대거나 이 사람 이름으로 의도를 보내지 못하게 (collab.rs)
+			sandbox={remote ? "allow-scripts" : undefined}
 			title={file}
 			width={w}
 			height={h}
@@ -46,6 +55,7 @@ export function SlideFrame({ file, rev, width, height, w, h, onWin, revHash }: {
 			onLoad={() => {
 				const win = ref.current?.contentWindow;
 				if (!win) return;
+				winRef.current = win;
 				frames.add(win);
 				win.postMessage({ __deck: 1, t: "mode", mode: onWin ? mode : "view" }, "*");
 				onWin?.(win);
@@ -267,20 +277,16 @@ function Rail() {
 	const current = useDeck((s) => s.current);
 	const setCurrent = useDeck((s) => s.setCurrent);
 	const pins = useDeck((s) => s.pins);
-	const turns = useDeck((s) => s.turns);
+	// 마지막 턴의 도구 목록만 — 글자가 흐르는 동안(답만 바뀜) 쪽 목록이 다시 그려지지 않게
+	const lastTools = useDeck((s) => s.turns[s.turns.length - 1]?.tools);
 	const vdiff = useDeck((s) => s.vdiff);
 	const mentionSlide = useDeck((s) => s.mentionSlide);
 	const move = useDeck((s) => s.moveSlide);
 	const addSlide = useDeck((s) => s.addSlide);
 	const removeSlide = useDeck((s) => s.removeSlide);
-	const seats = useDeck((s) => s.seats);
-	const presence = useDeck((s) => s.presence);
-	const touched = useDeck((s) => s.touched);
-	// 「방금 고친」 색이 시간이 지나면 풀리게 다시 그린다 — 담당이 있을 때만
-	useTick(10000, seats.length > 0);
 	const [drag, setDrag] = useState<number | null>(null);
 	const [dropAt, setDropAt] = useState<number | null>(null);
-	const lastFiles = useMemo(() => new Set(turns[turns.length - 1]?.tools.map((x) => x.file).filter(Boolean)), [turns]);
+	const lastFiles = useMemo(() => new Set(lastTools?.map((x) => x.file).filter(Boolean)), [lastTools]);
 	const listRef = useRef<HTMLDivElement>(null);
 	useEffect(() => { listRef.current?.querySelectorAll(".rail-item")[current]?.scrollIntoView({ block: "nearest" }); }, [current]);
 
@@ -290,15 +296,10 @@ function Rail() {
 				if (e.key === "Delete" && !preview) removeSlide(current);
 			}}>
 			{deck.slides.map((sl, i) => {
-				const n = pins.filter((p) => p.slide === sl.id).length;
+				const n = pins.filter((p) => p.slide === sl.id && !p.done).length;
 				// 비교 차이는 숫자 대신 미리보기 테두리로 — 숫자는 비교 렌즈를 켰을 때만. 0.1% 차이에 모든 쪽이 빨간 글자로 칠해지면 무엇이 급한지 안 보인다
 				// 판 비교 중이면 고른 판과 다른 쪽에 점선 테두리 · 그 뒤에 생긴 쪽에 「새」 — 바뀐 쪽만 골라 넘겨 볼 수 있게
 				const vs = !preview ? vdiff?.slides[sl.id] : undefined;
-				// 맡은 담당(쪽을 골라 맡긴 담당만 — 「모든 쪽」 담당은 모든 쪽에 붙어 뜻이 없다) · 지금 고치는 담당
-				const own = preview ? [] : seats.filter((x) => Array.isArray(x.slides) && x.slides.includes(sl.id));
-				const doer = preview ? undefined : seats.find((x) => busy(presence[x.no]) && presence[x.no].doing?.slides.includes(sl.id))?.no
-					?? (touched[sl.id] && Date.now() - touched[sl.id].at < TOUCH_MS ? touched[sl.id].seat : undefined);
-				const doerName = doer != null ? `${t("seatBy")}: ${t("seatNo").replace("{n}", String(doer))}` : "";
 				return (
 					<div key={sl.id} className={"rail-item" + (i === current ? " on" : "") + (dropAt === i ? " drop-before" : "") + (vs ? " drift" : "")}
 						onDragOver={(e) => { if (drag != null) { e.preventDefault(); setDropAt(i); } }}
@@ -308,13 +309,12 @@ function Rail() {
 						<div className="no">
 							<span>{i + 1}</span>
 							{n > 0 && <span className="pins" title={`${t("pins")} ${n}`} />}
-							{own.map((x) => <i key={x.no} className="sd" style={{ "--c": x.color } as React.CSSProperties} title={`${t("seatOwner")}: ${t("seatNo").replace("{n}", String(x.no))}${x.name ? " · " + x.name : ""}`}>{x.no}</i>)}
 							{vs && <span className="drift">{vs === "added" ? t("vsAdded") : t("vsChangedOne")}</span>}
+							<SlideFaces slideId={sl.id} />
 							{!preview && <button className="at" onClick={() => mentionSlide(i + 1)} title={`${t("mention")} (@${i + 1})`} aria-label={`${t("mention")} @${i + 1}`}>@</button>}
 						</div>
 						<button className="thumb" draggable={!preview} onDragStart={(e) => { setDrag(i); dragSlide(e, sl.id); }} onDragEnd={() => { setDrag(null); setDropAt(null); }}
-							onClick={() => setCurrent(i)} title={[sl.title || `${i + 1}`, vs && vdiff ? `v${vdiff.base.n} ${vs === "added" ? t("vsAdded") : t("vsChangedOne")}` : "", lastFiles.has(sl.file) ? t("changed") : "", doerName].filter(Boolean).join(" · ")} aria-current={i === current}
-							data-seat={doer != null ? "" : undefined} style={doer != null ? ({ "--c": seatColor(seats, doer) } as React.CSSProperties) : undefined}>
+							onClick={() => setCurrent(i)} title={[sl.title || `${i + 1}`, vs && vdiff ? `v${vdiff.base.n} ${vs === "added" ? t("vsAdded") : t("vsChangedOne")}` : "", lastFiles.has(sl.file) ? t("changed") : ""].filter(Boolean).join(" · ")} aria-current={i === current}>
 							<ThumbFrame file={sl.file} rev={rev[sl.id] || 0} w={deck.size.w} h={deck.size.h} revHash={preview?.hash} />
 							{lastFiles.has(sl.file) && !preview && <span className="fresh" aria-label={t("changed")} />}
 						</button>
@@ -500,6 +500,8 @@ function Stage() {
 				</button>
 			)}
 			<div className="stage-banner">
+				<StageFaces slideId={slide.id} />
+				<EditingNote slideId={slide.id} />
 				{compare && <VersionBar slideId={slide.id} />}
 				{preview && (
 					<div className="past" role="status">
@@ -566,7 +568,8 @@ function markToPin(s: Shape, pinAt: (x: number, y: number, shape?: Shape) => voi
 /** 한 쪽 위의 표시 · 핀 층. 한 쪽 보기와 이어 보기가 같이 쓴다 — 핀 번호는 덱 전체에서 꽂은 차례다 */
 function SlideMarks({ slideId, w, h, scale, drawing, active, setActive, onMark }: { slideId: string; w: number; h: number; scale: number; drawing: boolean; active: string | null; setActive: (id: string | null) => void; onMark: (s: Shape) => void }) {
 	const pins = useDeck((s) => s.pins);
-	const mine = pins.filter((p) => p.slide === slideId);
+	// 해결된 의견은 감춘다 (의견 목록의 「해결됨」에서 다시 연다)
+	const mine = pins.filter((p) => p.slide === slideId && !p.done);
 	return (
 		<div className="overlay">
 			<MarkLayer marks={mine} w={w} h={h} scale={scale} drawing={drawing} active={active} onMark={onMark} />
@@ -778,6 +781,26 @@ function PinMark({ pin, n, scale, flip, open, onOpen, onClose }: { pin: Pin; n: 
 	const t = useT();
 	const update = useDeck((s) => s.updatePin);
 	const remove = useDeck((s) => s.removePin);
+	const meName = useSettings((x) => x.s.me).trim();
+	// 다른 사람의 의견 — 고치지 않고 읽는다. 해결하거나 이 쪽 세션에 보낼 수 있다
+	if (pin.by && pin.by !== meName) {
+		return (
+			<div className="pinmark other" style={{ left: pin.x * scale, top: pin.y * scale }} onClick={(e) => e.stopPropagation()}>
+				<button className="dot" onClick={onOpen} aria-label={`${t("pin")} ${n} · ${pin.by}`} title={pin.by}><span>{n}</span></button>
+				{open && (
+					<div className="pin-note" style={flip ? { left: "auto", right: 16 } : undefined}>
+						<div className="by">{pin.by}</div>
+						<p className="txt">{pin.text || "…"}</p>
+						<div className="row">
+							<span className="at">{pin.target?.text || ""}</span>
+							<button onClick={() => { useDeck.getState().resolvePin(pin.id, true); onClose(); }}>{t("resolve")}</button>
+							<button onClick={() => { useDeck.getState().sendPin(pin.id); onClose(); }} title={t("pinSendHint")}>{t("pinSendShort")}</button>
+						</div>
+					</div>
+				)}
+			</div>
+		);
+	}
 	const [text, setText] = useState(pin.text);
 	useEffect(() => setText(pin.text), [pin.text]);
 	const commit = () => { if (text !== pin.text) update(pin.id, text); };
