@@ -43,6 +43,11 @@ const COOKIE: &str = "cppt_d";
 const DEFAULT_PORT: u16 = 47815;
 /// 의도 하나를 기다리는 가장 긴 시간 — Claude 턴이 오래 돈다
 const INTENT_WAIT: Duration = Duration::from_secs(3 * 60 * 60);
+/// 살아 있는지 묻는 간격 (2026.11.26). 덮은 노트북 · 끊긴 와이파이는 TCP 가 끊긴 줄 모른 채 몇 분을 간다 —
+/// 그동안 서버는 그 사람을 「접속」으로, 브라우저는 「연결됨」으로 보인다. 세 번 답이 없으면 끊는다
+const BEAT: Duration = Duration::from_secs(20);
+/// 브라우저가 받는 「살아 있다」 — 브라우저는 이것도 못 받으면 스스로 끊고 다시 붙는다 (collab.ts)
+const PING: &str = r#"{"t":"ping"}"#;
 /// 브라우저가 부를 수 있는 의도. 호스트 화면(collab.ts)도 같은 목록만 받는다 — 둘 다 지켜야 넘어간다
 const INTENTS: &[&str] = &["send", "stop", "newTalk", "direct", "undo", "redo", "pinAdd", "pinUpdate", "pinRemove", "pinResolve", "pinSend", "upload"];
 
@@ -222,6 +227,11 @@ impl Hub {
 			json!({ "t": "state", "seq": s.seq, "patch": patch }).to_string()
 		};
 		let _ = self.tx.send(msg.into());
+	}
+
+	/// 호스트 이름 — 공용 링크로 들어오는 이름이 이것과 겹치지 않게
+	fn host_name(&self) -> Vec<String> {
+		self.members.lock().unwrap().get(&0).map(|m| m.name.clone()).into_iter().collect()
 	}
 
 	fn members_changed(&self) {
@@ -500,7 +510,7 @@ async fn join_page(Ax(h): Ax<Arc<Hub>>, axum::extract::Path(token): axum::extrac
 		Err(why) => return refused(&headers, why),
 	};
 	if link.name.is_some() {
-		let (_, secret) = h.book.lock().unwrap().join(&link, "", now());
+		let (_, secret) = h.book.lock().unwrap().join(&link, "", &[], now());
 		h.book_changed();
 		return signed_in(&secret);
 	}
@@ -522,7 +532,8 @@ async fn join(Ax(h): Ax<Arc<Hub>>, axum::extract::Path(token): axum::extract::Pa
 	if invite::clean_name(&f.name).is_empty() {
 		return join_page(Ax(h), axum::extract::Path(token), headers).await;
 	}
-	let (_, secret) = h.book.lock().unwrap().join(&link, &f.name, now());
+	let host = h.host_name();
+	let (_, secret) = h.book.lock().unwrap().join(&link, &f.name, &host, now());
 	h.book_changed();
 	signed_in(&secret)
 }
@@ -660,12 +671,19 @@ async fn conn(h: Arc<Hub>, who: Who, mut socket: WebSocket) {
 	}
 	let list: Vec<Member> = h.members.lock().unwrap().values().cloned().collect();
 	let _ = socket.send(Message::Text(json!({ "t": "members", "list": list }).to_string().into())).await;
+	let mut beat = tokio::time::interval_at(tokio::time::Instant::now() + BEAT, BEAT);
+	// 브라우저에서 마지막으로 무엇이든 받은 때 — Ping 에는 브라우저가 알아서 Pong 으로 답한다
+	let mut heard = tokio::time::Instant::now();
 	loop {
 		tokio::select! {
 			m = socket.recv() => match m {
-				Some(Ok(Message::Text(t))) => on_message(&h, id, &direct, t.as_str()),
+				Some(Ok(Message::Text(t))) => { heard = tokio::time::Instant::now(); on_message(&h, id, &direct, t.as_str()) }
 				Some(Ok(Message::Close(_))) | None | Some(Err(_)) => break,
-				_ => {}
+				_ => heard = tokio::time::Instant::now(),
+			},
+			_ = beat.tick() => {
+				if heard.elapsed() > BEAT * 3 { break; }
+				if socket.send(Message::Ping(Default::default())).await.is_err() || socket.send(Message::Text(PING.into())).await.is_err() { break; }
 			},
 			b = rx.recv() => match b {
 				Ok(s) => { if socket.send(Message::Text(s.to_string().into())).await.is_err() { break; } }

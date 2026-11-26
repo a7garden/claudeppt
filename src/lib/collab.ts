@@ -31,8 +31,39 @@ interface C {
 	/** 브라우저: 호스트가 협업을 껐다 · 나를 내보냈다 */
 	ended: boolean;
 	kicked: boolean;
+	/** 따라가는 사람의 연결 번호 — 그 사람이 쪽을 넘기면 내 화면도 넘어간다. 내가 쪽을 옮기면 풀린다 (보는 사람 몫) */
+	follow: number | null;
 }
-export const useCollab = create<C>()(() => ({ info: null, members: [], conn: null, connected: false, ended: false, kicked: false }));
+export const useCollab = create<C>()(() => ({ info: null, members: [], conn: null, connected: false, ended: false, kicked: false, follow: null }));
+
+/** 따라가기 — 그 사람의 쪽으로 가고, 그 뒤로 그 사람이 넘기는 대로 넘어간다 (2026.11.26) */
+export function follow(conn: number | null) {
+	useCollab.setState({ follow: conn });
+	if (conn !== null) followNow();
+}
+
+/** 따라가는 사람의 쪽으로 — 그 사람이 나갔으면 따라가기를 푼다 */
+function followNow() {
+	const { follow: f, members } = useCollab.getState();
+	if (f === null) return;
+	const m = members.find((x) => x.conn === f);
+	if (!m) return useCollab.setState({ follow: null });
+	const d = useDeck.getState();
+	const i = d.deck?.slides.findIndex((s) => s.id === m.slide) ?? -1;
+	if (i >= 0 && i !== d.current) { following = true; d.setCurrent(i); following = false; }
+}
+let following = false;
+let followWired = false;
+/** 접속 목록이 바뀌면 따라가고, 내가 직접 쪽을 옮기면 따라가기를 푼다 */
+function wireFollow() {
+	if (followWired) return;
+	followWired = true;
+	useCollab.subscribe((s, p) => { if (s.members !== p.members) followNow(); });
+	useDeck.subscribe((s, p) => {
+		if (s.current === p.current || following || s.deck !== p.deck) return;
+		if (useCollab.getState().follow !== null) useCollab.setState({ follow: null });
+	});
+}
 
 /** 호스트와 브라우저가 함께 쓰는 칸 — 나머지(보는 쪽 · 도구 · 비교 · 알림 · 되돌리기 쌓임)는 보는 사람 몫 */
 const SHARED = ["dir", "id", "deck", "rev", "sessions", "bind", "talkKey", "versions", "releases", "running", "runs", "pins", "editing", "histBy"] as const;
@@ -68,10 +99,15 @@ function flush(full = false) {
 /** 글자가 흐르는 동안 매 글자마다 보내지 않게 묶는다 (30ms) */
 const schedule = () => { flushTimer ??= setTimeout(() => flush(), 30); };
 
-/** 호스트도 한 사람으로 — 이름과 보는 쪽 */
-function hostView() {
+/** 호스트도 한 사람으로 — 이름과 보는 쪽. 바뀌었을 때만 — 덱은 편집 · Claude 의 쓰기마다 바뀌어, 그때마다 보내면 모든 브라우저에 접속 목록이 다시 간다 */
+let lastView = "";
+function hostView(force = false) {
 	const d = useDeck.getState();
-	call("collab_view", { name: me() || "Host", slide: d.deck?.slides[d.current]?.id ?? null }).catch(() => {});
+	const v = { name: me() || "Host", slide: d.deck?.slides[d.current]?.id ?? null };
+	const k = JSON.stringify(v);
+	if (!force && k === lastView) return;
+	lastView = k;
+	call("collab_view", v).catch(() => {});
 }
 
 export async function startHost(): Promise<CollabInfo> {
@@ -84,8 +120,9 @@ export async function startHost(): Promise<CollabInfo> {
 	]);
 	await hostListening;
 	watchComments();
+	wireFollow();
 	flush(true);
-	hostView();
+	hostView(true);
 	// 바깥 길 — 깔린 도구가 있으면 켜자마자 연다(같은 링크가 사무실 안 · 밖에서 열리게). 못 열어도 사무실 망으로는 된다
 	if (!info.tunnel) {
 		const tools = await collabTools().catch(() => null);
@@ -145,8 +182,9 @@ export async function stopHost() {
 	lastSet = {};
 	lastTurns = new Set();
 	lastOrder = "";
+	lastView = "";
 	await call("collab_stop").catch(() => {});
-	useCollab.setState({ info: null, members: [] });
+	useCollab.setState({ info: null, members: [], follow: null });
 }
 
 /** 의도 처리기 — 이름 → (보낸 사람, 인자) → 값. 여기 없는 이름은 거절한다 (서버 INTENTS 와 함께 지킨다) */
@@ -280,10 +318,15 @@ export function intent<T = unknown>(name: string, args: unknown = {}): Promise<T
 	});
 }
 
-/** 이름 · 보는 쪽을 알린다 */
-function hello() {
+/** 이름 · 보는 쪽을 알린다. 바뀌었을 때만 (붙은 직후는 늘) */
+let lastHello = "";
+function hello(force = false) {
 	const d = useDeck.getState();
-	send({ t: "hello", name: useSettings.getState().s.me.trim(), slide: d.deck?.slides[d.current]?.id ?? null });
+	const m = { t: "hello", name: useSettings.getState().s.me.trim(), slide: d.deck?.slides[d.current]?.id ?? null };
+	const k = JSON.stringify(m);
+	if (!force && k === lastHello) return;
+	lastHello = k;
+	send(m);
 }
 
 function apply(patch: any, full: boolean) {
@@ -319,13 +362,34 @@ function apply(patch: any, full: boolean) {
 /** 브라우저에서 — 호스트 서버에 붙고, 끊기면 다시 붙는다 */
 export function connect() {
 	if (!remote || ws) return;
+	// 마지막으로 서버에서 무엇이든 받은 때 — 서버는 20초마다 ping 을 보낸다(collab.rs BEAT)
+	let heard = Date.now();
+	const lost = () => {
+		ws = null;
+		useCollab.setState({ connected: false });
+		for (const w of waiting.values()) w.no(new Error(tNow("collabOffline")));
+		waiting.clear();
+		// 다시 붙기 — 0.5 · 1 · 2 · 4 … 최대 10초
+		if (!kicked) setTimeout(open, Math.min(10000, 500 * 2 ** retry++));
+	};
+	// 50초 넘게 아무것도 못 받았으면 끊긴 것이다 — 덮었던 노트북을 열거나 와이파이가 바뀌면 브라우저는 한참 「연결됨」으로 남는다.
+	// 옛 연결의 onclose 는 늦게 오거나 오지 않으므로 기다리지 않고 버린 뒤 새로 붙는다
+	setInterval(() => {
+		if (!ws || ws.readyState !== WebSocket.OPEN || Date.now() - heard < 50_000) return;
+		const dead = ws;
+		dead.onclose = dead.onmessage = null;
+		dead.close();
+		lost();
+	}, 10_000);
 	const open = () => {
 		// 한 화면에 연결은 하나 — 개발 중 모듈이 다시 읽히면(HMR) 옛 연결이 남아 같은 사람이 둘로 보였다
 		(window as any).__cpptWs?.close();
 		ws = (window as any).__cpptWs = new WebSocket(`${location.protocol === "https:" ? "wss" : "ws"}://${location.host}/_/ws`);
-		ws.onopen = () => { retry = 0; useCollab.setState({ connected: true, ended: false }); hello(); };
+		ws.onopen = () => { retry = 0; heard = Date.now(); useCollab.setState({ connected: true, ended: false }); hello(true); };
 		ws.onmessage = (e) => {
+			heard = Date.now();
 			const m = JSON.parse(e.data);
+			if (m.t === "ping") return;
 			if (m.t === "hello") {
 				remoteDeck.key = m.deckKey;
 				useCollab.setState({ conn: m.conn });
@@ -342,17 +406,11 @@ export function connect() {
 			// 내보내졌다 — 보던 덱을 걷고 다시 붙지 않는다 (기기 열쇠가 지워져 붙어도 401 이다)
 			else if (m.t === "kicked") { kicked = true; useCollab.setState({ ended: true, kicked: true }); useDeck.setState({ deck: null, turns: [], pins: [] }); }
 		};
-		ws.onclose = () => {
-			ws = null;
-			useCollab.setState({ connected: false });
-			for (const w of waiting.values()) w.no(new Error(tNow("collabOffline")));
-			waiting.clear();
-			// 다시 붙기 — 0.5 · 1 · 2 · 4 … 최대 10초
-			if (!kicked) setTimeout(open, Math.min(10000, 500 * 2 ** retry++));
-		};
+		ws.onclose = lost;
 	};
 	open();
 	watchComments();
+	wireFollow();
 	// 보는 쪽 · 이름이 바뀌면 알린다
 	let cur = -1, deckRef: unknown = null;
 	useDeck.subscribe((s) => { if (s.current !== cur || s.deck !== deckRef) { cur = s.current; deckRef = s.deck; hello(); } });
@@ -385,7 +443,8 @@ function remoteActions() {
 		send: async (text: string, attachments: string[] = []) => {
 			const st = useDeck.getState();
 			const mine = st.pins.filter((p) => isMine(p, useSettings.getState().s.me.trim())).map((p) => p.id);
-			const r = await intent<{ key: string; via?: number } | null>("send", { text, attachments, pins: mine, talkKey: st.talkKey, current: st.deck?.slides[st.current]?.id ?? null }).catch(fail);
+			// 못 보냈으면 알리고 다시 던진다 — 요청칸(Talk)이 비웠던 글 · 첨부를 되살린다
+			const r = await intent<{ key: string; via?: number } | null>("send", { text, attachments, pins: mine, talkKey: st.talkKey, current: st.deck?.slides[st.current]?.id ?? null }).catch((e) => { fail(e); throw e; });
 			if (!r || !r.key) return;
 			// 보던 대화와 다른 세션(그 쪽을 처음 고친 세션)으로 갔으면 알리고 대화칸을 그리로
 			if (st.talkKey && r.key !== st.talkKey && r.via) d.notify(tNow("routedTo").replace("{no}", String(r.via)).replace("{n}", r.key.slice(1)), "ok");

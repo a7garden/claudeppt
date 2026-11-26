@@ -1,6 +1,6 @@
 // 팀 협업 화면 조각 — 제목 줄 접속 칩 · 「설정 › 협업」 칸 · 쪽 목록 · 무대의 「보는 사람」 표시 (상태: lib/collab.ts)
 import { useEffect, useRef, useState } from "react";
-import { collabKick, collabLinkNew, collabLinkRemove, collabLock, collabTools, collabTunnel, type InviteLink, type TunnelTools, type Member, startHost, stopHost, useCollab } from "../lib/collab";
+import { collabKick, collabLinkNew, collabLinkRemove, collabLock, collabTools, collabTunnel, follow, type InviteLink, type TunnelTools, type Member, startHost, stopHost, useCollab } from "../lib/collab";
 import { useT } from "../lib/i18n";
 import { useSettings } from "../lib/settings";
 import { useDeck } from "../lib/store";
@@ -58,24 +58,25 @@ export function EditingNote({ slideId }: { slideId: string }) {
 	return <div className="editing-note" role="status">{t("collabEditing").replace("{name}", e!.by)}</div>;
 }
 
-/** 무대 위 — 이 쪽을 함께 보는 사람 · 다른 쪽을 보는 사람(누르면 그 쪽으로) */
+/** 무대 위 — 이 쪽을 함께 보는 사람 · 다른 쪽을 보는 사람. 누르면 그 사람을 따라간다(그 사람이 넘기면 같이 넘어간다).
+ *  다시 누르거나 내가 쪽을 옮기면 풀린다. 발표자를 따라 보는 회의에서 쪽마다 얼굴을 누르지 않게 */
 export function StageFaces({ slideId }: { slideId: string }) {
 	const t = useT();
 	const others = useOthers();
 	const deck = useDeck((s) => s.deck);
-	const setCurrent = useDeck((s) => s.setCurrent);
+	const following = useCollab((s) => s.follow);
 	if (!others.length || !deck) return null;
-	const go = (m: Member) => {
-		const i = deck.slides.findIndex((s) => s.id === m.slide);
-		if (i >= 0) setCurrent(i);
-	};
+	const lead = others.find((m) => m.conn === following);
 	return (
 		<div className="stage-faces" role="group" aria-label={t("collabViewing")}>
+			{lead && <span className="following" role="status">{t("collabFollowing").replace("{name}", lead.name || t("collabNoName"))}</span>}
 			{others.map((m) => {
 				const here = m.slide === slideId;
 				const no = deck.slides.findIndex((s) => s.id === m.slide) + 1;
+				const on = m.conn === following;
+				const name = m.name || t("collabNoName");
 				return (
-					<button key={m.conn} className={here ? "here" : ""} onClick={() => go(m)} disabled={here || !no} title={here ? `${m.name} · ${t("collabViewing")}` : t("collabFollow").replace("{name}", m.name || t("collabNoName"))}>
+					<button key={m.conn} className={(here ? "here" : "") + (on ? " on" : "")} onClick={() => follow(on ? null : m.conn)} aria-pressed={on} title={on ? t("collabUnfollow").replace("{name}", name) : t("collabFollow").replace("{name}", name)}>
 						<Face m={m} />
 						{!here && no > 0 && <span className="mono">{no}</span>}
 					</button>

@@ -108,13 +108,25 @@ impl Book {
 		Ok(l)
 	}
 
-	/// 들어온다 — 기기를 만들고 기기 열쇠(쿠키에 넣을 것)를 돌려준다. 개인 링크는 그 이름, 공용은 적은 이름
-	pub fn join(&mut self, link: &Link, name: &str, now: i64) -> (Device, String) {
+	/// 들어온다 — 기기를 만들고 기기 열쇠(쿠키에 넣을 것)를 돌려준다. 개인 링크는 그 이름, 공용은 적은 이름.
+	/// reserved 는 기기 장부 밖에서 이미 쓰는 이름(호스트)
+	pub fn join(&mut self, link: &Link, name: &str, reserved: &[String], now: i64) -> (Device, String) {
 		let secret = random();
-		let name = link.name.clone().unwrap_or_else(|| clean_name(name));
+		// 개인 링크는 호스트가 정한 한 사람이라 휴대폰 · 노트북으로 두 번 들어와도 같은 이름이다
+		let name = link.name.clone().unwrap_or_else(|| self.unique(&clean_name(name), reserved));
 		let d = Device { id: uuid::Uuid::new_v4().simple().to_string()[..10].to_string(), hash: hash(&secret), name, link: link.id.clone(), created: now, seen: now };
 		self.devices.push(d.clone());
 		(d, secret)
+	}
+
+	/// 공용 링크로 적은 이름이 이미 있으면 뒤에 번호를 붙인다 (2026.11.26).
+	/// 핀 주인 · 되돌리기 걸음 · 요청 보낸 사람을 이름으로 가르므로, 이름이 같은 두 사람은 서로의 의견을 지우고 서로의 편집을 되돌린다
+	fn unique(&self, name: &str, reserved: &[String]) -> String {
+		let taken = |n: &str| self.devices.iter().any(|d| d.name == n) || reserved.iter().any(|r| r == n);
+		if !taken(name) {
+			return name.to_string();
+		}
+		(2..).map(|i| format!("{name} {i}")).find(|n| !taken(n)).unwrap_or_default()
 	}
 
 	/// 기기 열쇠로 찾는다 (마지막으로 본 때를 적는다)
@@ -149,13 +161,13 @@ mod tests {
 		b.ensure_public(0);
 		assert_eq!(b.links.len(), 1, "공용 링크는 하나만 만든다");
 		let public = b.links[0].clone();
-		let (d, secret) = b.join(&public, "  민수\n", 1);
+		let (d, secret) = b.join(&public, "  민수\n", &[], 1);
 		assert_eq!(d.name, "민수");
 		assert_ne!(d.hash, secret, "기기 열쇠는 해시로만 둔다");
 		assert_eq!(b.device(&secret, 5).unwrap().seen, 5);
 		assert!(b.device("wrong", 5).is_none());
 		let personal = b.new_link(Some("지호".into()), None, 1);
-		let (d2, _) = b.join(&personal, "아무 이름", 1);
+		let (d2, _) = b.join(&personal, "아무 이름", &[], 1);
 		assert_eq!(d2.name, "지호");
 	}
 
@@ -167,7 +179,7 @@ mod tests {
 		assert_eq!(b.link(&l.token, 3600 * 1000).err(), Some(Why::Expired));
 		assert_eq!(b.link("nope", 0).err(), Some(Why::Unknown));
 		let l2 = b.new_link(None, None, 0);
-		let (_, secret) = b.join(&l2, "a", 0);
+		let (_, secret) = b.join(&l2, "a", &[], 0);
 		b.locked = true;
 		assert_eq!(b.link(&l2.token, 0).err(), Some(Why::Locked));
 		assert!(b.device(&secret, 0).is_some(), "잠가도 이미 들어온 기기는 그대로");
@@ -183,7 +195,7 @@ mod tests {
 		let mut b = Book::default();
 		b.ensure_public(0);
 		let l = b.links[0].clone();
-		let (d, secret) = b.join(&l, "a", 0);
+		let (d, secret) = b.join(&l, "a", &[], 0);
 		assert!(b.remove_device(&d.id));
 		assert!(b.device(&secret, 0).is_none());
 		assert!(!b.remove_device(&d.id));
@@ -195,12 +207,25 @@ mod tests {
 		let mut b = Book::default();
 		b.ensure_public(0);
 		let l = b.links[0].clone();
-		let (_, secret) = b.join(&l, "민수", 0);
+		let (_, secret) = b.join(&l, "민수", &[], 0);
 		b.save(&p);
 		let mut c = Book::load(&p);
 		assert_eq!(c.device(&secret, 1).unwrap().name, "민수");
 		assert!(!std::fs::read_to_string(&p).unwrap().contains(&secret), "기기 열쇠가 파일에 그대로 남지 않는다");
 		let _ = std::fs::remove_file(p);
+	}
+
+	#[test]
+	fn same_name_on_public_link_gets_a_number() {
+		let mut b = Book::default();
+		b.ensure_public(0);
+		let l = b.links[0].clone();
+		assert_eq!(b.join(&l, "민수", &[], 0).0.name, "민수");
+		assert_eq!(b.join(&l, "민수", &[], 0).0.name, "민수 2");
+		assert_eq!(b.join(&l, "민수", &[], 0).0.name, "민수 3");
+		assert_eq!(b.join(&l, "지호", &["지호".into()], 0).0.name, "지호 2", "호스트 이름과도 겹치지 않는다");
+		let p = b.new_link(Some("민수".into()), None, 0);
+		assert_eq!(b.join(&p, "", &[], 0).0.name, "민수", "개인 링크는 정한 이름 그대로");
 	}
 
 	#[test]

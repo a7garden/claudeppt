@@ -23,6 +23,7 @@ import { useSettings } from "../lib/settings";
 import { isMine, routeOf, type Turn, useDeck } from "../lib/store";
 import { noteDraft } from "../lib/updater";
 import { remote } from "../lib/transport";
+import { useCollab } from "../lib/collab";
 
 /** 사이드바 접힘 — 보는 사람의 편의라 이 PC 에만 남긴다. seen 은 접을 때 본 마지막 턴(그 뒤 끝난 턴이 「새 답」) */
 interface Fold { folded: boolean; seen: string | null; draft: boolean; set: (v: boolean) => void }
@@ -425,10 +426,17 @@ function Composer() {
 	const route = useMemo(() => routeOf({ deck, current, pins, bind, sessions, talkKey }, text), [deck, current, pins, bind, sessions, talkKey, text, team]);
 	const routeText = !route.key ? t("routeNew") : (route.via ? t("routeVia").replace("{no}", String(route.via)) : t("routeTalk")).replace("{n}", route.key.slice(1));
 	// 협업을 켜면 세션마다 줄을 서므로 도는 중에도 보낼 수 있다. 꺼져 있으면 전처럼 도는 동안은 막는다
-	const can = (team || !running) && !needName && (text.trim() || pins.length || attach.length);
+	// 브라우저 팀원이 호스트와 끊겼으면 보내지 않는다 — 보낸 글이 어디에도 닿지 않고 사라졌다
+	const offline = useCollab((c) => remote && (!c.connected || c.ended));
+	const can = (team || !running) && !needName && !offline && (text.trim() || pins.length || attach.length);
 	const go = () => {
 		if (!can) return;
-		send(text, attach);
+		// 보내다 실패하면(그 사이 끊김 · 호스트 거절) 비웠던 글 · 첨부를 되살린다. 그새 새로 적은 글은 덮지 않는다
+		const was = { text, attach };
+		send(text, attach).catch(() => {
+			setText((x) => x || was.text);
+			if (!useAttach.getState().files.length) useAttach.setState({ files: was.attach });
+		});
 		setText("");
 		setPick(null);
 		useAttach.getState().clear();

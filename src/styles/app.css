@@ -629,8 +629,11 @@ textarea.field { height: auto; padding: 8px 10px; line-height: 1.5; resize: vert
 /* 무대 위 오른쪽 — 다른 사람들. 같은 쪽을 보는 사람은 진하게, 다른 쪽이면 옅게 + 쪽 번호(누르면 그 쪽으로) */
 .stage-faces { position: absolute; top: 10px; right: 14px; display: flex; gap: 4px; z-index: 4; }
 .stage-faces button { display: inline-flex; align-items: center; gap: 3px; padding: 2px; border-radius: 14px; opacity: 0.55; }
-.stage-faces button.here { opacity: 1; cursor: default; }
-.stage-faces button:not(.here):hover { opacity: 1; background: var(--hair); }
+.stage-faces button.here { opacity: 1; }
+.stage-faces button:hover { opacity: 1; background: var(--hair); }
+/* 따라가는 사람 — 얼굴에 테두리, 왼쪽에 「○○ 님을 따라가는 중」 */
+.stage-faces button.on { opacity: 1; box-shadow: 0 0 0 1.5px var(--text); }
+.stage-faces .following { align-self: center; font-size: 11px; color: var(--dim); padding-right: 4px; }
 .stage-faces .mono { font-size: 10.5px; color: var(--dim); padding-right: 4px; }
 
 .collabwrap { position: relative; }
