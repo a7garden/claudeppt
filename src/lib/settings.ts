@@ -8,15 +8,31 @@ const REMOTE_KEY = "claudeppt.remote.settings";
 
 export type ImageProvider = "svg" | "codex-cli" | "gemini-cli" | "openai" | "gemini";
 
+/** 글자 위계 다섯 단계 — theme.css 의 .t-display … .t-caption 과 --fs-* · --fw-* 변수가 된다 */
+export const LEVELS = ["display", "title", "subtitle", "body", "caption"] as const;
+export type Level = (typeof LEVELS)[number];
+export interface TypeStep { size: number; weight: number }
+
 /** 템플릿 — 덱 만드는 스타일 한 벌. 새 덱의 theme.css 와 매 턴 Claude 에게 실리는 스타일 규칙이 여기서 나온다.
- *  덱은 deck.json 의 template 에 어느 템플릿으로 만들었는지 남겨, 기본 템플릿을 바꿔도 지난 덱은 제 스타일을 따른다 */
+ *  덱은 deck.json 의 template 에 어느 템플릿으로 만들었는지 남겨, 기본 템플릿을 바꿔도 지난 덱은 제 스타일을 따른다.
+ *  파일로 주고받을 때는 templates.ts 의 claudeppt-template/1 (.ctpl) 꼴이다.
+ *  2026.11.26 : 제목 글꼴 · 보조 색 · 글자 위계 · 여백을 더했다. 감사(audit.ts)가 이 값으로 쪽이 템플릿을 벗어났는지 잰다 */
 export interface Template {
 	id: string;
 	name: string;
+	/** 본문 글꼴 */
 	font: string;
+	/** 제목 글꼴 (display · title · subtitle). 비면 본문 글꼴 */
+	headFont: string;
 	ink: string;
 	paper: string;
 	accent: string;
+	/** 보조 색 — 차트 계열 · 갈래 색. theme.css 의 --c1 … */
+	palette: string[];
+	/** 글자 위계 — px · 굵기 */
+	scale: Record<Level, TypeStep>;
+	/** 쪽 가장자리에서 글까지 띄울 거리 px */
+	margin: number;
 	radius: number;
 	stroke: number;
 	shadow: "none" | "soft";
@@ -25,6 +41,8 @@ export interface Template {
 	imageStyle: string;
 	/** 글로 적는 스타일 규칙 — 표지 배치 · 머리글 · 글 양 같은 것. 시스템 프롬프트 끝에 붙는다 */
 	guide: string;
+	/** 어디서 왔는지 — PPTX · 템플릿 파일에서 들였으면 그 파일 이름 */
+	from?: string;
 }
 
 export interface Settings {
@@ -49,10 +67,35 @@ export interface Settings {
 	me: string;
 }
 
+export const SCALE: Record<Level, TypeStep> = {
+	display: { size: 64, weight: 700 },
+	title: { size: 40, weight: 700 },
+	subtitle: { size: 28, weight: 600 },
+	body: { size: 24, weight: 400 },
+	caption: { size: 16, weight: 400 },
+};
+
 export const BASIC: Template = {
-	id: "basic", name: "기본", font: "Pretendard", ink: "#16181D", paper: "#FFFFFF", accent: "#E5482D",
+	id: "basic", name: "기본", font: "Pretendard", headFont: "", ink: "#16181D", paper: "#FFFFFF", accent: "#E5482D",
+	palette: ["#2B6CB0", "#2F855A", "#B7791F"], scale: SCALE, margin: 72,
 	radius: 10, stroke: 1.5, shadow: "none", icon: "line", imageStyle: "", guide: "",
 };
+
+const HEX = /^#[0-9A-F]{6}$/i;
+/** 어디서 왔든(옛 설정 · 템플릿 파일 · PPTX) 빠진 칸을 기본값으로 채우고 틀린 값을 걸러 낸다 */
+export function normalizeTemplate(x: any): Template {
+	const t: Template = { ...BASIC, ...(x || {}) };
+	const step = (v: any, d: TypeStep): TypeStep => ({
+		size: Number.isFinite(+v?.size) && +v.size > 4 ? Math.round(+v.size * 10) / 10 : d.size,
+		weight: Number.isFinite(+v?.weight) ? Math.min(900, Math.max(100, Math.round(+v.weight / 100) * 100)) : d.weight,
+	});
+	t.scale = Object.fromEntries(LEVELS.map((l) => [l, step(x?.scale?.[l], SCALE[l])])) as Record<Level, TypeStep>;
+	t.palette = Array.isArray(x?.palette) ? x.palette.filter((c: any) => typeof c === "string" && HEX.test(c)).map((c: string) => c.toUpperCase()).slice(0, 6) : BASIC.palette;
+	for (const k of ["ink", "paper", "accent"] as const) if (!HEX.test(t[k])) t[k] = BASIC[k];
+	t.headFont = typeof t.headFont === "string" ? t.headFont : "";
+	t.margin = Number.isFinite(+t.margin) ? Math.min(200, Math.max(0, Math.round(+t.margin))) : BASIC.margin;
+	return t;
+}
 
 export const DEFAULTS: Settings = {
 	lang: "ko",
@@ -80,8 +123,8 @@ const merge = (v: any): Settings => {
 	// 2026.11.24 : 「도형」 탭 · 「추가 지침」 · 이미지 화풍을 템플릿 하나로 모았다. 옛 설정은 「기본」 템플릿 하나로 옮긴다.
 	// 「프롬프트」(앱 기본 프롬프트 갈아 끼우기)는 없앴다 — 바꾸면 내보내기 규칙이 빠져 PPTX 가 깨지고, 스타일은 템플릿 지침으로 충분하다
 	const templates: Template[] = Array.isArray(v?.templates) && v.templates.length
-		? v.templates.map((x: any) => ({ ...BASIC, ...x }))
-		: [{ ...BASIC, ...(v?.shape || {}), imageStyle: v?.image?.style || "", guide: v?.claude?.extra || "" }];
+		? v.templates.map(normalizeTemplate)
+		: [normalizeTemplate({ ...(v?.shape || {}), imageStyle: v?.image?.style || "", guide: v?.claude?.extra || "" })];
 	const { shape: _s, ...rest } = v || {};
 	const { prompt: _p, extra: _e, ...claude } = v?.claude || {};
 	const { style: _st, ...image } = v?.image || {};

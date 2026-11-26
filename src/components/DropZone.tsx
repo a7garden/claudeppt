@@ -2,29 +2,40 @@
 // 덱을 열어 두었으면 그림 · PDF · 글 파일은 요청에 첨부한다 (attach.ts). 2026.11.25 : 전에는 「가져올 수 없는 파일」로 버렸다.
 // 끌고 들어오는 동안 무엇을 놓는지(파일 이름)와 놓으면 어떻게 되는지를 판 하나로 보인다.
 // 2026.11.20 : 빨간 점선 테두리에 빨간 글자 한 줄이던 것을 차분한 안내 판으로 바꿨다. 처음 화면 · 작업 화면에 따로 있던 것을 여기 하나로 모았다.
+// 2026.11.26 : 템플릿으로 들이기를 더했다. .potx · .ctpl 은 늘 템플릿이고, PPTX 는 「새 덱」 · 「템플릿」 두 칸을 띄워 놓는 자리(창 왼쪽 · 오른쪽 절반)로 가른다.
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { remote } from "../lib/transport";
 import { useEffect, useState } from "react";
 import { attachable, useAttach } from "../lib/attach";
 import { importFile, openAny } from "../lib/flows";
-import { type Key, useT } from "../lib/i18n";
+import { type Key, tNow, useT } from "../lib/i18n";
 import { useDeck } from "../lib/store";
+import { addTemplateFromPath } from "../lib/templates";
 import { openTalk } from "./Talk";
 
-type Kind = "pptx" | "cppt" | "folder" | "attach" | "no";
+type Kind = "pptx" | "template" | "cppt" | "folder" | "attach" | "no";
 
 /** 확장자가 없으면 폴더로 본다 — 끌어 놓기 사건은 경로만 주고, 폴더인지 묻자면 느리다 */
 const kindOf = (p: string, deckOpen: boolean): Kind => {
 	if (/\.pptx$/i.test(p)) return "pptx";
+	if (/\.(potx|ctpl)$/i.test(p)) return "template";
 	if (/\.cppt$/i.test(p)) return "cppt";
 	if (deckOpen && attachable(p)) return "attach";
 	// 덱을 열어 둔 채 폴더를 놓으면 그 덱이 닫힌다 — 작업 중에는 받지 않는다
 	if (!/\.[a-z0-9]{1,5}$/i.test(p.split(/[\\/]/).pop() || "") && !deckOpen) return "folder";
 	return "no";
 };
-const LABEL: Record<Kind, Key> = { pptx: "dropPptx", cppt: "dropCppt", folder: "dropFolder", attach: "dropAttach", no: "dropSkip" };
+const LABEL: Record<Kind, Key> = { pptx: "dropPptx", template: "dropTemplate", cppt: "dropCppt", folder: "dropFolder", attach: "dropAttach", no: "dropSkip" };
 
-async function take(paths: string[]) {
+async function addTemplates(paths: string[]) {
+	for (const p of paths) {
+		try { const tpl = await addTemplateFromPath(p); useDeck.getState().notify(`${tNow("tplAdded")} · ${tpl.name}`); }
+		catch (e) { useDeck.getState().notify(`${p.split(/[\\/]/).pop()} ·${String(e)}`, "err"); }
+	}
+}
+
+/** asTemplate — PPTX 를 「템플릿」 칸에 놓았다 */
+async function take(paths: string[], asTemplate: boolean) {
 	const deckOpen = !!useDeck.getState().deck;
 	const items = paths.map((p) => ({ p, k: kindOf(p, deckOpen) }));
 	// PPTX 는 여러 개를 놓아도 하나씩 가져온다 (각자 진행 막대) — 한꺼번에 돌리면 큰 파일 여럿이 메모리를 다툰다
@@ -32,28 +43,44 @@ async function take(paths: string[]) {
 	const files = items.filter((x) => x.k === "attach").map((x) => x.p);
 	if (files.length) { openTalk(); await useAttach.getState().addPaths(files); }
 	if (other) await openAny(other.p);
-	for (const x of items) if (x.k === "pptx") await importFile(x.p);
+	await addTemplates(items.filter((x) => x.k === "template" || (asTemplate && x.k === "pptx")).map((x) => x.p));
+	if (!asTemplate) for (const x of items) if (x.k === "pptx") await importFile(x.p);
 }
 
 export default function DropZone() {
 	const t = useT();
 	const deckOpen = useDeck((s) => !!s.deck);
 	const [paths, setPaths] = useState<string[] | null>(null);
+	// 창 오른쪽 절반에 있으면 템플릿 칸 — 끌기 사건의 자리는 물리 픽셀이다
+	const [right, setRight] = useState(false);
 	useEffect(() => {
 		// 협업 브라우저에는 이 PC 의 파일 경로가 없다 — 끌어 놓기는 호스트 앱만
 		if (remote) return;
 		const un = getCurrentWebview().onDragDropEvent((e) => {
 			const p = e.payload;
+			if ("position" in p && p.position) setRight(p.position.x / devicePixelRatio > innerWidth / 2);
 			// 글자 · 그림 조각을 끌 때도 enter 가 온다 — 파일이 없으면 판을 띄우지 않는다
 			if (p.type === "enter") setPaths(p.paths.length ? p.paths : null);
 			else if (p.type === "leave") setPaths(null);
-			else if (p.type === "drop") { setPaths(null); if (p.paths.length) take(p.paths); }
+			else if (p.type === "drop") { setPaths(null); if (p.paths.length) take(p.paths, p.position.x / devicePixelRatio > innerWidth / 2); }
 		});
 		return () => { un.then((f) => f()); };
 	}, []);
 	if (!paths) return null;
 	const items = paths.map((p) => ({ name: p.split(/[\\/]/).pop() || p, k: kindOf(p, deckOpen) }));
 	const ok = items.some((x) => x.k !== "no");
+	const pptx = items.filter((x) => x.k === "pptx");
+	if (pptx.length) {
+		const names = pptx.map((x) => x.name).join(" · ");
+		return (
+			<div className="dropzone" role="status" aria-live="polite">
+				<div className="drop-split">
+					<div className={right ? "" : "on"}><b>{t("dropAsDeck")}</b><span>{t("dropAsDeckHint")}</span><span className="f">{names}</span></div>
+					<div className={right ? "on" : ""}><b>{t("dropAsTemplate")}</b><span>{t("dropAsTemplateHint")}</span><span className="f">{names}</span></div>
+				</div>
+			</div>
+		);
+	}
 	return (
 		<div className="dropzone" role="status" aria-live="polite">
 			<div className="drop-card">

@@ -59,22 +59,45 @@ ${body}
 `;
 }
 
-export function themeCss(sh: Pick<Template, "font" | "ink" | "paper" | "accent" | "radius" | "stroke">, size = { w: 1280, h: 720 }) {
-	const font = sh.font === "Pretendard" ? `"Pretendard", "Malgun Gothic", sans-serif` : `"${sh.font}", "Malgun Gothic", sans-serif`;
-	return `/* 모든 쪽이 함께 쓰는 서식. 색 · 글꼴은 변수로만 쓴다 — 바꾸면 모든 쪽이 따라 바뀐다. */
-@font-face { font-family: "Pretendard"; src: url("assets/fonts/PretendardVariable.woff2") format("woff2"); font-weight: 45 920; }
+const family = (f: string) => `"${f}", "Malgun Gothic", sans-serif`;
 
+// 템플릿 구획 — theme.css 안에서 템플릿이 쓰는 곳. 「이 덱에 적용」은 이 구획만 갈아 끼운다 (rethemeCss).
+// 2026.11.26 : 글자 위계(.t-*) · 제목 글꼴 · 보조 색 · 여백을 더하며 구획을 표시로 둘렀다. 전에는 :root 변수 여섯 개만 바꿨다
+const TPL_START = "/* @template start";
+const TPL_END = "/* @template end */";
+
+/** 템플릿 구획 — :root 변수와 글자 위계 클래스. 쪽은 색 · 글꼴 · 크기를 이 이름으로만 쓴다 */
+export function templateBlock(sh: Template) {
+	const s = sh.scale;
+	const step = (l: keyof Template["scale"], extra: string) =>
+		`.t-${l} { font-size: var(--fs-${l}); font-weight: var(--fw-${l}); ${extra} }`;
+	return `${TPL_START} 「${sh.name.replace(/\*\//g, "")}」 · 설정 › 템플릿이 쓰는 구획. 고치려면 템플릿을 바꾸고 「이 덱에 적용」 */
 :root {
 	--ink: ${sh.ink};
 	--paper: ${sh.paper};
 	--accent: ${sh.accent};
-	--muted: color-mix(in srgb, var(--ink) 55%, var(--paper));
+${sh.palette.map((c, i) => `\t--c${i + 1}: ${c};\n`).join("")}	--muted: color-mix(in srgb, var(--ink) 55%, var(--paper));
 	--line: color-mix(in srgb, var(--ink) 14%, var(--paper));
 	--soft: color-mix(in srgb, var(--ink) 5%, var(--paper));
 	--radius: ${sh.radius}px;
 	--stroke: ${sh.stroke}px;
-	--font: ${font};
+	--margin: ${sh.margin}px;
+	--font: ${family(sh.font)};
+	--font-head: ${sh.headFont.trim() ? family(sh.headFont.trim()) : "var(--font)"};
+${(Object.keys(s) as (keyof Template["scale"])[]).map((l) => `\t--fs-${l}: ${s[l].size}px; --fw-${l}: ${s[l].weight};\n`).join("")}}
+${step("display", "font-family: var(--font-head); line-height: 1.15; letter-spacing: -0.02em;")}
+${step("title", "font-family: var(--font-head); line-height: 1.2; letter-spacing: -0.01em;")}
+${step("subtitle", "font-family: var(--font-head); line-height: 1.3;")}
+${step("body", "line-height: 1.45;")}
+${step("caption", "line-height: 1.4; color: var(--muted);")}
+${TPL_END}`;
 }
+
+export function themeCss(sh: Template, size = { w: 1280, h: 720 }) {
+	return `/* 모든 쪽이 함께 쓰는 서식. 색 · 글꼴 · 글자 크기는 변수와 .t-* 클래스로만 쓴다 — 바꾸면 모든 쪽이 따라 바뀐다. */
+@font-face { font-family: "Pretendard"; src: url("assets/fonts/PretendardVariable.woff2") format("woff2"); font-weight: 45 920; }
+
+${templateBlock(sh)}
 
 html, body { margin: 0; padding: 0; background: var(--paper); }
 * { box-sizing: border-box; }
@@ -95,18 +118,22 @@ html, body { margin: 0; padding: 0; background: var(--paper); }
 `;
 }
 
-/** 덱의 theme.css 에서 :root 변수만 템플릿 값으로 바꾼다 — 쪽마다 쓴 클래스 · 글자 틀 같은 나머지 서식은 그대로 둔다 */
+/** 덱의 theme.css 에서 템플릿 구획만 갈아 끼운다 — 쪽마다 쓴 클래스 · 글자 틀 같은 나머지 서식은 그대로 둔다.
+ *  구획 표시가 없는 옛 덱은 첫 :root 규칙 바로 뒤에 구획을 넣는다. 같은 :root 라 뒤에 온 구획의 값이 이긴다 —
+ *  옛 :root 를 지우지 않는 것은 Claude 가 거기 더해 둔 변수를 살리려고 */
 export function rethemeCss(css: string, tpl: Template) {
-	const font = `"${tpl.font}", "Malgun Gothic", sans-serif`;
-	const vars: Record<string, string> = { "--ink": tpl.ink, "--paper": tpl.paper, "--accent": tpl.accent, "--radius": tpl.radius + "px", "--stroke": tpl.stroke + "px", "--font": font };
-	for (const [k, v] of Object.entries(vars)) css = css.replace(new RegExp(`(${k}\\s*:\\s*)[^;]+;`), `$1${v};`);
-	return css;
+	const block = templateBlock(tpl);
+	const a = css.indexOf(TPL_START), b = css.indexOf(TPL_END);
+	if (a >= 0 && b > a) return css.slice(0, a) + block + css.slice(b + TPL_END.length);
+	const root = /:root\s*\{[^}]*\}/.exec(css);
+	if (root) return css.slice(0, root.index + root[0].length) + "\n\n" + block + css.slice(root.index + root[0].length);
+	return block + "\n\n" + css;
 }
 
 /** theme.css 의 :root 변수 → 템플릿 값. 「지금 덱에서 가져오기」가 쓴다 — 가져온 PPTX 의 글꼴 · 색을 템플릿으로 남겨 다음 덱에 다시 쓰려고.
- *  색 칸이 #RRGGBB 만 받으므로 그 꼴이 아닌 값(color-mix · rgb)은 건너뛴다 */
+ *  색 칸이 #RRGGBB 만 받으므로 그 꼴이 아닌 값(color-mix · rgb)은 건너뛴다. 같은 변수가 여러 번 있으면 뒤의 것(템플릿 구획)이 이긴다 */
 export function themeVars(css: string): Partial<Template> {
-	const get = (k: string) => css.match(new RegExp(`${k}\\s*:\\s*([^;]+);`))?.[1].trim();
+	const get = (k: string) => [...css.matchAll(new RegExp(`(?<![\\w-])${k}\\s*:\\s*([^;]+);`, "g"))].pop()?.[1].trim();
 	const hex = (v?: string) => {
 		if (!v) return undefined;
 		if (/^#[0-9a-f]{6}$/i.test(v)) return v.toUpperCase();
@@ -114,10 +141,19 @@ export function themeVars(css: string): Partial<Template> {
 		return undefined;
 	};
 	const num = (v?: string) => (v && !isNaN(parseFloat(v)) ? parseFloat(v) : undefined);
+	const first = (v?: string) => (v && !v.startsWith("var(") ? v.split(",")[0].trim().replace(/^["']|["']$/g, "") : undefined);
+	const palette = Array.from({ length: 6 }, (_, i) => hex(get(`--c${i + 1}`))).filter((c): c is string => !!c);
+	const scale: Partial<Template["scale"]> = {};
+	for (const l of ["display", "title", "subtitle", "body", "caption"] as const) {
+		const size = num(get(`--fs-${l}`)), weight = num(get(`--fw-${l}`));
+		if (size) scale[l] = { size, weight: weight || 400 };
+	}
 	const out: Partial<Template> = {
 		ink: hex(get("--ink")), paper: hex(get("--paper")), accent: hex(get("--accent")),
-		radius: num(get("--radius")), stroke: num(get("--stroke")),
-		font: get("--font")?.split(",")[0].trim().replace(/^["']|["']$/g, ""),
+		radius: num(get("--radius")), stroke: num(get("--stroke")), margin: num(get("--margin")),
+		font: first(get("--font")), headFont: first(get("--font-head")),
+		palette: palette.length ? palette : undefined,
+		scale: Object.keys(scale).length === 5 ? (scale as Template["scale"]) : undefined,
 	};
 	return Object.fromEntries(Object.entries(out).filter(([, v]) => v !== undefined && v !== ""));
 }

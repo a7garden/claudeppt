@@ -6,7 +6,7 @@
 //   덱 찾기          deck_dir · deck_own — --deck · 지금 폴더에서 위로 · 앱에 열린 덱 순서. 덱을 바꾸는 명령은 앱에 열린 덱으로 떨어지지 않는다
 //   앱 없이 하는 일   list · info · log · commit · restore · pack · unpack · paths · add · remove · move — 파일과 git 만 본다
 //   스킬 깔기        skill — 스킬 「claudeppt」(저장소 skill/SKILL.md 를 실행 파일에 담아 둔다)와 cppt 꾸러미를 ~/.claude/skills 에 쓴다
-//   앱에 넘기는 일    status · open · new · import · export · shot · inspect · check · release · style · pins · gen
+//   앱에 넘기는 일    status · open · new · import · export · shot · inspect · check · audit · release · style · pins · gen
 //                    웹뷰가 쪽을 그려야 하거나 앱 설정 · 앱이 쥔 상태(핀)를 써야 하는 일이라 실행 중인 앱에 넘긴다 (control.rs → src/lib/remote.ts)
 //   앱 부르기        call — control.json 으로 찾아 붙고, 꺼져 있으면 띄운 뒤 준비될 때까지 기다린다
 //   바깥 작업 알림    touch — 덱을 쓴 명령마다 켜진 앱에 알린다. 앱은 몇 분 동안 그 덱에서 앱 안 Claude 에게 보내기 전에 한 번 묻는다
@@ -28,7 +28,7 @@ type R<T> = Result<T, String>;
 
 const COMMANDS: &[&str] = &[
 	"help", "skill", "paths", "status", "list", "info", "log", "commit", "restore", "pack", "unpack", "add", "remove", "move",
-	"launch", "open", "new", "import", "export", "shot", "inspect", "check", "release", "style", "pins", "gen",
+	"launch", "open", "new", "import", "export", "shot", "inspect", "check", "audit", "release", "style", "pins", "gen",
 ];
 
 const HELP: &str = "ClaudePPT CLI — 출력은 JSON 하나. 쪽 번호는 1부터.
@@ -70,6 +70,8 @@ const HELP: &str = "ClaudePPT CLI — 출력은 JSON 하나. 쪽 번호는 1부�
                                      쪽을 브라우저가 그린 그대로 PNG 로 굽는다 (기본 .claudeppt/shots/<n>.png)
   inspect [--slides 1,3-5]           PPTX 로 나갈 때 무엇이 편집 가능한 도형 · 글상자가 되고 무엇이 그림으로 굳는지, 쪽 밖으로 넘친 것
   check                              PPTX 를 PowerPoint 로 그려 웹과 픽셀로 견준다 (PowerPoint 필요)
+  audit                              쪽마다 템플릿을 벗어난 곳(글꼴 · 색 · 글자 위계 · 모서리 · 여백)과 AI 티가 나는 곳을 짚는다
+                                     prompt 는 그대로 고칠 거리로 쓸 수 있는 글
   release [--name <이름>] [--notes <메모>]
                                      릴리즈 r<k> — releases/r<k>-v<n>.pptx 와 git 태그
 ";
@@ -184,6 +186,10 @@ fn run(cmd: &str, a: &Args) -> R<Value> {
 		"check" => {
 			let dir = deck_dir(a)?;
 			app_on(&dir)?.call("check", json!({ "dir": dir }))
+		}
+		"audit" => {
+			let dir = deck_dir(a)?;
+			app_on(&dir)?.call("audit", json!({ "dir": dir }))
 		}
 		"release" => {
 			let dir = deck_own(a)?;

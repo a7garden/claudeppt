@@ -4,12 +4,13 @@
 //              Claude 탭의 「프롬프트」 · 「추가 지침」 칸은 없앴다 (prompt.ts 머리말).
 import { getVersion } from "@tauri-apps/api/app";
 import { listen } from "@tauri-apps/api/event";
-import { open } from "@tauri-apps/plugin-dialog";
+import { open, save } from "@tauri-apps/plugin-dialog";
 import { useEffect, useState } from "react";
 import { api, type RemoteInfo, type Tool } from "../lib/api";
 import { type Key, useT } from "../lib/i18n";
 import { rethemeCss, themeVars, writeDeck } from "../lib/deck";
-import { type ImageProvider, type Template, templateId, useSettings } from "../lib/settings";
+import { type ImageProvider, LEVELS, type Level, type Template, templateId, useSettings } from "../lib/settings";
+import { addTemplateFromPath, saveTemplateFile, TEMPLATE_EXT } from "../lib/templates";
 import { useDeck } from "../lib/store";
 import { CollabSettings } from "./Collab";
 import { stopHost } from "../lib/collab";
@@ -180,6 +181,18 @@ function Templates() {
 			add({ ...sh, ...themeVars(await api.readText(dir, "theme.css")), guide: "", imageStyle: "" }, deck.title);
 		} catch (e) { notify(String(e), "err"); }
 	};
+	const addFile = async () => {
+		const p = await open({ filters: [{ name: t("templates"), extensions: [TEMPLATE_EXT, "pptx", "potx"] }] });
+		if (typeof p !== "string") return;
+		try { const n = await addTemplateFromPath(p); setEdit(n.id); notify(`${t("tplAdded")} · ${n.name}`); }
+		catch (e) { notify(String(e), "err"); }
+	};
+	const exportFile = async () => {
+		const p = await save({ defaultPath: `${sh.name}.${TEMPLATE_EXT}`, filters: [{ name: t("templates"), extensions: [TEMPLATE_EXT] }] });
+		if (p) await saveTemplateFile(sh, p).then(() => notify(p.split(/[\\/]/).pop()!), (e) => notify(String(e), "err"));
+	};
+	const putLevel = (l: Level, p: Partial<Template["scale"][Level]>) => put({ scale: { ...sh.scale, [l]: { ...sh.scale[l], ...p } } });
+	const lvName: Record<Level, Key> = { display: "lvDisplay", title: "lvTitle", subtitle: "lvSubtitle", body: "lvBody", caption: "lvCaption" };
 	const applyToDeck = async () => {
 		if (!deck) return;
 		// theme.css 는 :root 변수만 바꾸고, deck.json 에 템플릿을 남긴다 — 다음 턴부터 이 템플릿의 지침이 실린다 (prompt.ts)
@@ -201,18 +214,30 @@ function Templates() {
 					</button>
 				))}
 				<button className="add" onClick={() => add(sh, `${sh.name} 2`)}>+ {t("duplicateTemplate")}</button>
+				<button className="add" onClick={addFile}>+ {t("tplFromFile")}</button>
 			</div>
+			<Row k=""><span className="note" style={{ whiteSpace: "normal" }}>{t("tplDropHint")}</span></Row>
 			<Row k={t("name")}>
 				<input className="field" value={sh.name} onChange={(e) => put({ name: e.target.value })} />
 				{sh.id !== s.template && <button className="ghost" onClick={() => set((x) => ({ ...x, template: sh.id }))}>{t("useForNew")}</button>}
+				<button className="ghost" onClick={exportFile}>{t("tplExport")}</button>
 				<button className="ghost" disabled={s.templates.length < 2} onClick={remove}>{t("delete")}</button>
 			</Row>
+			{sh.from && <Row k={t("tplFrom")}><span className="note">{sh.from}</span></Row>}
 			<Row k={t("font")}>
 				<select className="field" value={FONTS.includes(sh.font) ? sh.font : ""} onChange={(e) => e.target.value && put({ font: e.target.value })}>
 					{FONTS.map((f) => <option key={f} value={f}>{f}</option>)}
 					<option value="">…</option>
 				</select>
 				<input className="field" style={{ maxWidth: 160 }} value={sh.font} onChange={(e) => put({ font: e.target.value })} />
+			</Row>
+			<Row k={t("headFont")}>
+				<select className="field" value={!sh.headFont ? "" : FONTS.includes(sh.headFont) ? sh.headFont : "custom"} onChange={(e) => e.target.value !== "custom" && put({ headFont: e.target.value })}>
+					<option value="">{t("sameAsBody")}</option>
+					{FONTS.map((f) => <option key={f} value={f}>{f}</option>)}
+					<option value="custom">…</option>
+				</select>
+				<input className="field" style={{ maxWidth: 160 }} value={sh.headFont} placeholder={sh.font} onChange={(e) => put({ headFont: e.target.value })} />
 			</Row>
 			<Row k={t("palette")}>
 				{(["ink", "paper", "accent"] as const).map((k) => (
@@ -222,6 +247,32 @@ function Templates() {
 					</label>
 				))}
 			</Row>
+			<Row k={t("paletteMore")}>
+				{sh.palette.map((c, i) => (
+					<span key={i} className="swatch" style={{ background: c }} title={`--c${i + 1} ${c}`} onContextMenu={(e) => { e.preventDefault(); put({ palette: sh.palette.filter((_, j) => j !== i) }); }}>
+						<input type="color" value={c} onChange={(e) => put({ palette: sh.palette.map((x, j) => (j === i ? e.target.value.toUpperCase() : x)) })} aria-label={`--c${i + 1}`} />
+					</span>
+				))}
+				{sh.palette.length < 6 && <button className="ghost" onClick={() => put({ palette: [...sh.palette, sh.accent] })}>+ {t("addColor")}</button>}
+				{sh.palette.length > 0 && <button className="ghost" onClick={() => put({ palette: sh.palette.slice(0, -1) })} title={t("removeColor")}>−</button>}
+			</Row>
+			<div className="row" style={{ alignItems: "start" }}>
+				<div className="k" style={{ paddingTop: 8 }}>{t("typeScale")}</div>
+				<div className="v tscale">
+					{LEVELS.map((l) => (
+						<div key={l} className="lv">
+							<span className="n">{t(lvName[l])}</span>
+							<input className="field mono" type="number" min={8} max={200} value={sh.scale[l].size} onChange={(e) => +e.target.value > 0 && putLevel(l, { size: +e.target.value })} aria-label={`${t(lvName[l])} px`} />
+							<span className="note">px</span>
+							<select className="field" value={sh.scale[l].weight} onChange={(e) => putLevel(l, { weight: +e.target.value })} aria-label={t(lvName[l])}>
+								{[300, 400, 500, 600, 700, 800].map((w) => <option key={w} value={w}>{w}</option>)}
+							</select>
+							<span className="eg" style={{ fontFamily: `"${(l === "body" || l === "caption" ? sh.font : sh.headFont || sh.font)}", "Malgun Gothic", sans-serif`, fontWeight: sh.scale[l].weight, fontSize: Math.min(28, Math.max(11, sh.scale[l].size * 0.4)) }}>가나다</span>
+						</div>
+					))}
+				</div>
+			</div>
+			<Row k={t("margin")}><div className="range"><input type="range" min={0} max={160} step={4} value={sh.margin} onChange={(e) => put({ margin: +e.target.value })} /><span>{sh.margin}px</span></div></Row>
 			<Row k={t("radius")}><div className="range"><input type="range" min={0} max={32} value={sh.radius} onChange={(e) => put({ radius: +e.target.value })} /><span>{sh.radius}px</span></div></Row>
 			<Row k={t("stroke")}><div className="range"><input type="range" min={0.5} max={4} step={0.5} value={sh.stroke} onChange={(e) => put({ stroke: +e.target.value })} /><span>{sh.stroke}px</span></div></Row>
 			<Row k={t("shadow")}><Seg value={sh.shadow} options={[{ v: "none", label: t("none") }, { v: "soft", label: t("soft") }]} onChange={(shadow) => put({ shadow })} /></Row>

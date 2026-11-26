@@ -4,7 +4,7 @@
 //   open                     덱을 화면에 연다 · 그 쪽으로 간다
 //   new · import             저장 폴더에 새 덱 — 앱의 처음 화면 · 가져오기와 같은 길(createDeck · flows.importDeck)
 //   export · shot · inspect  웹뷰가 쪽을 그려야 하는 일 — 내보내기와 같은 런타임(rt.js)의 extract · snapshot 을 쓴다
-//   check · release          비교 검사 · 릴리즈 — 앱의 단추와 같은 함수(runCheck · makeRelease)
+//   check · audit · release  비교 검사 · 감사 · 릴리즈 — 앱의 단추와 같은 함수(runCheck · runAudit · makeRelease)
 //   style                    덱이 따를 스타일 · 그림 규칙 — 앱 안 Claude 의 시스템 프롬프트와 같은 글(prompt.ts houseStyle · imageRules)
 //   pins · unpin             사용자가 꽂은 핀을 앱 안 턴과 같은 글(pinLine) · 같은 표시 그림(markedPictures)으로 / 다 고친 핀 지우기
 //   gen                      그림 자리(data-gen) 채우기 — 앱 안 턴 끝과 같은 함수(fillGenerated)
@@ -284,6 +284,16 @@ const handlers: Record<string, (a: Args) => Promise<unknown>> = {
 				const { runCheck } = await import("./check");
 				const report = await runCheck(dir, id, deck, log[0]?.n ?? 0, () => step(++k, 0));
 				return { ...report, slides: report.slides.map((x) => ({ ...x, web: join(dir, x.web), ppt: join(dir, x.ppt), diff: join(dir, x.diff) })) };
+			}),
+		),
+
+	audit: async ({ dir }) =>
+		withDeck(dir, (id, deck) =>
+			job(`${titleOf(dir, deck)} · ${tNow("audit")}`, async (step) => {
+				const { runAudit, auditFixPrompt } = await import("./audit");
+				const r = await runAudit(dir, id, deck, deckTemplate(useSettings.getState().s, deck), step);
+				// 바깥 세션은 fix 줄(영어 · 어느 요소인지)로 고친다. 화면 글(msg)은 사람이 읽는 요약
+				return { ...r, slides: r.slides.filter((x) => x.findings.length), prompt: auditFixPrompt(r) };
 			}),
 		),
 

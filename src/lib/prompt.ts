@@ -13,7 +13,7 @@ You only have file tools. Work only inside the current folder.
 
 # Project layout
 - deck.json — title, slide size and slide ORDER (the "slides" array). It is the only source of truth for which slides exist and their order.
-- theme.css — shared styles for every slide: CSS variables (--ink, --paper, --accent, --muted, --line, --soft, --radius, --stroke, --font) and the .slide frame. Put repeated styles here as small classes.
+- theme.css — shared styles for every slide: the template block between "@template start" and "@template end" (CSS variables --ink, --paper, --accent, --c1…, --muted, --line, --soft, --radius, --stroke, --margin, --font, --font-head and the type classes .t-display … .t-caption; the app rewrites this block when the template changes, so never edit inside it) and the .slide frame. Put repeated styles below it as small classes.
 - slides/<id>.html — one slide per file: a full HTML document that links "../theme.css" and contains exactly one <section class="slide"> of the deck size (default 1280×720 px).
 - assets/ — images and fonts. Reference them from slides as "../assets/<name>".
 - source/ — the original PPTX when the deck was imported, and source/pages/<n>.png: pictures of the original slides rendered by PowerPoint. When they exist, Read them and match the HTML to them as closely as possible.
@@ -33,7 +33,7 @@ The exporter measures the rendered DOM and rebuilds it in PowerPoint:
 - <table> becomes a native PowerPoint table — use it for tabular data.
 - <img> and inline <svg> become pictures. Use SVG for illustrations, icons, charts and complex shapes.
 - Anything PowerPoint cannot draw natively is baked into a picture that looks identical but is no longer editable: gradients, background images, box-shadow, ::before/::after, uneven corners or borders, list markers, and — together with all their children — transforms/rotation, filters, blend modes, clip-path, text-shadow. Prefer flat colors, solid borders and explicit bullet spans so text stays editable.
-- PowerPoint only has fonts installed on this PC. Use the theme font (var(--font)); do not introduce other web fonts.
+- PowerPoint only has fonts installed on this PC. Use the theme fonts (var(--font), var(--font-head)); do not introduce other web fonts.
 - Lay out with flex/grid or absolute positioning inside .slide; nothing may overflow 1280×720 or scroll.
 
 # Writing on slides
@@ -62,13 +62,21 @@ export function houseStyle(s: Settings, deck: Deck) {
 }
 
 /** 템플릿 하나의 스타일 규칙 — 앱 안 Claude 의 시스템 프롬프트와, 바깥 CLI 의 new 가 돌려주는 style 이 같은 글이다 */
+// 2026.11.26 : 글자 위계(.t-*) · 제목 글꼴 · 보조 색 · 여백을 더했다. 감사(audit.ts)가 같은 값으로 벗어난 곳을 잡는다 — 여기서 말하지 않은 규칙으로 잡으면 Claude 가 억울하다
 export function templateRules(sh: Template) {
+	const s = sh.scale;
 	return `# House style (template "${sh.name}")
-- Font: ${sh.font} (via var(--font)). Ink ${sh.ink}, paper ${sh.paper}, accent ${sh.accent} — use the CSS variables, not raw hex values.
-- Shape corner radius: ${sh.radius}px (var(--radius)). Line weight: ${sh.stroke}px (var(--stroke)).
+- Fonts: headings ${sh.headFont.trim() || sh.font} (var(--font-head)), everything else ${sh.font} (var(--font)). No other fonts.
+- Colors: ink ${sh.ink} (var(--ink)), paper ${sh.paper} (var(--paper)), accent ${sh.accent} (var(--accent))${sh.palette.length ? `, series ${sh.palette.map((c, i) => `${c} (var(--c${i + 1}))`).join(", ")} for charts and categories` : ""}; derived var(--muted), var(--line), var(--soft). Use the variables, never raw hex values. Lighter tints of these via color-mix with var(--paper) are fine; no other hues.
+- Type scale — put these classes on text elements instead of setting font-size/font-weight yourself:
+  .t-display ${s.display.size}px/${s.display.weight} (cover title, one big number) · .t-title ${s.title.size}px/${s.title.weight} (slide title) · .t-subtitle ${s.subtitle.size}px/${s.subtitle.weight} · .t-body ${s.body.size}px/${s.body.weight} · .t-caption ${s.caption.size}px/${s.caption.weight} (sources, labels, footnotes).
+  At most 4 of these levels on one slide.
+- Margins: keep text at least ${sh.margin}px (var(--margin)) from the slide edges; full-bleed color bands and pictures may touch the edge.
+- Shape corner radius: ${sh.radius}px (var(--radius)), or fully round pills. Line weight: ${sh.stroke}px (var(--stroke)).
 - Shadows: ${sh.shadow === "none" ? "none — separate with space, tone and alignment" : "only a very soft shadow where depth explains something (note: shadows are dropped in PPTX)"}.
 - Icons: ${sh.icon === "line" ? "outline style, stroke = var(--stroke), round caps" : "solid filled style"}, drawn as inline SVG using currentColor.
-- Accent color only for the one thing that matters on a slide.${sh.guide.trim() ? `\n\n## Style rules of this template — follow them on every slide\n${sh.guide.trim()}` : ""}`;
+- Accent color only for the one thing that matters on a slide.
+- The app audits every slide against these rules and flags filler wording, decorative emoji, em dashes, gradients and look-alike card grids.${sh.guide.trim() ? `\n\n## Style rules of this template — follow them on every slide\n${sh.guide.trim()}` : ""}`;
 }
 
 /** 그림 규칙. outside 는 바깥 CLI 의 style 이 쓴다 — 바깥 세션은 턴이 없어서 그림 자리를 gen 명령으로 채운다 */

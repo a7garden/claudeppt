@@ -13,7 +13,7 @@ import JSZip from "jszip";
 import { api } from "./api";
 import { type Deck, FORMAT, embedFont, escapeHtml, newId, slideHtml, themeCss, writeDeck } from "./deck";
 import { faceResolver } from "./fonts";
-import { type Settings, templateOf } from "./settings";
+import { normalizeTemplate, type Settings, type Template, templateId, templateOf } from "./settings";
 
 type El = Element;
 const kids = (el: El | null | undefined, name?: string): El[] => (el ? [...el.children].filter((c) => !name || c.tagName === name) : []);
@@ -27,7 +27,8 @@ const path = (el: El | null | undefined, ...names: string[]): El | null => {
 const PT = 12700;
 const num = (v: string | null | undefined, d = 0) => (v == null || v === "" ? d : +v);
 
-interface Theme { colors: Record<string, string>; major: string; minor: string; majorEa: string; minorEa: string }
+/** lineW — 테마 선 서식 첫 칸의 굵기(EMU). 템플릿 뽑기만 쓴다 */
+interface Theme { colors: Record<string, string>; major: string; minor: string; majorEa: string; minorEa: string; lineW?: string }
 interface Ctx {
 	zip: JSZip;
 	k: number; // EMU → px
@@ -796,7 +797,204 @@ async function readTheme(zip: JSZip, masterPath: string): Promise<Theme> {
 		colors[c.tagName.replace("a:", "")] = (v?.getAttribute("val") && v.tagName === "a:srgbClr" ? v.getAttribute("val") : v?.getAttribute("lastClr")) || "000000";
 	}
 	const font = (n: string, t: string) => doc?.getElementsByTagName(n)[0]?.getElementsByTagName(t)[0]?.getAttribute("typeface") || "";
-	return { colors, major: font("a:majorFont", "a:latin"), minor: font("a:minorFont", "a:latin"), majorEa: font("a:majorFont", "a:ea"), minorEa: font("a:minorFont", "a:ea") };
+	const lineW = doc?.getElementsByTagName("a:lnStyleLst")[0]?.getElementsByTagName("a:ln")[0]?.getAttribute("w") || undefined;
+	return { colors, major: font("a:majorFont", "a:latin"), minor: font("a:minorFont", "a:latin"), majorEa: font("a:majorFont", "a:ea"), minorEa: font("a:minorFont", "a:ea"), lineW };
+}
+
+// ── 템플릿 뽑기 ──
+// PPTX · POTX 의 첫 마스터에서 템플릿 한 벌(settings.Template)을 뽑는다. 「템플릿으로 추가」와 가져온 덱의 theme.css 가 같이 쓴다.
+//   테마 색 tx1 · bg1 · accent1~6   → 글자 · 바탕 · 강조 · 보조 색 (마스터 바탕색이 있으면 그것이 바탕)
+//   테마 글꼴 major · minor          → 제목 · 본문 글꼴 (동아시아 글꼴이 있으면 그것 · 한글 덱이 대부분 그쪽을 쓴다)
+//   마스터 글자 서식 · 표지 레이아웃 → 글자 위계 다섯 단계
+//   마스터 제목 자리                 → 여백 · 스타일 지침의 제목 자리
+// 모서리는 레이아웃 · 앞쪽 쪽들에 둥근 사각형이 네모보다 많을 때만 둥글게 둔다.
+// 2026.11.26 : 마스터의 로고 · 띠 같은 그림은 아직 옮기지 않는다. 글로 남긴 지침만으로는 같은 자리에 그리지 못해, 옮기려면 쪽 틀(레이아웃) 기능이 따로 있어야 한다
+
+export async function pptxTemplate(bytes: Uint8Array, name: string, lang: "ko" | "en" = "ko"): Promise<Template> {
+	return templateFromZip(await JSZip.loadAsync(bytes), name, lang);
+}
+
+async function templateFromZip(zip: JSZip, name: string, lang: "ko" | "en"): Promise<Template> {
+	const ko = lang === "ko";
+	const pres = await xml(zip, "ppt/presentation.xml");
+	if (!pres) throw new Error(ko ? "PowerPoint 파일이 아닙니다 (presentation.xml 이 없습니다)" : "Not a PowerPoint file (no presentation.xml)");
+	const cx = num(pres.getElementsByTagName("p:sldSz")[0]?.getAttribute("cx"), 12192000);
+	const k = 1280 / cx;
+	const presRels = await rels(zip, "ppt/presentation.xml");
+	const mId = pres.getElementsByTagName("p:sldMasterId")[0]?.getAttribute("r:id");
+	const masterPath = (mId && presRels[mId]) || Object.values(presRels).find((p) => p.includes("slideMasters/"));
+	if (!masterPath) throw new Error(ko ? "슬라이드 마스터가 없는 파일입니다" : "The file has no slide master");
+	const master = await xml(zip, masterPath);
+	const theme = await readTheme(zip, masterPath);
+	const clrMap: Record<string, string> = {};
+	for (const a of master?.getElementsByTagName("p:clrMap")[0]?.attributes || []) clrMap[a.name] = a.value;
+	// 색 · 글자 서식 해석기는 테마 · 색 대응표 · 배율만 본다
+	const ctx = { k, theme, clrMap, warnings: new Set<string>() } as unknown as Ctx;
+	const hex = (c: string | null | undefined) => (c && /^#[0-9a-f]{6}$/i.test(c) ? c.toUpperCase() : null);
+	const scheme = (v: string) => hex(theme.colors[clrMap[v] || v] ? "#" + theme.colors[clrMap[v] || v] : null);
+
+	const paper = hex(bgOf(kid(master?.documentElement, "p:cSld"), ctx)?.css) || scheme("bg1") || "#FFFFFF";
+	let ink = scheme("tx1") || "#000000";
+	let accent = scheme("accent1") || "#E5482D";
+	let palette = [...new Set(["accent2", "accent3", "accent4", "accent5", "accent6"].map(scheme).filter((c): c is string => !!c && c !== accent && c !== paper))];
+
+	let font = theme.minorEa || theme.minor || "Malgun Gothic";
+	let head = theme.majorEa || theme.major || "";
+
+	// 글자 크기 — pt 를 덱 픽셀로 (가로 1280px 에 맞춘 배율)
+	const px = (pt: number | undefined) => (pt ? Math.round(pt * PT * k) : undefined);
+	const txStyles = master?.getElementsByTagName("p:txStyles")[0];
+	const lvl = (st: string, n: number) => textDefaultsOf(kid(kid(txStyles, st), `a:lvl${n}pPr`), ctx);
+	const t1 = lvl("p:titleStyle", 1), b1 = lvl("p:bodyStyle", 1), b3 = lvl("p:bodyStyle", 3);
+
+	// 레이아웃 — 이름 목록 · 표지(type="title")의 큰 제목 · 부제 크기 · 둥근 사각형 세기
+	const mRel = await rels(zip, masterPath);
+	const layouts: string[] = [];
+	let ctr: TextDefaults = {}, sub: TextDefaults = {};
+	let round = 0, square = 0;
+	const countShapes = (d: Document | null) => {
+		for (const sp of d?.getElementsByTagName("p:sp") || []) {
+			if (path(sp, "p:nvSpPr", "p:cNvSpPr")?.getAttribute("txBox") === "1" || phKey(sp)) continue;
+			const prst = path(sp, "p:spPr", "a:prstGeom")?.getAttribute("prst");
+			if (prst === "roundRect") round++;
+			else if (prst === "rect") square++;
+		}
+	};
+	for (const lp of Object.values(mRel).filter((p) => p.includes("slideLayouts/"))) {
+		const ld = await xml(zip, lp);
+		if (!ld) continue;
+		const nm = kid(ld.documentElement, "p:cSld")?.getAttribute("name");
+		if (nm) layouts.push(nm);
+		countShapes(ld);
+		if (ld.documentElement.getAttribute("type") !== "title") continue;
+		for (const sp of ld.getElementsByTagName("p:sp")) {
+			const t = phKey(sp)?.type;
+			const d = textDefaultsOf(kid(path(sp, "p:txBody", "a:lstStyle"), "a:lvl1pPr"), ctx);
+			if (t === "ctrTitle") ctr = d;
+			else if (t === "subTitle") sub = d;
+		}
+	}
+	const order = [...pres.getElementsByTagName("p:sldId")].map((e) => presRels[e.getAttribute("r:id")!]).filter(Boolean).slice(0, 30);
+	for (const sp of order.slice(0, 12)) countShapes(await xml(zip, sp));
+
+	let title = px(t1.size) || 40, body = px(b1.size) || 24;
+	let tw = t1.bold ? 700 : 400;
+	let display = px(ctr.size) || 0, subtitle = px(sub.size) || 0, caption = px(b3.size) || 0;
+
+	// 쪽에서 실제로 쓴 것 — 마스터는 Office 기본 그대로 두고 쪽마다 손으로 꾸민 덱이 많다(글상자 · 직접 서식).
+	// 그런 덱에서 마스터만 읽으면 Calibri · 파란 강조 · 44pt 제목이 나와 원본과 딴판이다. 앞쪽 30장의 글자 조각 · 도형 채우기를 세어
+	// 뚜렷하면(글자 50자 넘게) 마스터 값 대신 쓴다. 2026.11.26 : 시험한 덱 둘이 모두 이런 덱이었다
+	const H = num(pres.getElementsByTagName("p:sldSz")[0]?.getAttribute("cy"), 6858000) * k;
+	const use = sampleUsage(await Promise.all(order.map((p) => xml(zip, p))), ctx, px, H);
+	const fromUse: string[] = [];
+	// 본문이 12px 보다 작으면(도표 한 장 · 빽빽한 표) 그 크기는 새 쪽의 본문으로 쓸 수 없다. 글꼴 · 색만 따르고 크기는 마스터 것을 둔다
+	if (use.body && use.body < 12) { use.body = undefined; use.title = undefined; use.display = undefined; }
+	if (use.chars >= 50) {
+		if (use.font) { font = use.font; head = use.head && use.head !== font ? use.head : ""; fromUse.push("font"); }
+		if (use.body) { body = use.body; fromUse.push("size"); }
+		if (use.title) { title = use.title; tw = use.titleBold ? 700 : 400; }
+		if (use.display) display = use.display;
+		if (use.body) { subtitle = use.subtitle || 0; caption = use.caption || 0; }
+		if (use.ink) ink = use.ink;
+		if (use.hues.length) { accent = use.hues[0]; palette = use.hues.slice(1, 6); fromUse.push("color"); }
+	}
+	const scale = {
+		display: { size: Math.max(display, Math.round(title * 1.4)), weight: display ? tw : ctr.bold ?? t1.bold ? 700 : 400 },
+		title: { size: title, weight: tw },
+		subtitle: { size: subtitle && subtitle < title ? subtitle : Math.round((title + body) / 2), weight: sub.bold ? 700 : 400 },
+		body: { size: body, weight: b1.bold ? 700 : 400 },
+		caption: { size: Math.max(12, caption && caption < body ? caption : Math.round(body * 0.7)), weight: 400 },
+	};
+	// 본문이 제목보다 크게 적힌 마스터도 있다 — 위계가 거꾸로 서면 Claude 가 헷갈린다. 위에서 아래로 작아지게만 맞춘다
+	const lv = ["display", "title", "subtitle", "body", "caption"] as const;
+	for (let i = 1; i < lv.length; i++) if (scale[lv[i]].size > scale[lv[i - 1]].size) scale[lv[i]].size = scale[lv[i - 1]].size;
+
+	const tbox = (() => {
+		const e = findPh(master?.getElementsByTagName("p:spTree")[0] || null, { type: "title", idx: "" });
+		return e ? xfrmOf(path(e, "p:spPr", "a:xfrm"), ctx, (b) => b) : null;
+	})();
+	const margin = tbox && tbox.x >= 16 && tbox.x <= 200 ? Math.round(tbox.x) : 72;
+	const lnW = num(theme.lineW, 0) * k;
+
+	const guide = (ko
+		? [`원본 「${name}」의 슬라이드 마스터${fromUse.length ? "와 쪽에서 실제로 쓴 글꼴 · 크기 · 색" : ""}에서 뽑은 템플릿입니다.`,
+			tbox ? `- 쪽 제목은 원본처럼 왼쪽 위 x ${Math.round(tbox.x)}px · y ${Math.round(tbox.y)}px 자리에, 너비 ${Math.round(tbox.w)}px 안에 둡니다.` : "",
+			layouts.length ? `- 원본 레이아웃: ${layouts.slice(0, 12).join(" · ")}. 새 쪽은 이 중 맞는 것의 배치를 따릅니다.` : ""]
+		: [`Template taken from the slide master of "${name}"${fromUse.length ? " and the fonts, sizes and colors its slides actually use" : ""}.`,
+			tbox ? `- Put slide titles where the original does: top-left at x ${Math.round(tbox.x)}px, y ${Math.round(tbox.y)}px, within ${Math.round(tbox.w)}px.` : "",
+			layouts.length ? `- Original layouts: ${layouts.slice(0, 12).join(", ")}. Follow the matching one for new slides.` : ""]
+	).filter(Boolean).join("\n");
+
+	return normalizeTemplate({
+		id: templateId(), name, font, headFont: head && head !== font ? head : "", ink, paper, accent, palette, scale, margin,
+		radius: round > square ? 12 : 0, stroke: lnW ? Math.min(4, Math.max(1, Math.round(lnW * 2) / 2)) : 1,
+		shadow: "none", icon: "line", imageStyle: "", guide, from: name,
+	});
+}
+
+/** 쪽들에서 쓴 글꼴 · 크기 · 색을 센다. 글자는 글자 수로, 색 있는 도형은 하나에 1로 센다.
+ *  쪽 제목 = 제목 자리 표시자, 없으면 위쪽 35% 안에서 가장 큰 글. 제목 글꼴 · 크기는 그것에서만 센다. 1쪽(표지)의 제목은 표지 제목 크기로 */
+function sampleUsage(docs: (Document | null)[], ctx: Ctx, px: (pt: number | undefined) => number | undefined, H: number) {
+	const add = <K,>(m: Map<K, number>, key: K, n: number) => m.set(key, (m.get(key) || 0) + n);
+	const top = <K,>(m: Map<K, number>): K | undefined => [...m.entries()].sort((a, b) => b[1] - a[1])[0]?.[0];
+	const fonts = new Map<string, number>(), heads = new Map<string, number>(), sizes = new Map<number, number>(), inks = new Map<string, number>(), hues = new Map<string, number>();
+	const titles: number[] = [];
+	let chars = 0, titleBold = 0, titleChars = 0, display = 0;
+	const hex6 = (c: string | null) => (c && /^#[0-9a-f]{6}$/i.test(c) ? c.toUpperCase() : null);
+	const tone = (c: string) => rgbToHsl(parseInt(c.slice(1, 3), 16), parseInt(c.slice(3, 5), 16), parseInt(c.slice(5, 7), 16));
+	const vivid = (c: string) => { const [, s, l] = tone(c); return s > 0.35 && l > 0.2 && l < 0.85; };
+	docs.forEach((doc, si) => {
+		const spTree = doc?.getElementsByTagName("p:spTree")[0];
+		if (!spTree) return;
+		const shapes = [...spTree.getElementsByTagName("p:sp")].map((sp) => {
+			const fill = hex6(colorOf(path(sp, "p:spPr", "a:solidFill"), ctx));
+			if (fill && vivid(fill)) add(hues, fill, 1);
+			const runs = [...sp.getElementsByTagName("a:r")].map((r) => {
+				const text = r.textContent || "", rPr = kid(r, "a:rPr");
+				const ea = path(rPr, "a:ea")?.getAttribute("typeface"), latin = path(rPr, "a:latin")?.getAttribute("typeface");
+				const face = fontName((/[가-힣]/.test(text) && ea) || latin || ea, ctx);
+				const sz = num(rPr?.getAttribute("sz"));
+				return { n: text.replace(/\s/g, "").length, sz: sz ? px(sz / 100) : undefined, bold: rPr?.getAttribute("b") === "1", face, color: hex6(colorOf(kid(rPr, "a:solidFill"), ctx)) };
+			}).filter((r) => r.n);
+			const y = num(path(sp, "p:spPr", "a:xfrm", "a:off")?.getAttribute("y"), Infinity) * ctx.k;
+			const t = phKey(sp)?.type;
+			return { runs, top: y < H * 0.35, isTitle: t === "title" || t === "ctrTitle", max: Math.max(0, ...runs.map((r) => r.sz || 0)) };
+		}).filter((x) => x.runs.length);
+		const title = shapes.find((x) => x.isTitle && x.max) || shapes.filter((x) => x.top && x.max).sort((a, b) => b.max - a.max)[0];
+		for (const sp of shapes) for (const r of sp.runs) {
+			chars += r.n;
+			if (r.face) add(sp === title ? heads : fonts, r.face, r.n);
+			if (r.sz && sp !== title) add(sizes, r.sz, r.n);
+			if (r.color) {
+				const [, s, l] = tone(r.color);
+				if (l < 0.35 && s < 0.5) add(inks, r.color, r.n);
+				else if (vivid(r.color)) add(hues, r.color, 1);
+			}
+			if (sp === title) { titleChars += r.n; if (r.bold) titleBold += r.n; }
+		}
+		// 쪽이 하나뿐이면 그 제목은 표지가 아니라 쪽 제목으로 본다
+		if (title?.max) { if (si === 0 && docs.length > 1) display = title.max; else titles.push(title.max); }
+	});
+	const all = [...sizes.values()].reduce((a, b) => a + b, 0);
+	const body = top(sizes);
+	const tmed = titles.length ? [...titles].sort((a, b) => a - b)[Math.floor(titles.length / 2)] : undefined;
+	// 색은 비슷한 것끼리 묶어 많이 쓴 차례로 — 같은 파랑의 조금 다른 값들이 강조색 · 보조 색 자리를 다 차지하지 않게
+	const near = (a: string, b: string) => [1, 3, 5].every((i) => Math.abs(parseInt(a.slice(i, i + 2), 16) - parseInt(b.slice(i, i + 2), 16)) <= 40);
+	const hueList: string[] = [];
+	for (const [c, n] of [...hues.entries()].sort((a, b) => b[1] - a[1])) if (n >= 2 && !hueList.some((x) => near(x, c))) hueList.push(c);
+	return {
+		chars,
+		font: top(fonts) || top(heads),
+		head: top(heads),
+		body,
+		title: tmed && body && tmed > body ? tmed : undefined,
+		titleBold: titleChars > 0 && titleBold / titleChars > 0.5,
+		display: display && tmed && display > tmed ? display : undefined,
+		subtitle: body && tmed ? [...sizes.entries()].filter(([z]) => z > body * 1.1 && z < tmed * 0.95).sort((a, b) => b[1] - a[1])[0]?.[0] : undefined,
+		caption: body ? [...sizes.entries()].sort((a, b) => a[0] - b[0]).find(([z, n]) => z < body * 0.92 && n / all >= 0.03)?.[0] : undefined,
+		ink: top(inks),
+		hues: hueList,
+	};
 }
 
 export interface ImportResult { deck: Deck; warnings: string[] }
@@ -920,7 +1118,9 @@ export async function importPptx(bytes: Uint8Array, src: string, dir: string, ti
 		deck.slides.push({ id: sid, file: `slides/${sid}.html`, title: stitle.slice(0, 60) || undefined, notes: notes || undefined });
 	}
 	progress(order.length, order.length);
-	const tpl = templateOf(s);
+	// 테마 변수도 원본 테마에서 — 새로 더하는 쪽이 원본 색 · 글꼴 · 위계를 따르고, 「이 덱으로 새 템플릿」이 원본 모양을 그대로 남긴다.
+	// 2026.11.26 : 전에는 글꼴만 원본이고 색은 설정의 기본 템플릿 것이라, 가져온 덱에서 만든 템플릿의 색이 원본과 달랐다
+	const tpl = await templateFromZip(zip, title, s.lang).catch(() => templateOf(s));
 	// overflow-wrap — 칸보다 긴 한 낱말은 PowerPoint 처럼 글자 사이에서 꺾는다. 2026.11.24 : keep-all 만 두어 「시스템명칭」이 좁은 칸 밖으로 넘쳤다
 	const css = themeCss({ ...tpl, font: themeFont || tpl.font }, deck.size) + `\n/* 가져온 PPTX 의 글자 틀 */\n.slide p { white-space: pre-wrap; overflow-wrap: anywhere; }\n`;
 	await api.writeText(dir, "theme.css", css);

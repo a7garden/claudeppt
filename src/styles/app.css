@@ -496,6 +496,35 @@ textarea.field { height: auto; padding: 8px 10px; line-height: 1.5; resize: vert
 .rels div > span:nth-child(2) { overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
 .rels .open { color: var(--faint); padding: 0 2px; }
 .rels .open:hover { color: var(--text); }
+/* 감사 — 쪽 줄(번호 · 제목) 아래에 짚은 것을 한 줄씩. 갈래는 색 꼬리표 대신 흐린 글자로 둔다: 붉은 배지가 줄마다 서면 모두 급해 보인다 */
+.pop.audit { width: 440px; }
+.pop.audit .head { grid-template-columns: 1fr auto; align-items: baseline; }
+.pop.audit .head > span:last-of-type { grid-column: 1 / -1; }
+.audit-bar { grid-column: 1 / -1; height: 2px; background: var(--hair); border-radius: 1px; overflow: hidden; }
+.audit-bar i { display: block; height: 100%; background: var(--text); transition: width 0.2s; }
+.audit-kinds { justify-self: start; }
+.audit-kinds button { font-size: 12px; }
+.audit-kinds .mono { font-size: 11px; color: var(--faint); margin-left: 2px; }
+.audit-list { max-height: 52vh; overflow-y: auto; display: grid; gap: 10px; border-top: 1px solid var(--hair); padding-top: 8px; }
+.audit-list .slide-row { display: flex; gap: 8px; align-items: baseline; width: 100%; text-align: left; padding: 3px 6px; border-radius: 6px; font-size: 13px; font-weight: 600; }
+.audit-list .slide-row:hover { background: var(--hair); }
+.audit-list .slide-row .mono { font-size: 11px; color: var(--faint); min-width: 18px; }
+.audit-list .slide-row .t { overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+.audit-list ul { list-style: none; margin: 2px 0 0; padding: 0 6px 0 32px; display: grid; gap: 3px; }
+.audit-list li { display: grid; grid-template-columns: 52px minmax(0, 1fr); gap: 6px; font-size: 12px; line-height: 1.45; color: var(--dim); }
+.audit-list li .k { color: var(--faint); }
+/* 템플릿 글자 위계 — 단계마다 이름 · 크기 · 굵기 · 견본 한 줄 */
+.tscale { flex-direction: column; align-items: stretch; gap: 4px; }
+.tscale .lv { width: 100%; display: grid; grid-template-columns: 64px 58px 16px 68px minmax(0, 1fr); gap: 6px; align-items: center; }
+.tscale .lv .n { font-size: 12px; color: var(--dim); }
+.tscale .lv .eg { overflow: hidden; white-space: nowrap; line-height: 1.2; }
+/* 끌어 놓기 — PPTX 는 「새 덱」 · 「템플릿」 두 칸 중 놓는 쪽 */
+.drop-split { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; width: min(640px, calc(100vw - 48px)); }
+.drop-split > div { padding: 22px 20px; border-radius: var(--r-float); background: var(--raise-2); outline: 1px solid var(--hair-2); box-shadow: var(--shadow); display: grid; gap: 6px; align-content: start; transition: outline-color 0.1s, transform 0.1s; }
+.drop-split > div.on { outline: 2px solid var(--text); transform: translateY(-2px); }
+.drop-split b { font-size: 15px; font-weight: 650; }
+.drop-split span { font-size: 12px; color: var(--dim); }
+.drop-split .f { color: var(--faint); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
 /* 알림 줄 */
 .toast { position: fixed; left: 50%; bottom: 66px; transform: translateX(-50%); padding: 8px 14px; border-radius: var(--r-float); background: var(--raise-2); outline: 1px solid var(--hair-2); box-shadow: var(--shadow); z-index: 50; display: flex; gap: 12px; align-items: center; max-width: 70vw; animation: in 0.16s ease-out; user-select: text; }

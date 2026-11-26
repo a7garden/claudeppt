@@ -81,9 +81,9 @@ function useThemeVars() {
 	useEffect(() => {
 		if (!id) return;
 		fetch(deckUrl(id, theme) + "?t=" + Date.now()).then((r) => r.text()).then((css) => {
-			const root = /:root\s*\{([^}]*)\}/.exec(css)?.[1] || "";
+			// :root 가 여럿일 수 있다 — 옛 덱은 처음 :root 뒤에 템플릿 구획이 붙는다 (deck.rethemeCss). 뒤의 값이 이긴다
 			const v: Record<string, string> = {};
-			for (const m of root.matchAll(/(--[\w-]+)\s*:\s*([^;]+);/g)) v[m[1]] = m[2].trim();
+			for (const root of css.matchAll(/:root\s*\{([^}]*)\}/g)) for (const m of root[1].matchAll(/(--[\w-]+)\s*:\s*([^;]+);/g)) v[m[1]] = m[2].trim();
 			setVars(v);
 		}, () => setVars({}));
 	}, [id, theme]);
@@ -261,7 +261,9 @@ function ColorPop({ label, current, disabled, vars, onPick, onNone, extra, child
 	});
 	useEffect(() => { if (disabled) setOpen(false); }, [disabled]);
 	const pick = (c: string) => { onPick(c); setOpen(false); };
-	const theme = THEME.filter(([v]) => vars[v]);
+	// 템플릿 보조 색(--c1 …)도 테마 색 끝에 붙인다
+	const theme: [string, string][] = [...THEME.filter(([v]) => vars[v]).map(([v, k]): [string, string] => [v, t(k)]),
+		...Object.keys(vars).filter((v) => /^--c\d$/.test(v)).sort().map((v): [string, string] => [v, `${t("paletteMore")} ${v.slice(3)}`])];
 	return (
 		<div className="rb-pop" ref={ref}>
 			<button className="rb-chip" disabled={disabled} aria-expanded={open} onMouseDown={hold} onClick={() => setOpen(!open)} title={label} aria-label={label}>
@@ -276,8 +278,8 @@ function ColorPop({ label, current, disabled, vars, onPick, onNone, extra, child
 							<h4>{t("rbTheme")}</h4>
 							{/* 덱의 변수를 이 칸들에만 건다 — 앱 화면도 --accent 같은 이름을 쓴다 */}
 							<div className="rb-sw" style={vars as React.CSSProperties}>
-								{theme.map(([v, k]) => (
-									<button key={v} style={{ background: `var(${v})` }} onMouseDown={hold} onClick={() => pick(`var(${v})`)} title={t(k)} aria-label={t(k)} />
+								{theme.map(([v, name]) => (
+									<button key={v} style={{ background: `var(${v})` }} onMouseDown={hold} onClick={() => pick(`var(${v})`)} title={name} aria-label={name} />
 								))}
 							</div>
 						</>

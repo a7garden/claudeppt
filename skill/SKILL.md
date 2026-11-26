@@ -44,6 +44,7 @@ $CPPT help
 | `shot [--slides 1,3-5] [--scale 1] [--out <폴더>]` | 쪽을 브라우저가 그린 그대로 PNG 로 (기본 `.claudeppt/shots/<n>.png`) | 띄운다 |
 | `inspect [--slides …]` | PPTX 로 나갈 때 그림으로 굳는 것(`baked`) · 쪽 밖으로 넘친 것(`overflow`) | 띄운다 |
 | `export <out.pptx> [--exact]` | PPTX 로 내보낸다. `--exact` 는 모양 그대로(그림 + 투명 글상자, 편집 불가) | 띄운다 |
+| `audit` | 쪽마다 템플릿을 벗어난 곳(글꼴 · 색 · 위계 · 모서리 · 여백)과 AI 티(긴 대시 · 이모지 · 상투어 · 그라데이션 · 같은 꼴 카드 …)를 짚는다 · `prompt` 는 고칠 거리 글 | 띄운다 |
 | `check` | PPTX 를 PowerPoint 로 그려 웹과 픽셀로 견준다 (PowerPoint 필요) · 쪽마다 차이 % 와 web/ppt/diff 그림 경로 · 그림으로 굳은 요소(`locked`)와 그 넓이 %(`stiff`) | 띄운다 |
 | `release [--name …] [--notes …]` | 릴리즈 r<k> — `releases/r<k>-v<n>.pptx` + git 태그 | 띄운다 |
 
@@ -71,7 +72,7 @@ $CPPT help
 ```
 <덱 폴더>/
   deck.json          제목 · 크기 · 쪽 순서 ("slides" 배열이 쪽 순서의 유일한 정본)
-  theme.css          모든 쪽이 함께 쓰는 서식 — CSS 변수 --ink --paper --accent --muted --line --soft --radius --stroke --font 와 .slide 틀
+  theme.css          모든 쪽이 함께 쓰는 서식: 템플릿 구획(/* @template start */ ~ /* @template end */: 변수 --ink --paper --accent --c1… --muted --line --soft --radius --stroke --margin --font --font-head 와 글자 위계 .t-display .t-title .t-subtitle .t-body .t-caption)과 .slide 틀. 템플릿 구획은 앱이 다시 쓰므로 고치지 않는다
   slides/<id>.html   한 쪽에 한 파일. ../theme.css 를 잇고 <section class="slide"> 하나 (기본 1280×720px)
   assets/            그림 · 글꼴. 쪽에서는 "../assets/<이름>"
   source/            가져온 원본 — original.pptx · pages/<n>.png
@@ -101,7 +102,8 @@ $CPPT help
 ```
 
 - 오프라인 전용 — 바깥 URL · CDN · 웹 글꼴 · `<script>` 를 넣지 않는다.
-- 색 · 글꼴 · 모서리는 theme.css 변수로만 쓴다. 되풀이되는 모양은 theme.css 에 작은 class 로 둔다.
+- 색 · 글꼴 · 모서리는 theme.css 변수로만 쓰고, 글자 크기 · 굵기는 .t-* 클래스로 준다. 되풀이되는 모양은 theme.css 의 템플릿 구획 아래에 작은 class 로 둔다.
+- 다 고친 뒤 `audit` 으로 템플릿을 벗어난 곳 · AI 티가 나는 곳이 남았는지 본다. 돌려준 `prompt` 가 고칠 거리 목록이다.
 
 ## PPTX 로 잘 나가게
 

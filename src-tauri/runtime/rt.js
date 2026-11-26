@@ -14,6 +14,7 @@
 //   hit {req,x,y}       그 자리 요소 찾기       edit {path, html}         글자를 고쳤다
 //   extract {req}       PPTX 용 좌표 뽑기      patch {path, style}       끌어 옮겼다 · 크기를 바꿨다
 //   snapshot {req}      슬라이드 전체 굽기     snapshot {req, data}
+//   audit {req}         감사용 서식 재기       audited {req, data}
 //                                              remove {path}             지웠다
 //                                              extracted {req, data}
 //                                              wheel {dy} · key {key}    휠 · 쪽 넘김 키 (무대가 쪽을 넘긴다)
@@ -698,6 +699,9 @@
 		} else if (m.t === "extract") {
 			try { post({ t: "extracted", req: m.req, data: await extract() }); }
 			catch (err) { post({ t: "extracted", req: m.req, error: String(err) }); }
+		} else if (m.t === "audit") {
+			try { await within(document.fonts.ready, 3000); post({ t: "audited", req: m.req, data: auditNodes() }); }
+			catch (err) { post({ t: "audited", req: m.req, error: String(err) }); }
 		}
 	});
 
@@ -729,6 +733,52 @@
 			if (s.display === "none" || s.visibility === "hidden" || +s.opacity === 0) return false;
 		}
 		return true;
+	};
+	// 감사(audit.ts)용 — 보이는 요소마다 그려진 자리와 계산된 서식. 굽지 않아 extract 보다 훨씬 빠르다.
+	// SVG 속은 그림이라 세지 않는다 (그림 안 색 · 글꼴은 템플릿 밖이어도 PowerPoint 에서 그림이다)
+	const auditNodes = () => {
+		const S = root.getBoundingClientRect();
+		const nodes = [];
+		for (const el of [root, ...root.querySelectorAll("*")]) {
+			const tag = el.tagName.toLowerCase();
+			if (el !== root && el.parentElement && el.parentElement.closest("svg")) continue;
+			if (!visible(el)) continue;
+			const r = el.getBoundingClientRect();
+			if (r.width < 1 || r.height < 1) continue;
+			const s = css(el);
+			const own = [...el.childNodes].filter((n) => n.nodeType === 3).map((n) => n.nodeValue).join(" ").replace(/\s+/g, " ").trim();
+			// 글이 실제로 놓인 범위 — 칸이 쪽 너비 전체여도 가운데 맞춤 글은 가장자리에서 멀다. 여백은 이것으로 잰다
+			let tb = null;
+			if (own) {
+				const rg = document.createRange();
+				for (const n of el.childNodes) {
+					if (n.nodeType !== 3 || !n.nodeValue.trim()) continue;
+					rg.selectNodeContents(n);
+					const q = rg.getBoundingClientRect();
+					if (!q.width) continue;
+					tb = tb ? { l: Math.min(tb.l, q.left), t: Math.min(tb.t, q.top), r: Math.max(tb.r, q.right), b: Math.max(tb.b, q.bottom) } : { l: q.left, t: q.top, r: q.right, b: q.bottom };
+				}
+			}
+			const fill = color(s.backgroundColor);
+			const bw = Math.max(...["Top", "Right", "Bottom", "Left"].map((k) => (s["border" + k + "Style"] !== "none" ? parseFloat(s["border" + k + "Width"]) || 0 : 0)));
+			nodes.push({
+				path: pathOf(el), tag, cls: typeof el.className === "string" ? el.className : "",
+				x: Math.round(r.left - S.left), y: Math.round(r.top - S.top), w: Math.round(r.width), h: Math.round(r.height),
+				text: own.slice(0, 300),
+				tbox: tb ? { x: Math.round(tb.l - S.left), y: Math.round(tb.t - S.top), w: Math.round(tb.r - tb.l), h: Math.round(tb.b - tb.t) } : null,
+				font: s.fontFamily.split(",")[0].replace(/["']/g, "").trim(),
+				size: Math.round(parseFloat(s.fontSize) * 10) / 10, weight: +s.fontWeight || 400,
+				color: own ? color(s.color)?.hex || null : null,
+				fill: fill && fill.alpha > 0.05 ? fill.hex : null,
+				border: bw > 0 ? color(s.borderTopColor)?.hex || null : null,
+				radius: parseFloat(s.borderTopLeftRadius) || 0,
+				shadow: s.boxShadow !== "none", tshadow: s.textShadow !== "none",
+				gradient: /gradient\(/.test(s.backgroundImage), clip: (s.webkitBackgroundClip || s.backgroundClip) === "text",
+				upper: s.textTransform === "uppercase", ls: parseFloat(s.letterSpacing) || 0,
+				li: s.display === "list-item",
+			});
+		}
+		return { w: S.width, h: S.height, nodes };
 	};
 	const opacityOf = (el) => { let o = 1; for (let e = el; e && e !== document.documentElement; e = e.parentElement) o *= +css(e).opacity || 1; return o; };
 	// 글꼴 목록 전체를 넘긴다 — 앞 글꼴이 이 PC 에 없으면 브라우저는 다음 글꼴로 그린다. 내보내기도 같은 차례로 고른다
