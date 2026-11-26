@@ -9,7 +9,7 @@
 // 2026.11.25 : 요청칸 아랫줄을 「범위 줄」(ScopeLine)로 바꿨다. 보내기 바로 옆에 이 요청이 닿는 곳(덱 전체 · @쪽 · @판)을 보인다.
 //              전에는 범위가 어디에도 안 보였고, @쪽을 쓰면 아랫줄에 같은 칩이 한 번 더 나올 뿐이었다. 「@ 로 쪽 지정」은 안내 글에만 있어
 //              글을 쓰기 시작하면 사라졌다. 빈 대화의 큰 제목 · 단추 셋도 걷고 범위 줄이 하지 않는 일 둘만 요청칸 바로 위에 남겼다.
-import { Fragment, useEffect, useMemo, useRef, useState } from "react";
+import { Fragment, memo, useEffect, useMemo, useRef, useState } from "react";
 import { create } from "zustand";
 import { open as pickFiles } from "@tauri-apps/plugin-dialog";
 import { api, deckUrl, join } from "../lib/api";
@@ -19,6 +19,7 @@ import { isVersionQuery, mentionCandidates, mentionTokens, typingMention, versio
 import { copyText, openMenu } from "./ContextMenu";
 import { SLIDE_MIME, SlideFrame } from "./Workspace";
 import { type Turn, useDeck } from "../lib/store";
+import { noteDraft } from "../lib/updater";
 
 /** 사이드바 접힘 — 보는 사람의 편의라 이 PC 에만 남긴다. seen 은 접을 때 본 마지막 턴(그 뒤 끝난 턴이 「새 답」) */
 interface Fold { folded: boolean; seen: string | null; draft: boolean; set: (v: boolean) => void }
@@ -44,7 +45,6 @@ export default function Talk() {
 	const t = useT();
 	const turns = useDeck((s) => s.turns);
 	const versions = useDeck((s) => s.versions);
-	const setPreview = useDeck((s) => s.setPreview);
 	const folded = useTalkFold((s) => s.folded);
 	const logRef = useRef<HTMLDivElement>(null);
 	const stick = useRef(true);
@@ -81,7 +81,7 @@ export default function Talk() {
 					{turns.length === 0 ? (
 						<EmptyTalk />
 					) : (
-						turns.map((x) => <TurnView key={x.id} turn={x} head={!!head && x.version?.hash === head.hash} onVersion={() => { const c = versions.find((v) => v.hash === x.version?.hash); if (c) setPreview(c); }} />)
+						turns.map((x) => <TurnView key={x.id} turn={x} head={!!head && x.version?.hash === head.hash} />)
 					)}
 				</div>
 				<Composer />
@@ -164,7 +164,8 @@ function EmptyTalk() {
 	);
 }
 
-function TurnView({ turn, head: isHead, onVersion }: { turn: Turn; head: boolean; onVersion: () => void }) {
+/** 턴 하나. memo — 글자가 흐르는 동안 바뀌는 것은 도는 턴 하나라 나머지 턴은 다시 그리지 않는다 (판 열기도 안에서 해 props 가 매번 새로 생기지 않게) */
+const TurnView = memo(function TurnView({ turn, head: isHead }: { turn: Turn; head: boolean }) {
 	const t = useT();
 	const deck = useDeck((s) => s.deck)!;
 	const setCurrent = useDeck((s) => s.setCurrent);
@@ -173,6 +174,8 @@ function TurnView({ turn, head: isHead, onVersion }: { turn: Turn; head: boolean
 	const running = useDeck((s) => s.running);
 	const head = useDeck((s) => s.versions[0]?.hash);
 	const commit = useDeck((s) => s.versions.find((v) => v.hash === turn.version?.hash));
+	const setPreview = useDeck((s) => s.setPreview);
+	const onVersion = () => { if (commit) setPreview(commit); };
 	const menu = (e: React.MouseEvent) => openMenu(e, [
 		{ label: t("rewrite"), run: () => refill(turn.request), disabled: !turn.request },
 		{ label: t("copyReply"), run: () => copyText(turn.reply.trim()), disabled: !turn.reply.trim() },
@@ -223,7 +226,7 @@ function TurnView({ turn, head: isHead, onVersion }: { turn: Turn; head: boolean
 			)}
 		</article>
 	);
-}
+});
 
 /** 요청 글의 @쪽 을 눌러 그 쪽으로 가는 칩으로 그린다. 지난 턴은 보낼 때 푼 쪽(id)을 따른다 — 그 뒤 순서가 바뀌어도 같은 쪽으로 간다.
  *  @v<n> 은 누르면 그 판을 무대에서 본다 */
@@ -322,9 +325,10 @@ function Composer() {
 		el.style.height = "auto";
 		el.style.height = Math.min(220, el.scrollHeight) + "px";
 	}, [text]);
-	// 접힌 등뼈가 「쓰던 글이 있다」를 보이게 알린다
+	// 접힌 등뼈가 「쓰던 글이 있다」를 보이게 알린다. 쉬는 틈 자동 설치도 미룬다 — 다시 켜면 이 글이 사라진다 (updater.ts)
 	const hasDraft = !!text.trim();
-	useEffect(() => { useTalkFold.setState({ draft: hasDraft }); }, [hasDraft]);
+	useEffect(() => { useTalkFold.setState({ draft: hasDraft }); noteDraft(hasDraft); }, [hasDraft]);
+	useEffect(() => () => noteDraft(false), []);
 	// 핀이 새로 꽂히면 대화를 편다 — 접힌 채로 두면 의견을 적을 칸이 보이지 않는다
 	const pinCount = useRef(pins.length);
 	useEffect(() => { if (pins.length > pinCount.current) openTalk(false); pinCount.current = pins.length; }, [pins.length]);

@@ -27,11 +27,18 @@ export function SlideFrame({ file, rev, width, height, w, h, onWin, revHash }: {
 	const frames = useDeck((s) => s.frames);
 	const mode = useDeck((s) => s.mode);
 	const ref = useRef<HTMLIFrameElement>(null);
+	// 읽힌 창 — 떼어 낼 때는 iframe.contentWindow 가 이미 null 이라 그것으로는 frames 에서 지우지 못하고 쌓였다
+	const winRef = useRef<Window | null>(null);
 	const s = width / w;
 	const src = deckUrl(id, file, revHash) + `?v=${rev}`;
 	useEffect(() => {
 		const f = ref.current;
-		return () => { if (f?.contentWindow) frames.delete(f.contentWindow); onWin?.(null); };
+		return () => {
+			const win = winRef.current ?? f?.contentWindow;
+			if (win) frames.delete(win);
+			winRef.current = null;
+			onWin?.(null);
+		};
 	}, [src]);
 	return (
 		<iframe
@@ -44,6 +51,7 @@ export function SlideFrame({ file, rev, width, height, w, h, onWin, revHash }: {
 			onLoad={() => {
 				const win = ref.current?.contentWindow;
 				if (!win) return;
+				winRef.current = win;
 				frames.add(win);
 				win.postMessage({ __deck: 1, t: "mode", mode: onWin ? mode : "view" }, "*");
 				onWin?.(win);
@@ -258,7 +266,8 @@ function Rail() {
 	const current = useDeck((s) => s.current);
 	const setCurrent = useDeck((s) => s.setCurrent);
 	const pins = useDeck((s) => s.pins);
-	const turns = useDeck((s) => s.turns);
+	// 마지막 턴의 도구 목록만 — 글자가 흐르는 동안(답만 바뀜) 쪽 목록이 다시 그려지지 않게
+	const lastTools = useDeck((s) => s.turns[s.turns.length - 1]?.tools);
 	const vdiff = useDeck((s) => s.vdiff);
 	const mentionSlide = useDeck((s) => s.mentionSlide);
 	const move = useDeck((s) => s.moveSlide);
@@ -271,7 +280,7 @@ function Rail() {
 	useTick(10000, seats.length > 0);
 	const [drag, setDrag] = useState<number | null>(null);
 	const [dropAt, setDropAt] = useState<number | null>(null);
-	const lastFiles = useMemo(() => new Set(turns[turns.length - 1]?.tools.map((x) => x.file).filter(Boolean)), [turns]);
+	const lastFiles = useMemo(() => new Set(lastTools?.map((x) => x.file).filter(Boolean)), [lastTools]);
 	const listRef = useRef<HTMLDivElement>(null);
 	useEffect(() => { listRef.current?.querySelectorAll(".rail-item")[current]?.scrollIntoView({ block: "nearest" }); }, [current]);
 

@@ -21,8 +21,9 @@ import { create } from "zustand";
 import { api, type Commit, localWriteAt } from "./api";
 import { type Deck, newId, readDeck, slideHtml, writeDeck } from "./deck";
 import { applyOp, type Op } from "./edits";
-import { type Built, buildPptx } from "./exportPptx";
-import { type Report, SAME, needsFix, runCheck } from "./check";
+// 내보내기 · 검사(pptxgenjs · jszip)는 쓸 때 불러온다 — 시작 청크를 가볍게
+import type { Built } from "./exportPptx";
+import type { Report } from "./check";
 import { tell } from "./frames";
 import { tNow } from "./i18n";
 import { askClaude, linkFonts } from "./fonts";
@@ -152,6 +153,9 @@ interface S {
 }
 
 let unlisten: (() => void)[] = [];
+/** 사건 리스너(deck-fs · claude)는 앱에 한 벌만 — 덱을 열 때마다 붙였다 떼면, openProject 가 겹쳐 불릴 때(다시 켠 뒤 덱 열기 + 사용자 클릭 등)
+ *  두 벌 붙어 Claude 글자가 두 번 찍혔다. 받은 사건은 지금 연 덱(id) · 지금 도는 턴 것만 쓴다 */
+let listening: Promise<unknown> | null = null;
 /** 이 앱을 켜 둔 동안 글꼴을 물어본 프로젝트 — 열 때마다 같은 것을 다시 묻지 않는다 */
 const fontAsked = new Set<string>();
 let directTimer: ReturnType<typeof setTimeout> | undefined;
@@ -195,7 +199,7 @@ function verifyPptx(get: () => S, deck: Deck, built: Built) {
 		jobs: st.jobs.some((j) => j.id === job) ? st.jobs.map((j) => (j.id === job ? { ...j, note: n } : j)) : [...st.jobs, { id: job, label: tNow("verifying"), i: 0, n: 0, note: n }],
 	}));
 	note("PowerPoint");
-	runCheck(dir, id, deck, versions[0]?.n ?? 0, note, built)
+	import("./check").then(({ runCheck, needsFix, SAME }) => runCheck(dir, id, deck, versions[0]?.n ?? 0, note, built)
 		.then((report) => {
 			if (get().dir !== dir) return;
 			const bad = report.slides.filter(needsFix);
@@ -207,7 +211,9 @@ function verifyPptx(get: () => S, deck: Deck, built: Built) {
 			get().notify(msg, differ.length ? "err" : "ok", { action: { label: tNow("fixDiff"), run: () => get().fixDiff(report) } });
 		})
 		.catch((e) => { if (get().dir === dir) get().notify(`${tNow("pptxNoCheck")}. ${String(e)}`, "err"); })
-		.finally(() => { useDeck.setState((st) => ({ jobs: st.jobs.filter((j) => j.id !== job) })); });
+		.finally(() => { useDeck.setState((st) => ({ jobs: st.jobs.filter((j) => j.id !== job) })); }))
+		// 검사 모듈을 불러오지 못했을 때
+		.catch((e) => { useDeck.setState((st) => ({ jobs: st.jobs.filter((j) => j.id !== job) })); get().notify(String(e), "err"); });
 }
 
 /** 손으로 고친 것은 몇 번이고 이어서 하므로 잠잠해지면 한 판으로 묶는다. 그새 턴이 돌면 끝난 뒤로 미룬다 */
@@ -251,6 +257,23 @@ export const sameDir = (a: string, b: string) => {
 const persistPins = (dir: string, pins: Pin[]) => api.writeText(dir, ".claudeppt/pins.json", JSON.stringify(pins, null, 1)).catch(() => {});
 const persistTalk = (dir: string, turns: Turn[], sessionId: string | null) =>
 	api.writeText(dir, ".claudeppt/talk.json", JSON.stringify({ sessionId, turns: turns.map((t) => (t.status === "running" ? { ...t, status: "stopped" } : t)) }, null, 1)).catch(() => {});
+/** 답 글자 조각을 잠깐(30ms) 모았다 한 번에 넣는다. 조각마다 turns 를 바꾸면 대화 · 쪽 목록이 조각 수만큼 다시 그려진다.
+ *  requestAnimationFrame 이 아니라 타이머 — 창을 내리거나 가려도 글자가 쌓이게 */
+const pendingText = new Map<string, string>();
+let textTimer: ReturnType<typeof setTimeout> | undefined;
+function flushText(get: () => S, set: (p: Partial<S>) => void) {
+	clearTimeout(textTimer);
+	textTimer = undefined;
+	if (!pendingText.size) return;
+	const add = new Map(pendingText);
+	pendingText.clear();
+	set({ turns: get().turns.map((t) => (add.has(t.id) ? { ...t, reply: t.reply + add.get(t.id) } : t)) });
+}
+function queueText(get: () => S, set: (p: Partial<S>) => void, turn: string, text: string) {
+	pendingText.set(turn, (pendingText.get(turn) ?? "") + text);
+	textTimer ??= setTimeout(() => flushText(get, set), 30);
+}
+
 const readJson = async <T,>(dir: string, rel: string, d: T): Promise<T> => {
 	try { return JSON.parse(await api.readText(dir, rel)); } catch { return d; }
 };
@@ -344,8 +367,8 @@ export const useDeck = create<S>()((set, get) => ({
 		const log = await api.log(dir, 1);
 		if (!log.length) await api.commit(dir, deck.source?.kind === "pptx" ? "PPTX 가져옴" : "새로 만듦");
 		await get().refreshVersions();
-		unlisten.push(
-			await listen<{ id: string; paths: string[] }>("deck-fs", async (e) => {
+		listening ??= Promise.all([
+			listen<{ id: string; paths: string[] }>("deck-fs", async (e) => {
 				if (e.payload.id !== get().id) return;
 				const paths = e.payload.paths;
 				if (paths.includes("deck.json")) {
@@ -367,18 +390,19 @@ export const useDeck = create<S>()((set, get) => ({
 				attribute(get, set, paths);
 				if (get().vdiff) refreshCompare(get, set);
 			}),
-		);
-		unlisten.push(
-			await listen<{ turn: string; line: string }>("claude", (e) => {
+			listen<{ turn: string; line: string }>("claude", (e) => {
 				const { turn, line } = e.payload;
 				let m: any;
 				try { m = JSON.parse(line); } catch { return; }
 				// 지금 이 프로젝트에서 돌고 있는 턴의 사건만 받는다 — 다른 턴의 세션 id 가 섞이면 다음 턴이 엉뚱한 대화를 잇는다
 				if (turn !== get().running) return;
+				const delta = m.type === "stream_event" && m.event?.type === "content_block_delta" && m.event.delta?.type === "text_delta";
+				// 글자가 아닌 사건(새 말 덩이 · 도구 · 끝) 앞에서는 모아 둔 글자를 먼저 넣는다 — 순서가 바뀌지 않게
+				if (!delta) flushText(get, set);
 				const patch = (fn: (t: Turn) => Turn) => set({ turns: get().turns.map((t) => (t.id === turn ? fn(t) : t)) });
 				if (m.type === "system" && m.subtype === "init" && m.session_id) set({ sessionId: m.session_id });
 				else if (m.type === "stream_event" && m.event?.type === "content_block_delta" && m.event.delta?.type === "text_delta") {
-					patch((t) => ({ ...t, reply: t.reply + m.event.delta.text }));
+					queueText(get, set, turn, m.event.delta.text);
 				} else if (m.type === "stream_event" && m.event?.type === "message_start") {
 					// 도구를 쓴 뒤 새 말 덩이 — 앞 덩이와 띄운다
 					patch((t) => ({ ...t, reply: t.reply && !t.reply.endsWith("\n\n") ? t.reply + "\n\n" : t.reply }));
@@ -390,7 +414,8 @@ export const useDeck = create<S>()((set, get) => ({
 					patch((t) => ({ ...t, cost: m.total_cost_usd, reply: (t.reply.trim() || m.result || "").trim(), error: m.is_error ? m.result || "error" : t.error }));
 				}
 			}),
-		);
+		]);
+		await listening;
 		// 글꼴 잇기 — 화면을 막지 않고 뒤에서 한다 (깔린 글꼴을 처음 읽을 때 몇 초 걸린다).
 		// 폴더 감시 사건을 받기 시작한 뒤에 돌린다. 2026.11.20 : 전에는 받기 전에 돌려, 글꼴 목록을 이미 읽어 둔 두 번째 가져오기에서
 		// theme.css 를 먼저 고쳐 버렸다 — 그 사건을 놓친 쪽들이 대체 글꼴로 남아 「목차」가 두 줄로 꺾였다.
@@ -421,6 +446,8 @@ export const useDeck = create<S>()((set, get) => ({
 		const { id } = get();
 		if (id) await api.close(id).catch(() => {});
 		set({ dir: "", id: "", deck: null, turns: [], pins: [], versions: [], preview: null, running: null, vdiff: null, seats: [], presence: {}, activity: [], touched: {}, strays: [] });
+		// 닫은 덱의 슬라이드 창은 더 말을 받지 않는다 — 남은 것을 비운다
+		get().frames.clear();
 	},
 
 	setCurrent: (i) => set({ current: Math.max(0, Math.min(i, (get().deck?.slides.length || 1) - 1)) }),
@@ -546,13 +573,14 @@ export const useDeck = create<S>()((set, get) => ({
 			const r = await api.claudeRun({
 				turn: turn.id,
 				dir,
-				prompt: turnPrompt(text, notes, cur ? { id: cur.id, no: current + 1 } : null, attachments, mentions, vlines),
+				prompt: turnPrompt(text, notes, cur ? { id: cur.id, no: current + 1 } : null, attachments, mentions, vlines, deck),
 				system: systemPrompt(s, deck),
 				claudePath: s.claude.path,
 				model: s.claude.model,
 				effort: s.claude.effort,
 				resume: get().sessionId,
 			});
+			flushText(get, set);
 			const t0 = get().turns.find((t) => t.id === turn.id)!;
 			let status: Turn["status"] = t0.status === "stopped" ? "stopped" : r.code === 0 && !t0.error ? "done" : "failed";
 			if (status === "failed" && !t0.error) patch((t) => ({ ...t, error: r.stderr.trim().split("\n").slice(-3).join("\n") || `exit ${r.code}` }));
@@ -666,6 +694,7 @@ export const useDeck = create<S>()((set, get) => ({
 		if (!deck) return;
 		set({ busy: tNow("exporting") });
 		try {
+			const { buildPptx } = await import("./exportPptx");
 			const b = await buildPptx(deck, id, (i, n) => set({ busy: `${tNow("exporting")} ${i}/${n}` }), exact);
 			await api.absWriteBytes(path, b.data);
 			// 깔리지 않은 글꼴은 PowerPoint 에서 다른 글꼴로 보인다 — 알린다
@@ -779,22 +808,24 @@ export const useDeck = create<S>()((set, get) => ({
 	// 고칠 곳은 HTML 쪽이다 — PowerPoint 가 같게 그릴 수 있는 꼴(프롬프트 「PPTX export」 절)로 바꾸게 한다.
 	// 2026.11.24 : 굳은 요소도 함께 넘긴다. 전에는 「그림이 되는 것은 괜찮다」고 해서, 글 덩어리가 통째 그림이 되어도 고치지 않았다
 	fixDiff: (report) => {
-		if (!get().deck) return;
-		const bad = report.slides.filter(needsFix);
-		if (!bad.length) return;
-		const lines = bad.map((x) => {
-			const parts = [`- slide ${x.no} (slides/${x.id}.html):`];
-			if (x.score > SAME) parts.push(`${x.score}% of pixels differ — web ${x.web}, PowerPoint ${x.ppt}, red mask ${x.diff}.`);
-			if (x.locked?.length) parts.push(`baked as a non-editable picture (${x.stiff}% of the slide): ${x.locked.map((b) => `<${b.tag}> at x${b.x} y${b.y} ${b.w}×${b.h}px`).join(", ")}.`);
-			return parts.join(" ");
-		});
-		const text = [
-			"The exported PPTX is not yet a faithful, editable copy of the web slides. Fix each slide below by changing its HTML/CSS while keeping the same look.",
-			"Pixel differences: Read the web picture, the PowerPoint picture and the red difference mask, and find what renders differently in PowerPoint. Typical causes: text that wraps or sits at a different height (give text boxes enough width, use explicit line-height, avoid mixing block children with bare text), fonts not installed on this PC" + (report.missingFonts.length ? ` (missing: ${report.missingFonts.join(", ")})` : "") + ".",
-			"Baked elements: the element and everything inside it become one flat picture, so its text and shapes cannot be edited in PowerPoint. This happens with transform/rotation, filter, blend modes, clip-path, mask, text-shadow, vertical writing-mode, background-clip:text and list markers. Rewrite them with editable means (flat colors, solid borders, explicit bullet spans, no effect on text containers) when the same look can be kept; if the effect is essential to the design (a rotated badge, a decorative shape), leave it and say so.",
-			...lines,
-		].join("\n");
-		get().send(text);
+		import("./check").then(({ needsFix, SAME }) => {
+			if (!get().deck) return;
+			const bad = report.slides.filter(needsFix);
+			if (!bad.length) return;
+			const lines = bad.map((x) => {
+				const parts = [`- slide ${x.no} (slides/${x.id}.html):`];
+				if (x.score > SAME) parts.push(`${x.score}% of pixels differ — web ${x.web}, PowerPoint ${x.ppt}, red mask ${x.diff}.`);
+				if (x.locked?.length) parts.push(`baked as a non-editable picture (${x.stiff}% of the slide): ${x.locked.map((b) => `<${b.tag}> at x${b.x} y${b.y} ${b.w}×${b.h}px`).join(", ")}.`);
+				return parts.join(" ");
+			});
+			const text = [
+				"The exported PPTX is not yet a faithful, editable copy of the web slides. Fix each slide below by changing its HTML/CSS while keeping the same look.",
+				"Pixel differences: Read the web picture, the PowerPoint picture and the red difference mask, and find what renders differently in PowerPoint. Typical causes: text that wraps or sits at a different height (give text boxes enough width, use explicit line-height, avoid mixing block children with bare text), fonts not installed on this PC" + (report.missingFonts.length ? ` (missing: ${report.missingFonts.join(", ")})` : "") + ".",
+				"Baked elements: the element and everything inside it become one flat picture, so its text and shapes cannot be edited in PowerPoint. This happens with transform/rotation, filter, blend modes, clip-path, mask, text-shadow, vertical writing-mode, background-clip:text and list markers. Rewrite them with editable means (flat colors, solid borders, explicit bullet spans, no effect on text containers) when the same look can be kept; if the effect is essential to the design (a rotated badge, a decorative shape), leave it and say so.",
+				...lines,
+			].join("\n");
+			get().send(text);
+		}).catch((e) => get().notify(String(e), "err"));
 	},
 
 	saveDeck: async (deck) => {
@@ -815,6 +846,7 @@ export async function makeRelease(dir: string, id: string, deck: Deck, prev: Rel
 	const tag = `r${k}`;
 	// 릴리즈가 가리키는 것은 내용 판(head)이다. 릴리즈 판은 PPTX 와 기록만 더한다
 	const file = `releases/${tag}-v${head.n}.pptx`;
+	const { buildPptx } = await import("./exportPptx");
 	const b = await buildPptx(deck, id, progress);
 	await api.writeBytes(dir, file, b.data);
 	onBuilt?.(b);
