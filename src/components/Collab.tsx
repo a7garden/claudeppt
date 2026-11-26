@@ -1,6 +1,6 @@
-// 팀 협업 화면 조각 — 제목 줄 접속 칩 · 「설정 › 협업」 칸 · 쪽 목록 · 무대의 「보는 사람」 표시 (상태: lib/collab.ts)
+// 팀 협업 화면 조각 — 제목 줄 「공유」(공유 창) · 쪽 목록 · 무대의 「보는 사람」 표시 (상태: lib/collab.ts)
 import { useEffect, useRef, useState } from "react";
-import { collabKick, collabLinkNew, collabLinkRemove, collabLock, collabTools, collabTunnel, follow, type InviteLink, type TunnelTools, type Member, startHost, stopHost, useCollab } from "../lib/collab";
+import { collabKick, collabLan, collabLinkNew, collabLinkRemove, collabLock, collabTools, collabTunnel, follow, type InviteLink, type TunnelTools, type Member, startHost, stopHost, useCollab } from "../lib/collab";
 import { useT } from "../lib/i18n";
 import { useSettings } from "../lib/settings";
 import { useDeck } from "../lib/store";
@@ -86,10 +86,13 @@ export function StageFaces({ slideId }: { slideId: string }) {
 	);
 }
 
-/** 제목 줄 — 협업이 켜졌거나(호스트) 붙어 있으면(브라우저) 사람 수. 누르면 누가 어디를 보는지 */
+/** 제목 줄 「공유」 (2026.11.26) — 덱 주인 앱: 꺼져 있으면 「공유」, 켜져 있으면 「공유 중 · n명」. 누르면 공유 창(켜기 · 초대 링크 · 들어온 사람 · 끝내기).
+ *  공유 덱 창(팀원): 연결 상태와 사람 수. 누르면 누가 어디를 보는지.
+ *  예전에는 「설정 › 협업」의 「브라우저로 같이 보기」 체크칸이었다 — 공유는 덱을 보다가 하는 일이라 덱 곁에 둔다 */
 export function CollabChip() {
 	const t = useT();
 	const { info, members, connected, ended, kicked } = useCollab();
+	const deck = useDeck((s) => s.deck);
 	const [open, setOpen] = useState(false);
 	const ref = useRef<HTMLSpanElement>(null);
 	useEffect(() => {
@@ -98,124 +101,183 @@ export function CollabChip() {
 		addEventListener("mousedown", k);
 		return () => removeEventListener("mousedown", k);
 	}, [open]);
-	if (!remote && !info) return null;
-	const deck = useDeck.getState().deck;
+	if (!remote && !info && !deck) return null;
 	const off = remote && (!connected || ended);
+	const label = remote
+		? off ? (kicked ? t("collabKicked") : ended ? t("collabEnded") : t("collabOffline")) : t("collabCount").replace("{n}", String(members.length))
+		: info ? t("shareOn").replace("{n}", String(members.filter((m) => !m.host).length)) : t("shareBtn");
 	return (
 		<span className="collabwrap" ref={ref}>
-			<button className={"tb-btn collab-chip" + (off ? " off" : "")} onClick={() => setOpen(!open)} aria-expanded={open} title={t("collabMembers")}>
-				<span className="dot" aria-hidden />
-				{off ? (kicked ? t("collabKicked") : ended ? t("collabEnded") : t("collabOffline")) : (info?.tunnel ? t("collabOpenOutside") + " · " : "") + t("collabCount").replace("{n}", String(members.length))}
+			<button className={"tb-btn collab-chip" + (off ? " off" : "")} onClick={() => setOpen(!open)} aria-expanded={open} title={remote ? t("collabMembers") : t("shareTitle")}>
+				{(remote || info) && <span className="dot" aria-hidden />}
+				{label}
 			</button>
-			{open && (
-				<div className="pop collab-pop" role="dialog" aria-label={t("collabMembers")}>
-					{members.length === 0 && <p className="dim">{t("collabNobody")}</p>}
-					{members.map((m) => {
-						const no = deck ? deck.slides.findIndex((s) => s.id === m.slide) + 1 : 0;
-						return (
-							<div className="row" key={m.conn}>
-								<Face m={m} />
-								<span className="nm">{m.name || t("collabNoName")}{m.host && <em> · {t("collabHostTag")}</em>}{m.runner && <em title={t("runnerUseHint")}> · {t("runnerMine")}</em>}</span>
-								<span className="dim mono">{no > 0 ? `${no}${t("slideN") === "쪽" ? "쪽" : ""}` : ""}</span>
-							</div>
-						);
-					})}
-				</div>
-			)}
+			{open && (remote ? <MembersPop /> : <div className="pop share" role="dialog" aria-label={t("shareTitle")}><SharePanel /></div>)}
 		</span>
 	);
 }
 
-/** 「설정 › 협업」 — 켜기 · 초대 링크 · 들어온 사람 · 회의 잠금 (호스트 앱만) */
-export function CollabSettings() {
+/** 공유 덱 창 — 누가 어디를 보는지 */
+function MembersPop() {
+	const t = useT();
+	const { members } = useCollab();
+	const deck = useDeck((s) => s.deck);
+	return (
+		<div className="pop collab-pop" role="dialog" aria-label={t("collabMembers")}>
+			{members.length === 0 && <p className="dim">{t("collabNobody")}</p>}
+			{members.map((m) => {
+				const no = deck ? deck.slides.findIndex((s) => s.id === m.slide) + 1 : 0;
+				return (
+					<div className="row" key={m.conn}>
+						<Face m={m} />
+						<span className="nm">{m.name || t("collabNoName")}{m.host && <em> · {t("collabHostTag")}</em>}{m.runner && <em title={t("runnerUseHint")}> · {t("runnerMine")}</em>}</span>
+						<span className="dim mono">{no > 0 ? `${no}${t("slideN") === "쪽" ? "쪽" : ""}` : ""}</span>
+					</div>
+				);
+			})}
+		</div>
+	);
+}
+
+/** 공유 창 — 꺼져 있으면 시작 한 번, 켜져 있으면 초대 링크 하나가 맨 위. 링크 더 만들기 · 브라우저 팀원은 펼쳐서 */
+function SharePanel() {
 	const t = useT();
 	const { info, members } = useCollab();
-	// 지금 붙어 있는가는 접속 목록으로 — 장부(info)는 링크 · 기기가 바뀔 때만 새로 온다
-	const online = (id: string) => members.some((m) => m.device === id);
+	const me = useSettings((s) => s.s.me);
+	const deck = useDeck((s) => s.deck);
 	const notify = useDeck((s) => s.notify);
 	const [busy, setBusy] = useState(false);
+	const [more, setMore] = useState<"" | "links" | "browser">("");
 	const [who, setWho] = useState("");
 	const [hours, setHours] = useState(0);
 	const [tools, setTools] = useState<TunnelTools | null>(null);
-	useEffect(() => { if (info) collabTools().then(setTools, () => {}); }, [!!info]);
+	useEffect(() => { if (more === "browser") collabTools().then(setTools, () => {}); }, [more]);
 	const run = async (f: () => Promise<unknown>) => {
 		setBusy(true);
 		try { await f(); } catch (e) { notify(String(e), "err"); } finally { setBusy(false); }
 	};
 	const copy = (url: string) => { copyText(url); notify(t("collabCopied"), "ok"); };
+	const setMe = (v: string) => useSettings.getState().set((x) => ({ ...x, me: v }));
+
+	if (!info) {
+		return (
+			<>
+				<b className="share-h">{t("shareTitle")}</b>
+				<p className="note">{t("shareIntro")}</p>
+				<label className="share-name">
+					<span>{t("myName")}</span>
+					<input className="field" value={me} placeholder={t("myNamePh")} onChange={(e) => setMe(e.target.value)} />
+				</label>
+				<button className="send share-go" disabled={busy} onClick={() => run(async () => {
+					// 공유는 팀원 세션(요청 · 판에 보낸 사람)과 함께 간다 — 「설정 › 협업 쓰기」를 같이 켠다
+					useSettings.getState().set((x) => ({ ...x, collab: { ...x.collab, on: true } }));
+					await startHost();
+				})}>{busy ? t("shareStarting") : t("shareStart")}</button>
+			</>
+		);
+	}
+
+	const pub = info.links.find((l) => !l.name && !l.expired) ?? info.links[0];
+	const browserOpen = info.lan || !!info.tunnel;
+	const online = (id: string) => members.find((m) => m.device === id);
+	const slideNo = (id: string | null) => (deck && id ? deck.slides.findIndex((s) => s.id === id) + 1 : 0);
 	const expiry = (l: InviteLink) => (l.expired ? t("collabExpired") : l.expires ? t("collabUntil").replace("{at}", new Date(l.expires).toLocaleString()) : t("collabNoExpiry"));
+	// 지금 들어와 있는 사람이 위로
+	const people = [...info.devices].sort((a, b) => Number(!!online(b.id)) - Number(!!online(a.id)));
 	return (
-		<div className="collab-set">
-			<label className="check">
-				<input type="checkbox" checked={!!info} disabled={busy} onChange={() => run(() => (info ? stopHost() : startHost()))} />
-				<span>{t("collabOn")}</span>
-			</label>
-			<p className="note">{t("collabNote")}</p>
-			{info && (
-				<>
-					<p className="note">{t("collabFirewall")}</p>
-					<section className="collab-sec">
-						<span className="lbl">{t("collabOutside")}</span>
-						{info.tunnel ? (
-							<div className="field-row">
-								<span className="tun on">{info.tunnel.kind === "tailscale" ? "Tailscale Funnel" : "Cloudflare"}</span>
-								<input className="field mono" readOnly value={info.tunnel.url} aria-label={t("collabOutside")} />
-								<button disabled={busy} onClick={() => run(() => collabTunnel(false))}>{t("collabTunnelOff")}</button>
-							</div>
-						) : tools && (tools.tailscale || tools.cloudflared) ? (
-							<div className="field-row">
-								<span className="tun">{t("collabTunnelClosed")}</span>
-								<button disabled={busy} onClick={() => run(() => collabTunnel(true))}>{t("collabTunnelOn")}</button>
-							</div>
-						) : (
-							<p className="note">{t("collabNoTools")}</p>
-						)}
-						<p className="note">{info.tunnel?.kind === "cloudflare" ? t("collabCloudflareNote") : info.tunnel ? t("collabTunnelNote") : t("collabLanOnly")}</p>
-					</section>
-					<section className="collab-sec">
-						<span className="lbl">{t("collabLinks")}</span>
-						{info.links.map((l) => (
-							<div className={"link-row" + (l.expired ? " expired" : "")} key={l.id}>
-								<span className="who">{l.name ? `${t("collabPersonal")} · ${l.name}` : t("collabPublic")}</span>
-								<input className="field mono" readOnly value={l.url} onFocus={(e) => e.currentTarget.select()} aria-label={t("collabLink")} />
-								<button onClick={() => copy(l.url)} disabled={l.expired}>{t("collabCopy")}</button>
-								<button className="rm" onClick={() => run(() => collabLinkRemove(l.id))} title={t("collabLinkRemoveHint")}>{t("delete")}</button>
-								<span className="dim when">{expiry(l)}</span>
-							</div>
-						))}
-						<div className="link-new">
-							<input className="field" placeholder={t("collabPersonalPh")} value={who} onChange={(e) => setWho(e.target.value)} aria-label={t("collabPersonalPh")} />
-							<select className="field" value={hours} onChange={(e) => setHours(Number(e.target.value))} aria-label={t("collabExpiry")}>
-								<option value={0}>{t("collabNoExpiry")}</option>
-								<option value={24}>{t("collabHours24")}</option>
-								<option value={168}>{t("collabDays7")}</option>
-							</select>
-							<button disabled={busy} onClick={() => run(async () => { await collabLinkNew(who.trim() || null, hours || null); setWho(""); })}>{who.trim() ? t("collabMakePersonal") : t("collabMakePublic")}</button>
+		<>
+			<section className="share-link">
+				<span className="lbl">{t("shareLink")}</span>
+				{pub?.app ? (
+					<div className="field-row">
+						<input className="field mono" readOnly value={pub.app} onFocus={(e) => e.currentTarget.select()} aria-label={t("shareLink")} />
+						<button className="send" onClick={() => copy(pub.app!)}>{t("collabCopy")}</button>
+					</div>
+				) : <p className="note">{t("shareNoApp")}</p>}
+				<p className="note">{t("shareLinkNote")}</p>
+			</section>
+
+			<section className="collab-members">
+				<span className="lbl">{t("collabPeople")}</span>
+				{people.length === 0 && <p className="dim">{t("collabNobody")}</p>}
+				{people.map((d) => {
+					const m = online(d.id);
+					const no = slideNo(m?.slide ?? null);
+					return (
+						<div className="row" key={d.id}>
+							<Face m={{ conn: 0, device: d.id, name: d.name, slide: null, host: false, since: d.seen }} />
+							<span className="nm">{d.name}{m?.runner && <em title={t("runnerUseHint")}> · {t("runnerMine")}</em>}</span>
+							<span className={"st" + (m ? " on" : "")}>{m ? (no > 0 ? `${t("collabOnline")} · ${no}${t("slideN") === "쪽" ? "쪽" : ""}` : t("collabOnline")) : new Date(d.seen).toLocaleDateString()}</span>
+							<button className="rm" disabled={busy} onClick={() => run(() => collabKick(d.id))} title={t("collabKickHint")}>{t("collabKick")}</button>
 						</div>
-						<p className="note">{t("collabLinkNote")}</p>
-					</section>
-					<section className="collab-sec">
-						<label className="check">
-							<input type="checkbox" checked={info.locked} disabled={busy} onChange={() => run(() => collabLock(!info.locked))} />
-							<span>{t("collabLock")}</span>
-						</label>
-						<p className="note">{t("collabLockNote")}</p>
-					</section>
-					<section className="collab-sec collab-members">
-						<span className="lbl">{t("collabPeople")}</span>
-						{info.devices.length === 0 && <p className="dim">{t("collabNobody")}</p>}
-						{info.devices.map((d) => (
-							<div className="row" key={d.id}>
-								<Face m={{ conn: 0, device: d.id, name: d.name, slide: null, host: false, since: d.seen }} />
-								<span className="nm">{d.name}</span>
-								<span className={"st" + (online(d.id) ? " on" : "")}>{online(d.id) ? t("collabOnline") : new Date(d.seen).toLocaleString()}</span>
-								<button className="rm" disabled={busy} onClick={() => run(() => collabKick(d.id))} title={t("collabKickHint")}>{t("collabKick")}</button>
-							</div>
-						))}
-					</section>
-				</>
+					);
+				})}
+				<label className="check" title={t("collabLockNote")}>
+					<input type="checkbox" checked={info.locked} disabled={busy} onChange={() => run(() => collabLock(!info.locked))} />
+					<span>{t("collabLock")}</span>
+				</label>
+			</section>
+
+			<div className="share-more" role="group">
+				<button aria-expanded={more === "links"} onClick={() => setMore(more === "links" ? "" : "links")}>{t("shareMoreLinks")}</button>
+				<button aria-expanded={more === "browser"} onClick={() => setMore(more === "browser" ? "" : "browser")}>{t("shareBrowser")}{browserOpen && <span className="dot" aria-hidden />}</button>
+			</div>
+
+			{more === "links" && (
+				<section className="share-sub">
+					{info.links.map((l) => (
+						<div className={"link-row" + (l.expired ? " expired" : "")} key={l.id}>
+							<span className="who">{l.name ? `${t("collabPersonal")} · ${l.name}` : t("collabPublic")}</span>
+							<span className="dim when">{expiry(l)}</span>
+							{l.app && <button onClick={() => copy(l.app!)} disabled={l.expired}>{t("collabCopy")}</button>}
+							{browserOpen && <button onClick={() => copy(l.url)} disabled={l.expired} title={l.url}>{t("shareBrowserCopy")}</button>}
+							<button className="rm" onClick={() => run(() => collabLinkRemove(l.id))} title={t("collabLinkRemoveHint")}>{t("delete")}</button>
+						</div>
+					))}
+					<div className="link-new">
+						<input className="field" placeholder={t("collabPersonalPh")} value={who} onChange={(e) => setWho(e.target.value)} aria-label={t("collabPersonalPh")} />
+						<select className="field" value={hours} onChange={(e) => setHours(Number(e.target.value))} aria-label={t("collabExpiry")}>
+							<option value={0}>{t("collabNoExpiry")}</option>
+							<option value={24}>{t("collabHours24")}</option>
+							<option value={168}>{t("collabDays7")}</option>
+						</select>
+						<button disabled={busy} onClick={() => run(async () => { await collabLinkNew(who.trim() || null, hours || null); setWho(""); })}>{who.trim() ? t("collabMakePersonal") : t("collabMakePublic")}</button>
+					</div>
+					<p className="note">{t("collabLinkNote")}</p>
+				</section>
 			)}
-		</div>
+
+			{more === "browser" && (
+				<section className="share-sub">
+					<p className="note">{t("shareBrowserNote")}</p>
+					{browserOpen && pub && (
+						<div className="field-row">
+							<input className="field mono" readOnly value={pub.url} onFocus={(e) => e.currentTarget.select()} aria-label={t("shareBrowser")} />
+							<button onClick={() => copy(pub.url)}>{t("collabCopy")}</button>
+						</div>
+					)}
+					<div className="field-row">
+						<span className={"tun" + (info.lan ? " on" : "")}>{t("shareLan")}</span>
+						<button disabled={busy} onClick={() => run(() => collabLan(!info.lan))}>{info.lan ? t("collabTunnelOff") : t("shareLanOpen")}</button>
+					</div>
+					{info.lan && <p className="note">{t("collabFirewall")} {t("collabLanOnly")}</p>}
+					<div className="field-row">
+						<span className={"tun" + (info.tunnel ? " on" : "")}>{info.tunnel ? (info.tunnel.kind === "tailscale" ? "Tailscale Funnel" : "Cloudflare") : t("collabOutside")}</span>
+						{info.tunnel
+							? <button disabled={busy} onClick={() => run(() => collabTunnel(false))}>{t("collabTunnelOff")}</button>
+							: tools && (tools.tailscale || tools.cloudflared) && <button disabled={busy} onClick={() => run(() => collabTunnel(true))}>{t("collabTunnelOn")}</button>}
+					</div>
+					{(info.tunnel || (tools && !tools.tailscale && !tools.cloudflared)) && (
+						<p className="note">{info.tunnel?.kind === "cloudflare" ? t("collabCloudflareNote") : info.tunnel ? t("collabTunnelNote") : t("collabNoTools")}</p>
+					)}
+				</section>
+			)}
+
+			<div className="share-foot">
+				<span className="dim">{t("shareStopNote")}</span>
+				<button disabled={busy} onClick={() => run(stopHost)}>{t("shareStop")}</button>
+			</div>
+		</>
 	);
 }
 

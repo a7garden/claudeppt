@@ -1,4 +1,6 @@
-// 팀 협업 서버 — 「설정 › 협업」을 켜면 이 앱(호스트) 안에서 HTTP + WebSocket 을 연다. 끄면 닫는다. 기본은 꺼짐.
+// 팀 협업 서버 — 제목 줄 「공유」로 켜면 이 앱(호스트) 안에서 HTTP + WebSocket 을 연다. 끄면 닫는다. 기본은 꺼짐.
+//   2026.11.26 : 이 PC 안(127.0.0.1)에서만 연다 — 팀원 앱은 앱끼리 잇는 길(p2p.rs)로 들어온다. 사무실 망(0.0.0.0)은
+//                「브라우저로 들어오게 하기」를 켤 때만 따로 연다(collab_lan) — 켤 때마다 방화벽 창이 뜨고 같은 망 누구나 닿기 때문
 //
 //   화면       같은 React 화면을 브라우저에 내준다 (설치 판: 앱에 담긴 화면 · 개발 실행: Vite 로 넘긴다)
 //   슬라이드    /_/d/<덱 열쇠>/<id>[@커밋]/<경로> — deck:// 와 같은 serve() 를 쓴다 (경로 검사 · 런타임 끼우기 그대로).
@@ -16,6 +18,8 @@
 //              그 밖의 모든 요청에 기기 쿠키가 있어야 한다. IP 로 믿지 않는다 — 바깥 길(터널)로 온 요청은 127.0.0.1 로 보인다.
 //              팀원의 이름은 서버가 정한다(기기 이름) — 요청 · 편집 · 판의 보낸 사람이 브라우저가 적어 보낸 이름이 아니다.
 //              /_/ws · /_/rpc 는 같은 출처(Origin)에서 온 것만 — 다른 출처 페이지가 팀원 브라우저의 쿠키로 붙지 못하게
+//   앱끼리     팀원 앱은 iroh 로 이 서버에 닿는다 (p2p.rs) — 덱 주인 앱의 열쇠가 곧 주소라 설치 · 계정 · 같은 망이 없어도 된다.
+//              그 길로 온 요청도 127.0.0.1 에서 온 것으로 보인다 — 여기서 하는 검사(초대 링크 · 기기 쿠키 · 같은 출처)는 그대로다
 //   읽기       /_/rpc 는 허용 목록뿐 — 열려 있는 덱 안 파일 읽기 · 판 목록. 쓰기 · 절대 경로 · 설정 · claude 실행은 없다
 
 use crate::invite::{self, Book, Why};
@@ -39,7 +43,7 @@ use tauri::{AppHandle, Emitter, Manager, State};
 use tokio::sync::{broadcast, mpsc, oneshot};
 
 const COOKIE: &str = "cppt_d";
-/// 처음 해 보는 포트 — 쓰이고 있으면 아무 빈 포트
+/// 사무실 망 포트 — 처음 해 보는 자리, 쓰이고 있으면 아무 빈 포트
 const DEFAULT_PORT: u16 = 47815;
 /// 의도 하나를 기다리는 가장 긴 시간 — Claude 턴이 오래 돈다
 const INTENT_WAIT: Duration = Duration::from_secs(3 * 60 * 60);
@@ -61,6 +65,10 @@ pub struct Hub {
 	app: AppHandle,
 	book: Mutex<Book>,
 	book_path: PathBuf,
+	/// 앱끼리 잇는 주소 (p2p.rs) — claudeppt://<열쇠>
+	app_base: Option<String>,
+	/// 사무실 망에 연 두 번째 입구 — (포트, 닫기). 브라우저 팀원용, 켤 때만
+	lan: Mutex<Option<(u16, oneshot::Sender<()>)>>,
 	/// 바깥 길(터널) — 열려 있으면 그 주소가 링크의 첫 주소가 된다
 	tunnel: tokio::sync::Mutex<Option<crate::tunnel::Tunnel>>,
 	public: Mutex<Option<(String, &'static str)>>,
@@ -109,8 +117,12 @@ pub struct Member {
 #[derive(Serialize, Clone)]
 pub struct Info {
 	port: u16,
-	/// 이 서버에 닿는 주소들 — 바깥 길(있으면 맨 앞) · 사무실 망 · 이 PC
+	/// 앱끼리 잇는 주소 — claudeppt://<이 앱의 열쇠>. 팀원은 앱의 「공유 덱 열기」에 이 꼴의 링크를 넣는다 (p2p.rs). 못 열었으면 없다
+	app: Option<String>,
+	/// 이 서버에 닿는 주소들 — 바깥 길(있으면 맨 앞) · 사무실 망(열었으면) · 이 PC
 	bases: Vec<String>,
+	/// 사무실 망에 열었나 (브라우저 팀원용)
+	lan: bool,
 	/// 바깥 길 — { url, kind: "tailscale" | "cloudflare" }
 	tunnel: Option<TunnelView>,
 	links: Vec<LinkView>,
@@ -128,6 +140,9 @@ struct TunnelView {
 #[derive(Serialize, Clone)]
 struct LinkView {
 	id: String,
+	/// 앱으로 여는 링크(claudeppt://…) — 앱끼리 잇는 길이 없으면 없다
+	app: Option<String>,
+	/// 브라우저로 여는 링크 — 바깥 길(있으면) · 사무실 망 주소
 	url: String,
 	name: Option<String>,
 	expires: Option<i64>,
@@ -178,8 +193,9 @@ impl Hub {
 		if let Some((u, _)) = &public {
 			bases.push(u.clone());
 		}
-		if let Some(ip) = lan_ip() {
-			bases.push(format!("http://{ip}:{}", self.port));
+		let lan = self.lan.lock().unwrap().as_ref().map(|(p, _)| *p);
+		if let (Some(ip), Some(p)) = (lan_ip(), lan) {
+			bases.push(format!("http://{ip}:{p}"));
 		}
 		bases.push(format!("http://localhost:{}", self.port));
 		let members: Vec<Member> = self.members.lock().unwrap().values().cloned().collect();
@@ -187,7 +203,9 @@ impl Hub {
 		let t = now();
 		Info {
 			port: self.port,
-			links: b.links.iter().map(|l| LinkView { id: l.id.clone(), url: format!("{}/j/{}", bases[0], l.token), name: l.name.clone(), expires: l.expires, expired: l.expires.is_some_and(|e| e <= t) }).collect(),
+			app: self.app_base.clone(),
+			lan: lan.is_some(),
+			links: b.links.iter().map(|l| LinkView { id: l.id.clone(), app: self.app_base.as_ref().map(|a| format!("{a}/j/{}", l.token)), url: format!("{}/j/{}", bases[0], l.token), name: l.name.clone(), expires: l.expires, expired: l.expires.is_some_and(|e| e <= t) }).collect(),
 			devices: b.devices.iter().rev().map(|d| DeviceView { id: d.id.clone(), name: d.name.clone(), seen: d.seen, online: members.iter().any(|m| m.device == d.id) }).collect(),
 			locked: b.locked,
 			tunnel: public.map(|(url, kind)| TunnelView { url, kind }),
@@ -267,12 +285,11 @@ pub async fn collab_start(app: AppHandle) -> Res<Info> {
 	if let Some(h) = hub(&app) {
 		return Ok(h.info());
 	}
-	let listener = match tokio::net::TcpListener::bind(("0.0.0.0", DEFAULT_PORT)).await {
-		Ok(l) => l,
-		Err(_) => tokio::net::TcpListener::bind(("0.0.0.0", 0)).await.map_err(err)?,
-	};
+	let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0)).await.map_err(err)?;
 	let port = listener.local_addr().map_err(err)?.port();
 	let (tx, _) = broadcast::channel(512);
+	// 앱끼리 잇는 길 — 못 열어도(망이 막힘) 사무실 망 · 바깥 길로는 된다
+	let app_base = crate::p2p::my_id(&app).await.ok().map(|id| format!("{}://{id}", crate::p2p::SCHEME));
 	let h = Arc::new(Hub {
 		app: app.clone(),
 		book: Mutex::new({
@@ -281,6 +298,8 @@ pub async fn collab_start(app: AppHandle) -> Res<Info> {
 			b
 		}),
 		book_path: book_file(),
+		app_base,
+		lan: Mutex::new(None),
 		tunnel: tokio::sync::Mutex::new(None),
 		public: Mutex::new(None),
 		conns: Mutex::new(HashMap::new()),
@@ -306,6 +325,11 @@ pub async fn collab_start(app: AppHandle) -> Res<Info> {
 	*c.stop.lock().unwrap() = Some(stop_tx);
 	h.save();
 	Ok(h.info())
+}
+
+/// 켜져 있으면 협업 서버 포트 — 앱끼리 잇는 길(p2p.rs)이 들어온 흐름을 여기로 넘긴다
+pub fn serving_port(app: &AppHandle) -> Option<u16> {
+	hub(app).map(|h| h.port)
 }
 
 fn with_hub(app: &AppHandle, f: impl FnOnce(&Hub)) -> Res<Info> {
@@ -358,6 +382,30 @@ pub fn collab_lock(app: AppHandle, on: bool) -> Res<Info> {
 	})
 }
 
+/// 사무실 망에 열거나 닫는다 — 같은 와이파이 · 사무실 망의 브라우저 팀원용. 앱 팀원은 필요 없다(p2p.rs)
+#[tauri::command]
+pub async fn collab_lan(app: AppHandle, on: bool) -> Res<Info> {
+	let h = hub(&app).ok_or("협업이 꺼져 있다")?;
+	if let Some((_, stop)) = h.lan.lock().unwrap().take() {
+		let _ = stop.send(());
+	}
+	if on {
+		let listener = match tokio::net::TcpListener::bind(("0.0.0.0", DEFAULT_PORT)).await {
+			Ok(l) => l,
+			Err(_) => tokio::net::TcpListener::bind(("0.0.0.0", 0)).await.map_err(err)?,
+		};
+		let port = listener.local_addr().map_err(err)?.port();
+		let (tx, rx) = oneshot::channel::<()>();
+		let router = routes(h.clone());
+		tauri::async_runtime::spawn(async move {
+			let _ = axum::serve(listener, router).with_graceful_shutdown(async { let _ = rx.await; }).await;
+		});
+		*h.lan.lock().unwrap() = Some((port, tx));
+	}
+	let _ = h.app.emit("collab-info", h.info());
+	Ok(h.info())
+}
+
 /// 바깥 길을 열거나 닫는다 — 깔린 Tailscale(Funnel) · cloudflared 를 쓴다 (tunnel.rs)
 #[tauri::command]
 pub async fn collab_tunnel(app: AppHandle, on: bool) -> Res<Info> {
@@ -378,18 +426,18 @@ pub async fn collab_tunnel(app: AppHandle, on: bool) -> Res<Info> {
 }
 
 /// 다른 사람의 공유 덱에 이 앱으로 들어간다 (2026.11.26) — 초대 링크나 들어간 적 있는 주소를 이 앱의 새 창으로 연다.
+/// 앱 링크(claudeppt://<열쇠>/…)면 이 PC 안 출입구를 열어 덱 주인 앱에 잇고(p2p.rs) 창은 그 출입구를 연다.
+/// 돌려주는 것은 덱 주인 이름(p2p::canon) — 공유 덱 목록 · 「내 Claude」가 이것으로 덱 주인을 가린다
 /// 창 안은 호스트가 내준 화면이라 협업 브라우저와 똑같이 돈다(__CPPT_REMOTE__ → transport.ts 의 remote).
 /// 권한(capabilities/default.json)은 main 창에만 있다 — 남의 PC 가 내준 스크립트가 이 PC 의 파일 · claude · 설정을 부르지 못하게.
 /// 기기 쿠키는 앱의 웹뷰 저장소에 남아, 다음에는 주소만으로 다시 들어온다. 같은 호스트는 창 하나 (다시 열면 그 창으로)
 #[tauri::command]
 pub async fn collab_join(app: AppHandle, url: String) -> Res<String> {
-	let u = tauri::Url::parse(url.trim()).map_err(|_| "링크가 올바르지 않다".to_string())?;
-	let host = u.host_str().ok_or("링크에 주소가 없다")?.to_string();
-	if !matches!(u.scheme(), "http" | "https") {
-		return Err("http · https 링크만 열 수 있다".into());
-	}
-	let origin = u.origin().ascii_serialization();
-	let label = join_label(&origin);
+	let canon = crate::p2p::canon(&url)?;
+	let origin = crate::p2p::reach(&app, &canon).await?;
+	let u = tauri::Url::parse(&format!("{origin}{}", path_of(&url))).map_err(|_| "링크가 올바르지 않다".to_string())?;
+	let host = if crate::p2p::id_of(&canon).is_some() { "공유 덱".to_string() } else { u.host_str().unwrap_or("").to_string() };
+	let label = join_label(&canon);
 	if let Some(w) = app.get_webview_window(&label) {
 		let _ = w.unminimize();
 		let _ = w.set_focus();
@@ -397,9 +445,13 @@ pub async fn collab_join(app: AppHandle, url: String) -> Res<String> {
 		if u.path().starts_with("/j/") {
 			w.navigate(u).map_err(err)?;
 		}
-		return Ok(origin);
+		return Ok(canon);
 	}
+	// 덱 주인이 내준 화면은 그 주소 안에서만 움직인다 — 창 주소를 앱 자신의 주소(tauri.localhost) 같은 곳으로 바꾸지 못하게.
+	// 앱 명령은 build.rs 의 명령 목록 · capabilities 로 main 창에만 있지만, 한 겹 더 막는다
+	let allow = origin.clone();
 	tauri::WebviewWindowBuilder::new(&app, &label, tauri::WebviewUrl::External(u))
+		.on_navigation(move |to| to.origin().ascii_serialization() == allow)
 		.title(format!("ClaudePPT · {host}"))
 		.inner_size(1440.0, 900.0)
 		.min_inner_size(900.0, 600.0)
@@ -409,10 +461,20 @@ pub async fn collab_join(app: AppHandle, url: String) -> Res<String> {
 		.initialization_script("window.__CPPT_REMOTE__ = true;")
 		.build()
 		.map_err(err)?;
-	Ok(origin)
+	Ok(canon)
 }
 
-/// 공유 덱 창의 이름 — 호스트 주소마다 하나. 내 PC 의 Claude(runner.rs)가 이 창에서 기기 쿠키를 읽는다
+/// 링크에서 덱 주인 뒤 경로(/j/… 와 물음) — 앱 링크는 열쇠 뒤, http 링크는 주소 뒤
+fn path_of(url: &str) -> String {
+	let url = url.trim();
+	let rest = match crate::p2p::id_of(url) {
+		Some(_) => url.splitn(4, '/').nth(3).map(|p| format!("/{p}")).unwrap_or_default(),
+		None => tauri::Url::parse(url).map(|u| format!("{}{}", u.path(), u.query().map(|q| format!("?{q}")).unwrap_or_default())).unwrap_or_default(),
+	};
+	if rest.is_empty() { "/".into() } else { rest }
+}
+
+/// 공유 덱 창의 이름 — 덱 주인(p2p::canon)마다 하나. 내 PC 의 Claude(runner.rs)가 이 창에서 기기 쿠키를 읽는다
 pub fn join_label(origin: &str) -> String {
 	format!("join-{}", etag(origin.as_bytes()).trim_matches('"'))
 }
@@ -434,6 +496,9 @@ pub fn collab_stop(state: State<Collab>) {
 	}
 	if let Some(h) = state.hub.lock().unwrap().take() {
 		let _ = h.tx.send(json!({ "t": "bye" }).to_string().into());
+		if let Some((_, stop)) = h.lan.lock().unwrap().take() {
+			let _ = stop.send(());
+		}
 		// 열린 WebSocket 을 닫는다 — 우아한 종료는 연결이 끝나기를 기다리고, 닫지 않으면 브라우저가 옛 서버에 붙은 채로 남아
 		// 다시 켠 서버에 다시 붙지 못한다
 		for (_, tx) in h.conns.lock().unwrap().values() {
@@ -1267,6 +1332,14 @@ mod tests {
 		assert!(join_transcript(have, 3, Some(&p), "x").is_none(), "길이가 다르면 잇지 않는다");
 		assert!(join_transcript("{\"z\":9}
 ", have.len(), Some(&p), "x").is_none(), "같은 길이라도 내용이 다르면 잇지 않는다");
+	}
+
+	#[test]
+	fn join_keeps_the_path_after_the_host() {
+		assert_eq!(path_of("claudeppt://abc/j/tok"), "/j/tok");
+		assert_eq!(path_of("claudeppt://abc"), "/");
+		assert_eq!(path_of("http://10.0.0.5:47815/j/tok?x=1"), "/j/tok?x=1");
+		assert_eq!(path_of("http://10.0.0.5:47815"), "/");
 	}
 
 	#[test]

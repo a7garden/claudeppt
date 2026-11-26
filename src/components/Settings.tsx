@@ -12,7 +12,6 @@ import { rethemeCss, themeVars, writeDeck } from "../lib/deck";
 import { type ImageProvider, LEVELS, type Level, type Template, templateId, useSettings } from "../lib/settings";
 import { addTemplateFromPath, saveTemplateFile, TEMPLATE_EXT } from "../lib/templates";
 import { useDeck } from "../lib/store";
-import { CollabSettings } from "./Collab";
 import { stopHost } from "../lib/collab";
 import { useUpdate } from "../lib/updater";
 
@@ -405,7 +404,7 @@ function Collab() {
 				<>
 					<Row k={t("myName")}><input className="field" style={{ maxWidth: 200 }} placeholder={t("myNamePh")} value={s.me} onChange={(e) => set((x) => ({ ...x, me: e.target.value }))} /></Row>
 					<Row k=""><span className="note" style={{ whiteSpace: "normal" }}>{t("myNameNote")}</span></Row>
-					<CollabSettings />
+					<Row k=""><span className="note" style={{ whiteSpace: "normal" }}>{t("shareWhere")}</span></Row>
 				</>
 			)}
 		</>

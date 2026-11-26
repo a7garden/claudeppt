@@ -16,10 +16,12 @@ import { isMine, me, nextSession, persistTalk, type Turn, useDeck } from "./stor
 
 /** runner — 이 기기가 「내 PC 의 Claude」를 붙여 두었다 (runner.rs) */
 export interface Member { conn: number; device: string; name: string; slide: string | null; host: boolean; since: number; runner?: boolean }
-export interface InviteLink { id: string; url: string; name: string | null; expires: number | null; expired: boolean }
+/** app — 앱으로 여는 링크(claudeppt://…, 앱끼리 잇는 길이 없으면 null) · url — 브라우저로 여는 링크 */
+export interface InviteLink { id: string; app: string | null; url: string; name: string | null; expires: number | null; expired: boolean }
 export interface Device { id: string; name: string; seen: number; online: boolean }
 /** 서버 정보 — bases: 이 서버에 닿는 주소 · links: 초대 링크 · devices: 링크로 들어온 기기 · locked: 회의 잠금 */
-export interface CollabInfo { port: number; bases: string[]; tunnel: { url: string; kind: "tailscale" | "cloudflare" } | null; links: InviteLink[]; devices: Device[]; locked: boolean; members: Member[] }
+/** app — 앱끼리 잇는 주소(claudeppt://<열쇠>) · lan — 사무실 망에 열었나(브라우저 팀원용) */
+export interface CollabInfo { port: number; app: string | null; lan: boolean; bases: string[]; tunnel: { url: string; kind: "tailscale" | "cloudflare" } | null; links: InviteLink[]; devices: Device[]; locked: boolean; members: Member[] }
 export interface TunnelTools { tailscale: string | null; cloudflared: string | null }
 
 interface C {
@@ -124,13 +126,8 @@ export async function startHost(): Promise<CollabInfo> {
 	wireFollow();
 	flush(true);
 	hostView(true);
-	// 바깥 길 — 깔린 도구가 있으면 켜자마자 연다(같은 링크가 사무실 안 · 밖에서 열리게). 못 열어도 사무실 망으로는 된다
-	if (!info.tunnel) {
-		const tools = await collabTools().catch(() => null);
-		if (tools && (tools.tailscale || tools.cloudflared)) {
-			collabTunnel(true).catch((e) => useDeck.getState().notify(`${tNow("collabTunnelFail")} ${String(e)}`, "err"));
-		}
-	}
+	// 2026.11.26 : 바깥 길을 켜자마자 열던 것을 그만뒀다 — 팀원 앱은 앱끼리 잇는 길(p2p.rs)로 들어오고, 브라우저 팀원용 길은 공유 창에서 연다.
+	// 바깥 길은 덱을 인터넷에 내놓는 일이라 사람이 고른다
 	unsub?.();
 	let cur = useDeck.getState().current, deckRef = useDeck.getState().deck;
 	unsub = useDeck.subscribe((s) => {
@@ -146,6 +143,8 @@ export const collabLinkNew = (name: string | null, hours: number | null) => call
 export const collabLinkRemove = (id: string) => call<CollabInfo>("collab_link_remove", { id }).then(setInfo);
 export const collabKick = (device: string) => call<CollabInfo>("collab_kick", { device }).then(setInfo);
 export const collabLock = (on: boolean) => call<CollabInfo>("collab_lock", { on }).then(setInfo);
+/** 사무실 망 — 같은 망의 브라우저 팀원용 입구 (collab.rs collab_lan) */
+export const collabLan = (on: boolean) => call<CollabInfo>("collab_lan", { on }).then(setInfo);
 /** 바깥 길(터널) — 사무실 밖에서도 같은 링크로 (tunnel.rs) */
 export const collabTunnel = (on: boolean) => call<CollabInfo>("collab_tunnel", { on }).then(setInfo);
 export const collabTools = () => call<TunnelTools>("collab_tools");

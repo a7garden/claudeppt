@@ -13,7 +13,12 @@ interface Status { origin: string; state: RunnerState; detail: string; title?: s
 /** origin → 상태 */
 export const useRunners = create<{ st: Record<string, Status> }>()(() => ({ st: {} }));
 
-const originOf = (url: string) => { try { return new URL(url).origin; } catch { return url; } };
+/** 덱 주인 이름 — 앱 링크면 claudeppt://<열쇠>, 아니면 origin (p2p.rs canon 과 같게). 공유 덱 목록 · 「내 Claude」 상태가 이것으로 덱 주인을 가린다 */
+export const originOf = (url: string) => {
+	const app = /^claudeppt:\/\/([^/?#]+)/i.exec(url.trim());
+	if (app) return `claudeppt://${app[1].toLowerCase()}`;
+	try { return new URL(url).origin; } catch { return url; }
+};
 export const runnerOf = (url: string) => useRunners.getState().st[originOf(url)];
 
 let wired = false;

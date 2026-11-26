@@ -1,6 +1,6 @@
 [package]
 name = "claudeppt"
-version = "0.12.0"
+version = "0.13.0"
 description = "Claude 와 대화하며 웹으로 PPT 를 짓고 PPTX 로 내보내는 작업대"
 authors = ["seesun"]
 license = "MIT"
@@ -49,6 +49,13 @@ tower-http = { version = "0.6", default-features = false, features = ["compressi
 # 내 PC 의 Claude 를 공유 덱에 붙이는 연결 (runner.rs). axum 이 이미 쓰는 판. 바깥 길(https)도 되게 rustls
 tokio-tungstenite = { version = "0.29", default-features = false, features = ["connect", "rustls-tls-webpki-roots"] }
 futures-util = { version = "0.3", default-features = false, features = ["sink"] }
+# 공유 덱을 앱끼리 잇는 길 (p2p.rs) — 주소가 아니라 앱의 열쇠로 직접 잇고, 안 되면 중계를 거친다. 늘 종단 간 암호화.
+# 설치 · 계정 없이 앱 안에서만 돈다 (PC 전체가 망에 붙지 않는다)
+iroh = { version = "1.5", default-features = false, features = ["tls-ring", "portmapper"] }
+
+[dev-dependencies]
+# 앱 명령 권한 시험 (lib.rs acl_tests) — 창 없이 IPC 를 흉내 낸다
+tauri = { version = "2", features = ["test"] }
 
 [target.'cfg(windows)'.dependencies]
 # 「내 Claude」 열쇠를 Windows 보호 저장(DPAPI)으로 싼다 (runner.rs).

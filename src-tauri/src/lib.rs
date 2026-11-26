@@ -16,6 +16,7 @@ mod fsx;
 mod imagegen;
 mod invite;
 mod metafile;
+mod p2p;
 mod project;
 mod pptsnap;
 mod runner;
@@ -51,6 +52,7 @@ pub fn run() {
 		.manage(control::Control::new())
 		.manage(collab::Collab::default())
 		.manage(runner::Runners::default())
+		.manage(p2p::P2p::default())
 		.setup(|app| {
 			// 통로를 못 열어도 앱은 그대로 쓴다 — 바깥 제어만 안 된다
 			if let Err(e) = control::start(app.handle()) {
@@ -114,6 +116,7 @@ pub fn run() {
 			collab::collab_tunnel,
 			collab::collab_tools,
 			collab::collab_join,
+			collab::collab_lan,
 			collab::claude_run_remote,
 			runner::runner_start,
 			runner::runner_stop,
@@ -234,4 +237,37 @@ pub type Res<T> = Result<T, String>;
 
 pub fn err<E: std::fmt::Display>(e: E) -> String {
 	e.to_string()
+}
+
+/// 앱 명령은 main 창만 부른다 (build.rs · capabilities/default.json) — 공유 덱 창이 앱 자신의 주소로 옮겨 가도 막힌다
+#[cfg(test)]
+mod acl_tests {
+	use tauri::ipc::{CallbackFn, InvokeBody};
+	use tauri::test::{INVOKE_KEY, get_ipc_response, mock_builder};
+	use tauri::webview::InvokeRequest;
+
+	fn call(cmd: &str, url: &str) -> InvokeRequest {
+		InvokeRequest { cmd: cmd.into(), callback: CallbackFn(0), error: CallbackFn(1), url: url.parse().unwrap(), body: InvokeBody::default(), headers: Default::default(), invoke_key: INVOKE_KEY.into() }
+	}
+
+	/// 권한은 명령 이름으로 본다 — 시험용 런타임에서 돌도록 같은 이름의 빈 명령을 쓴다
+	#[tauri::command]
+	fn runner_list() -> u32 {
+		1
+	}
+
+	#[test]
+	fn only_the_main_window_calls_app_commands() {
+		let app = mock_builder()
+			.invoke_handler(tauri::generate_handler![runner_list])
+			.build(tauri::generate_context!(test = true))
+			.unwrap();
+		let main = tauri::WebviewWindowBuilder::new(&app, "main", Default::default()).build().unwrap();
+		let join = tauri::WebviewWindowBuilder::new(&app, "join-x", Default::default()).build().unwrap();
+		let local = "http://tauri.localhost/";
+		assert!(get_ipc_response(&main, call("runner_list", local)).is_ok(), "main 창의 앱 화면은 부른다");
+		assert!(get_ipc_response(&join, call("runner_list", local)).is_err(), "공유 덱 창은 앱 주소로 옮겨 가도 못 부른다");
+		assert!(get_ipc_response(&join, call("runner_list", "http://abcdefghij0123456789.localhost:23456/")).is_err(), "출입구 주소에서도 못 부른다");
+		assert!(get_ipc_response(&main, call("runner_list", "http://10.0.0.5:47815/")).is_err(), "main 창이라도 남의 주소면 못 부른다");
+	}
 }

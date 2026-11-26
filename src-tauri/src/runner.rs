@@ -4,7 +4,8 @@
 //
 //   붙기      처음에는 공유 덱 창(collab_join)이 받은 기기 쿠키로 덱 주인의 /_/runner 에 붙고, 그때 「내 Claude」 전용 열쇠를 받는다.
 //             열쇠는 Windows 보호 저장(DPAPI · 이 PC 의 이 사용자만 푼다)으로 싸서 앱 데이터 runner-keys.json 에 둔다 — 다음부터는 창 없이 앱을 켜자마자 붙는다.
-//             열쇠는 /_/runner 에만 쓰인다(화면 · 의도에는 못 쓴다). 덱 주인이 기기를 내보내면 함께 무효 — 그때는 지우고 쿠키로 돌아간다
+//             열쇠는 /_/runner 에만 쓰인다(화면 · 의도에는 못 쓴다). 덱 주인이 기기를 내보내면 함께 무효 — 그때는 지우고 쿠키로 돌아간다.
+//             덱 주인은 이름(p2p::canon)으로 가린다 — 앱 링크면 claudeppt://<열쇠>, 붙을 때마다 이 PC 안 출입구 주소를 다시 얻는다 (p2p.rs reach)
 //   사본      앱 데이터 shared/<호스트>/<덱 id>/ 에 덱 파일을 받아 둔다. 처음 · 턴 시작마다 목록(manifest)을 맞추고, 그 사이에는 바뀐 경로만 받는다
 //   실행      지시(run)를 받으면 사본에서 claude 를 돌린다 — 격리 인자는 덱 주인 PC 와 같다(claude.rs execute). 작업 폴더 밖은 읽지도 쓰지도 못한다.
 //             claude 경로 · 모델 · 생각 깊이는 이 PC 의 설정을 쓴다 (사용량도 이 PC 의 계정)
@@ -78,7 +79,7 @@ fn save_key(origin: &str, key: Option<&str>) {
 
 /// Windows 보호 저장 — 이 PC 의 이 사용자로만 푼다. 파일이 새어도 다른 PC · 다른 사용자는 열쇠를 못 꺼낸다
 #[cfg(windows)]
-mod dpapi {
+pub(crate) mod dpapi {
 	use windows_sys::Win32::Foundation::LocalFree;
 	use windows_sys::Win32::Security::Cryptography::{CRYPT_INTEGER_BLOB, CryptProtectData, CryptUnprotectData};
 
@@ -110,7 +111,7 @@ mod dpapi {
 
 /// Windows 밖에서는 남기지 않는다 (이 앱은 Windows 용이다 — 시험 빌드만)
 #[cfg(not(windows))]
-mod dpapi {
+pub(crate) mod dpapi {
 	pub fn protect(_: &[u8]) -> Option<Vec<u8>> {
 		None
 	}
@@ -131,6 +132,7 @@ struct Handle {
 
 #[derive(Serialize, Clone)]
 pub struct Status {
+	/// 덱 주인 이름 (p2p::canon) — 화면의 공유 덱 목록이 이것으로 찾는다
 	origin: String,
 	/// waiting — 공유 덱 창에서 들어가기를 기다린다 · connected — 붙었다 · running — 턴을 돌린다 · error — 다시 붙는 중
 	state: &'static str,
@@ -152,7 +154,7 @@ fn set(app: &AppHandle, st: &Arc<Mutex<Status>>, state: &'static str, detail: im
 /// 켠다 — 이미 켜져 있으면 그대로
 #[tauri::command]
 pub fn runner_start(app: AppHandle, origin: String) -> Res<()> {
-	let origin = tauri::Url::parse(origin.trim()).map_err(|_| "주소가 올바르지 않다".to_string())?.origin().ascii_serialization();
+	let origin = crate::p2p::canon(&origin)?;
 	let r = app.state::<Runners>();
 	if r.list.lock().unwrap().contains_key(&origin) {
 		return Ok(());
@@ -167,7 +169,7 @@ pub fn runner_start(app: AppHandle, origin: String) -> Res<()> {
 
 #[tauri::command]
 pub fn runner_stop(app: AppHandle, origin: String) {
-	let origin = tauri::Url::parse(origin.trim()).map(|u| u.origin().ascii_serialization()).unwrap_or(origin);
+	let origin = crate::p2p::canon(&origin).unwrap_or(origin);
 	if let Some(h) = app.state::<Runners>().list.lock().unwrap().remove(&origin) {
 		let _ = h.stop.send(true);
 		let _ = app.emit("runner-status", Status { origin, state: "off", detail: String::new(), title: String::new() });
@@ -179,29 +181,39 @@ pub fn runner_list(app: AppHandle) -> Vec<Status> {
 	app.state::<Runners>().list.lock().unwrap().values().map(|h| h.status.lock().unwrap().clone()).collect()
 }
 
-/// 공유 덱 창이 받은 기기 쿠키 — 그 창이 열려 있어야 읽는다
-fn cookie(app: &AppHandle, origin: &str) -> Option<String> {
-	let w = app.get_webview_window(&crate::collab::join_label(origin))?;
+/// 공유 덱 창이 받은 기기 쿠키 — 그 창이 열려 있어야 읽는다. 창 이름은 덱 주인 이름(canon), 쿠키는 창이 연 주소(origin)에 있다
+fn cookie(app: &AppHandle, canon: &str, origin: &str) -> Option<String> {
+	let w = app.get_webview_window(&crate::collab::join_label(canon))?;
 	let url = tauri::Url::parse(&format!("{origin}/")).ok()?;
 	w.cookies_for_url(url).ok()?.into_iter().find(|c| c.name() == COOKIE).map(|c| c.value().to_string())
 }
 
 /// 끌 때까지 붙어 있는다 — 끊기면 다시 붙는다. 남겨 둔 열쇠가 있으면 그것으로, 없으면 공유 덱 창의 쿠키로
-async fn keep(app: AppHandle, origin: String, status: Arc<Mutex<Status>>, mut stop: tokio::sync::watch::Receiver<bool>) {
+async fn keep(app: AppHandle, canon: String, status: Arc<Mutex<Status>>, mut stop: tokio::sync::watch::Receiver<bool>) {
 	let mut wait = 1u64;
 	while !*stop.borrow() {
-		let cred = load_key(&origin).map(Cred::Key).or_else(|| cookie(&app, &origin).map(Cred::Cookie));
+		// 덱 주인에게 닿는 주소 — 앱 링크면 이 PC 안 출입구
+		let origin = match crate::p2p::reach(&app, &canon).await {
+			Ok(o) => o,
+			Err(e) => {
+				set(&app, &status, "error", e);
+				tokio::select! { _ = tokio::time::sleep(Duration::from_secs(wait)) => {}, _ = stop.changed() => {} }
+				wait = (wait * 2).min(15);
+				continue;
+			}
+		};
+		let cred = load_key(&canon).map(Cred::Key).or_else(|| cookie(&app, &canon, &origin).map(Cred::Cookie));
 		let Some(cred) = cred else {
 			set(&app, &status, "waiting", "");
 			tokio::select! { _ = tokio::time::sleep(Duration::from_secs(2)) => {}, _ = stop.changed() => {} }
 			continue;
 		};
-		match session(&app, &origin, &cred, &status, &mut stop).await {
+		match session(&app, &canon, &origin, &cred, &status, &mut stop).await {
 			Ok(()) => wait = 1,
 			Err(e) => {
 				// 열쇠를 받지 않는다(기기를 내보냄 · 덱 주인이 장부를 지움) — 지우고 바로 쿠키로 다시 해 본다
 				if e == UNAUTHORIZED && matches!(cred, Cred::Key(_)) {
-					save_key(&origin, None);
+					save_key(&canon, None);
 					wait = 1;
 					continue;
 				}
@@ -216,6 +228,8 @@ async fn keep(app: AppHandle, origin: String, status: Arc<Mutex<Status>>, mut st
 /// 덱 주인에게 HTTP 로 묻는다 — 기기 쿠키와 Origin 을 붙인다 (collab.rs auth · same_origin)
 #[derive(Clone)]
 struct Host {
+	/// 덱 주인 이름 (p2p::canon) — 열쇠를 이 이름으로 남긴다
+	name: String,
 	origin: String,
 	cred: Cred,
 	http: reqwest::Client,
@@ -236,7 +250,7 @@ impl Host {
 		if let Ok(r) = r {
 			if let Ok(j) = r.json::<Value>().await {
 				if let Some(key) = j["key"].as_str() {
-					save_key(&self.origin, Some(key));
+					save_key(&self.name, Some(key));
 				}
 			}
 		}
@@ -400,14 +414,27 @@ fn walk(root: &Path) -> Vec<String> {
 }
 
 /// 붙어 있는 한 번 — 끊기면 Err 로 돌아가 다시 붙는다
-async fn session(app: &AppHandle, origin: &str, cred: &Cred, status: &Arc<Mutex<Status>>, stop: &mut tokio::sync::watch::Receiver<bool>) -> Res<()> {
-	let host = Host { origin: origin.to_string(), cred: cred.clone(), http: reqwest::Client::builder().timeout(Duration::from_secs(60)).build().map_err(err)? };
+async fn session(app: &AppHandle, canon: &str, origin: &str, cred: &Cred, status: &Arc<Mutex<Status>>, stop: &mut tokio::sync::watch::Receiver<bool>) -> Res<()> {
+	// 출입구(*.localhost)는 Windows 가 이름을 못 찾는다 — 127.0.0.1 로 바로 잇고, 머리글(Host · Origin)은 창과 같게 둔다(collab.rs same_origin)
+	let gate = crate::p2p::direct(origin);
+	let mut http = reqwest::Client::builder().timeout(Duration::from_secs(60));
+	if let (Some(addr), Some(h)) = (gate, tauri::Url::parse(origin).ok().and_then(|u| u.host_str().map(String::from))) {
+		http = http.resolve(&h, addr);
+	}
+	let host = Host { name: canon.to_string(), origin: origin.to_string(), cred: cred.clone(), http: http.build().map_err(err)? };
 	let ws_url = format!("{}/_/runner", origin.replacen("http", "ws", 1));
 	let mut req = ws_url.into_client_request().map_err(err)?;
 	let (k, v) = cred.header();
 	req.headers_mut().insert(k, HeaderValue::from_str(&v).map_err(err)?);
 	req.headers_mut().insert("origin", HeaderValue::from_str(origin).map_err(err)?);
-	let (ws, _) = tokio_tungstenite::connect_async(req).await.map_err(|e| match e {
+	let up = match gate {
+		Some(addr) => match tokio::net::TcpStream::connect(addr).await {
+			Ok(tcp) => tokio_tungstenite::client_async(req, tokio_tungstenite::MaybeTlsStream::Plain(tcp)).await,
+			Err(e) => return Err(format!("덱 주인에게 붙지 못했다: {e}")),
+		},
+		None => tokio_tungstenite::connect_async(req).await,
+	};
+	let (ws, _) = up.map_err(|e| match e {
 		tokio_tungstenite::tungstenite::Error::Http(r) if r.status() == 401 || r.status() == 403 => UNAUTHORIZED.to_string(),
 		e => format!("덱 주인에게 붙지 못했다: {e}"),
 	})?;
@@ -415,7 +442,7 @@ async fn session(app: &AppHandle, origin: &str, cred: &Cred, status: &Arc<Mutex<
 	// 처음 붙었으면(쿠키) 열쇠를 받아 둔다 — 다음에는 공유 덱 창 없이 붙는다
 	host.take_key().await;
 
-	let key = crate::collab::join_label(origin);
+	let key = crate::collab::join_label(canon);
 	let mirror = Arc::new(tokio::sync::Mutex::new(Mirror { root: crate::control::data_dir().join("shared").join(&key), id: String::new(), dir: PathBuf::new(), known: HashMap::new(), title: String::new() }));
 	// 미리 받아 둔다 — 덱 주인이 아직 덱을 열지 않았으면 못 받아도 붙어 있는다(턴을 받을 때 다시 맞춘다)
 	let _ = mirror.lock().await.sync(&host).await;
@@ -679,7 +706,7 @@ mod tests {
 		}
 		let gets = Arc::new(std::sync::atomic::AtomicUsize::new(0));
 		let origin = fake_host(hd.clone(), gets.clone()).await;
-		let host = Host { origin: origin.clone(), cred: Cred::Key("k".into()), http: reqwest::Client::new() };
+		let host = Host { name: origin.clone(), origin: origin.clone(), cred: Cred::Key("k".into()), http: reqwest::Client::new() };
 		let mut m = Mirror { root: md.clone(), id: String::new(), dir: PathBuf::new(), known: HashMap::new(), title: String::new() };
 
 		// 처음 — 모두 받는다. 덱 id 폴더 아래에
@@ -720,7 +747,7 @@ mod tests {
 		assert!(!md.join("escape.txt").exists());
 
 		// 열쇠가 틀리면 받지 못한다
-		let bad = Host { origin, cred: Cred::Key("wrong".into()), http: reqwest::Client::new() };
+		let bad = Host { name: origin.clone(), origin, cred: Cred::Key("wrong".into()), http: reqwest::Client::new() };
 		assert!(m.sync(&bad).await.is_err());
 		let _ = std::fs::remove_dir_all(&t);
 	}

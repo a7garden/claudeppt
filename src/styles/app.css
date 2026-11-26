@@ -735,27 +735,46 @@ textarea.field { height: auto; padding: 8px 10px; line-height: 1.5; resize: vert
 .collab-pop .nm { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .collab-pop em { font-style: normal; color: var(--faint); }
 
-.collab-set { display: grid; gap: 10px; max-width: 560px; }
-.collab-set .field-row { display: flex; align-items: center; gap: 8px; }
-.collab-set .field-row .field { flex: 1; min-width: 0; font-size: 12px; }
-.collab-set .lbl { font-size: 12px; color: var(--dim); white-space: nowrap; }
 .collab-members { display: grid; gap: 6px; }
 
 /* 협업 브라우저 — 호스트가 덱을 열기 전 · 끊긴 동안 */
 .remote-wait { flex: 1; display: grid; place-items: center; color: var(--dim); font-size: 14px; }
 .collab-sec { display: grid; gap: 8px; padding-top: 10px; border-top: 1px solid var(--hair); }
-.collab-set .link-row { display: grid; grid-template-columns: 92px minmax(0, 1fr) auto auto; align-items: center; gap: 6px; font-size: 12px; }
-.collab-set .link-row .when { grid-column: 2 / -1; font-size: 11px; margin-top: -4px; }
-.collab-set .link-row.expired .field { opacity: 0.5; text-decoration: line-through; }
-.collab-set .link-row .who { color: var(--dim); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.collab-set .link-new { display: flex; gap: 6px; }
-.collab-set .link-new .field:first-child { flex: 1; min-width: 0; }
-.collab-set .rm:hover { color: var(--err); }
 .collab-members .nm { flex: 1; min-width: 0; }
 .collab-members .st { font-size: 11px; color: var(--faint); }
 .collab-members .st.on { color: var(--ok); }
-.collab-set .tun { font-size: 12px; color: var(--faint); white-space: nowrap; }
-.collab-set .tun.on { color: var(--ok); }
+/* 공유 창 (Collab.tsx SharePanel) — 제목 줄 「공유」. 맨 위 초대 링크 하나가 주인공이고, 링크 더 만들기 · 브라우저 팀원은 펼쳐서 본다 */
+.pop.share { width: 400px; gap: 12px; padding: 14px; max-height: calc(100vh - 80px); overflow-y: auto; }
+.share-h { font-size: 14px; }
+.share-name { display: flex; align-items: center; gap: 8px; font-size: 12px; color: var(--dim); }
+.share-name .field { flex: 1; min-width: 0; }
+.share-go { justify-self: start; height: 32px; padding: 0 16px; }
+.pop.share .lbl { font-size: 12px; color: var(--dim); }
+.pop.share section { display: grid; gap: 6px; }
+.pop.share .field-row { display: flex; align-items: center; gap: 8px; }
+.pop.share .field-row .field { flex: 1; min-width: 0; font-size: 12px; }
+.pop.share .field-row .tun { flex: 1; font-size: 12px; color: var(--faint); }
+.pop.share .field-row .tun.on { color: var(--ok); }
+.pop.share .note { font-size: 11.5px; color: var(--dim); line-height: 1.5; margin: 0; }
+.pop.share .collab-members { border-top: 1px solid var(--hair); padding-top: 10px; }
+.pop.share .collab-members .check { font-size: 12px; margin-top: 2px; }
+.pop.share .rm { font-size: 12px; color: var(--faint); }
+.pop.share .rm:hover { color: var(--err); }
+.share-more { display: flex; gap: 14px; border-top: 1px solid var(--hair); padding-top: 10px; }
+.share-more button { font-size: 12px; color: var(--dim); display: inline-flex; align-items: center; gap: 6px; }
+.share-more button::after { content: "▾"; font-size: 9px; color: var(--faint); }
+.share-more button[aria-expanded="true"] { color: var(--text); }
+.share-more button[aria-expanded="true"]::after { content: "▴"; }
+.share-more .dot { width: 6px; height: 6px; border-radius: 50%; background: var(--ok); }
+.share-sub { background: var(--raise); border-radius: 8px; padding: 10px; }
+.share-sub .link-row { display: grid; grid-template-columns: minmax(0, 1fr) auto auto auto auto; align-items: center; gap: 6px; font-size: 12px; }
+.share-sub .link-row .who { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.share-sub .link-row .when { font-size: 11px; }
+.share-sub .link-row.expired .who { opacity: 0.5; text-decoration: line-through; }
+.share-sub .link-new { display: flex; gap: 6px; }
+.share-sub .link-new .field:first-child { flex: 1; min-width: 0; }
+.share-foot { display: flex; align-items: center; justify-content: space-between; gap: 10px; border-top: 1px solid var(--hair); padding-top: 10px; font-size: 11.5px; }
+.share-foot button:hover { color: var(--err); }
 
 /* 서식 띠 (Ribbon.tsx) — 무대 맨 위 한 줄. 좁으면 다음 줄로 접힌다. 처음에는 접혀 있고 도구 띠의 「서식」(F)으로 편다 */
 .ribbon { position: relative; z-index: 4; display: flex; flex-wrap: wrap; align-items: center; gap: 1px; padding: 5px 6px 5px 8px; background: var(--raise); border-bottom: 1px solid var(--hair); animation: in 0.12s ease-out; }

@@ -10,15 +10,16 @@ import { useT } from "../lib/i18n";
 import { useSettings } from "../lib/settings";
 import { useDeck } from "../lib/store";
 import { call } from "../lib/transport";
-import { type RunnerState, setMine, useRunners } from "../lib/runner";
+import { originOf, type RunnerState, setMine, useRunners } from "../lib/runner";
 
-/** 공유 덱에 앱으로 들어간다 — 새 창이 뜬다. 들어간 호스트 주소를 남겨 다음에는 주소만으로 (기기 쿠키가 앱에 남는다) */
+/** 공유 덱에 앱으로 들어간다 — 새 창이 뜬다. 들어간 덱 주인을 남겨 다음에는 그것만으로 (기기 쿠키가 앱에 남는다).
+ *  앱 링크(claudeppt://<열쇠>)면 열쇠를, 브라우저 링크면 주소를 남긴다 (p2p.rs canon) */
 async function joinShared(raw: string) {
 	const url = raw.trim();
 	if (!url) return false;
 	try {
-		const origin = await call<string>("collab_join", { url });
-		const at = origin + "/";
+		const canon = await call<string>("collab_join", { url });
+		const at = canon.startsWith("claudeppt:") ? canon : canon + "/";
 		useSettings.getState().set((s) => ({ ...s, shared: [{ url: at, at: Date.now() }, ...s.shared.filter((x) => x.url !== at)].slice(0, 12) }));
 		return true;
 	} catch (e) {
@@ -39,6 +40,8 @@ export default function Home() {
 	// 공유 덱 열기 — 초대 링크 칸
 	const [joining, setJoining] = useState(false);
 	const [link, setLink] = useState("");
+	// 공유 덱 목록의 덱 주인 — 앱 링크는 열쇠 대신 「앱끼리 연결」, 브라우저 링크는 주소
+	const where = (u: string) => (u.startsWith("claudeppt:") ? t("sharedViaApp") : u.replace(/^https?:\/\//, "").replace(/\/$/, ""));
 
 	useEffect(() => {
 		(async () => {
@@ -129,8 +132,8 @@ export default function Home() {
 								<span className="shared-item" key={x.url}>
 									<button onClick={() => joinShared(x.url)} title={x.url}>
 										{/* 덱 제목은 「내 Claude」가 붙었을 때 덱 주인이 알려 준다 — 모르면 덱 주인 PC 주소 */}
-										<b className={x.title ? "t" : ""}>{x.title || x.url.replace(/^https?:\/\//, "").replace(/\/$/, "")}</b>
-										<span className="dim">{x.title ? `${x.url.replace(/^https?:\/\//, "").replace(/\/$/, "")} · ` : ""}{new Date(x.at).toLocaleDateString()}</span>
+										<b className={x.title ? "t" : ""}>{x.title || where(x.url)}</b>
+										<span className="dim">{x.title ? `${where(x.url)} · ` : ""}{new Date(x.at).toLocaleDateString()}</span>
 									</button>
 									<MineToggle url={x.url} on={!!x.mine} />
 									<button className="x" onClick={() => useSettings.getState().set((v) => ({ ...v, shared: v.shared.filter((y) => y.url !== x.url) }))} aria-label={t("delete")} title={t("sharedForget")}>×</button>
@@ -164,7 +167,7 @@ const RUNNER_LABEL: Record<RunnerState, "runnerWaiting" | "runnerConnected" | "r
 };
 function MineToggle({ url, on }: { url: string; on: boolean }) {
 	const t = useT();
-	const st = useRunners((r) => r.st[new URL(url).origin]);
+	const st = useRunners((r) => r.st[originOf(url)]);
 	return (
 		<label className={"mine" + (on ? " on" : "") + (st ? " " + st.state : "")} title={st?.detail || t("runnerUseHint")}>
 			<input type="checkbox" checked={on} onChange={() => setMine(url, !on).catch((e) => useDeck.getState().notify(String(e), "err"))} />
