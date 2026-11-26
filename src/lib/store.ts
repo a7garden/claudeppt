@@ -154,7 +154,6 @@ interface S {
 	fixDiff: (report: Report) => void;
 }
 
-let unlisten: (() => void)[] = [];
 /** 사건 리스너(deck-fs · claude)는 앱에 한 벌만 — 덱을 열 때마다 붙였다 떼면, openProject 가 겹쳐 불릴 때(다시 켠 뒤 덱 열기 + 사용자 클릭 등)
  *  두 벌 붙어 Claude 글자가 두 번 찍혔다. 받은 사건은 지금 연 덱(id) · 지금 도는 턴 것만 쓴다 */
 let listening: Promise<unknown> | null = null;
@@ -468,8 +467,6 @@ export const useDeck = create<S>()((set, get) => ({
 			while (get().running) await new Promise((r) => setTimeout(r, 200));
 		}
 		clearTimeout(directTimer);
-		unlisten.forEach((f) => f());
-		unlisten = [];
 		const { id } = get();
 		if (id) await api.close(id).catch(() => {});
 		set({ dir: "", id: "", deck: null, turns: [], sessions: [], bind: {}, talkKey: null, pins: [], versions: [], preview: null, running: null, vdiff: null });

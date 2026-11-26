@@ -11,6 +11,8 @@ import { type Key, useT } from "../lib/i18n";
 import { rethemeCss, themeVars, writeDeck } from "../lib/deck";
 import { type ImageProvider, type Template, templateId, useSettings } from "../lib/settings";
 import { useDeck } from "../lib/store";
+import { CollabSettings } from "./Collab";
+import { stopHost } from "../lib/collab";
 import { useUpdate } from "../lib/updater";
 
 type Tab = "general" | "templates" | "claude" | "image" | "connect" | "collab" | "update";
@@ -343,11 +345,16 @@ function Collab() {
 	const { s, set } = useSettings();
 	return (
 		<>
-			<Row k={t("collabUse")}><Seg value={s.collab.on ? 1 : 0} options={[{ v: 1, label: t("remoteOn") }, { v: 0, label: t("remoteOff") }]} onChange={(v) => set((x) => ({ ...x, collab: { ...x.collab, on: !!v } }))} /><span className="note" style={{ whiteSpace: "normal" }}>{t("collabUseHint")}</span></Row>
+			<Row k={t("collabUse")}><Seg value={s.collab.on ? 1 : 0} options={[{ v: 1, label: t("remoteOn") }, { v: 0, label: t("remoteOff") }]} onChange={(v) => {
+				set((x) => ({ ...x, collab: { ...x.collab, on: !!v } }));
+				// 끄면 열어 둔 같이 보기도 닫는다 — 꺼진 뒤에도 브라우저가 붙어 있으면 안 된다
+				if (!v) stopHost().catch(() => {});
+			}} /><span className="note" style={{ whiteSpace: "normal" }}>{t("collabUseHint")}</span></Row>
 			{s.collab.on && (
 				<>
 					<Row k={t("myName")}><input className="field" style={{ maxWidth: 200 }} placeholder={t("myNamePh")} value={s.me} onChange={(e) => set((x) => ({ ...x, me: e.target.value }))} /></Row>
 					<Row k=""><span className="note" style={{ whiteSpace: "normal" }}>{t("myNameNote")}</span></Row>
+					<CollabSettings />
 				</>
 			)}
 		</>
