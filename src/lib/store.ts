@@ -53,7 +53,17 @@ export interface Turn {
 	version?: { n: number; short: string; hash: string };
 	error?: string;
 	phase?: string;
+	/** 보낸 팀원 — 그 기기의 설정 「내 이름」 */
+	by?: string;
+	/** 이 턴이 이어 쓴 세션 (Session.key) */
+	session?: string;
 }
+/**
+ * 대화 세션 하나 — 팀원은 같은 Claude 계정을 쓰므로 세션을 사람마다 두지 않는다.
+ * 쪽은 처음 고친 세션으로 확정되고(bind), 그 뒤 누가 그 쪽을 고치든 그 세션을 이어 쓴다. 세션 하나가 여러 쪽을 맡을 수 있다.
+ * key 는 앱이 붙인 이름(s1 · s2 …), claude 는 Claude Code 의 세션 id (첫 턴이 돌아야 생긴다)
+ */
+export interface Session { key: string; claude: string | null; at: number }
 /** 화면 뒤에서 도는 긴 일(PPTX 가져오기) 하나. n 이 0 이면 아직 전체 양을 모른다 */
 export interface Job { id: string; label: string; i: number; n: number; note?: string }
 export interface Release { name: string; tag: string; n: number; hash: string; file: string; notes: string; at: string }
@@ -75,7 +85,12 @@ interface S {
 	insertReq: { text: string; whole?: boolean; k: number } | null;
 	pins: Pin[];
 	turns: Turn[];
-	sessionId: string | null;
+	sessions: Session[];
+	/** 쪽 id → 그 쪽을 처음 고친 세션 key */
+	bind: Record<string, string>;
+	/** 지금 대화 — 대화칸에 보이는 세션이자, 아직 어느 세션도 고치지 않은 쪽에 대한 요청이 가는 세션.
+	 *  마지막에 쓰인 세션 · 「새 대화」로 연 세션 · 세션 목록에서 고른 세션 */
+	talkKey: string | null;
 	running: string | null;
 	versions: Commit[];
 	releases: Release[];
@@ -111,6 +126,10 @@ interface S {
 	/** force — 앱 밖 Claude Code 가 방금 이 덱을 다뤘어도 보낸다 (알림의 「그래도 보내기」) */
 	send: (text: string, attachments?: string[], force?: boolean) => Promise<void>;
 	stop: () => void;
+	/** 새 세션을 열어 지금 대화로 삼는다 — 대화칸이 빈 새 대화가 된다 */
+	newTalk: () => void;
+	/** 그 세션의 대화를 본다 — 지금 대화가 된다 (처음 고치는 쪽이 이 세션으로 간다) */
+	viewSession: (key: string) => void;
 	applyDirect: (slideId: string, path: number[] | null, op: Op) => Promise<void>;
 	/** 손으로 고친 것(끌기 · 방향키 이동 · 글 고치기 · 지우기)을 한 걸음 되돌린다 (Ctrl+Z) · 다시 한다 (Ctrl+Y) */
 	undo: () => Promise<void>;
@@ -203,7 +222,7 @@ function directCommit(dir: string, get: () => S) {
 	const flush = async () => {
 		if (get().dir !== dir) return;
 		if (get().running) { directTimer = setTimeout(flush, 2000); return; }
-		await api.commit(dir, tNow("direct")).catch(() => null);
+		await api.commit(dir, tNow("direct"), me()).catch(() => null);
 		get().refreshVersions();
 	};
 	directTimer = setTimeout(flush, 4000);
@@ -236,8 +255,44 @@ export const sameDir = (a: string, b: string) => {
 };
 
 const persistPins = (dir: string, pins: Pin[]) => api.writeText(dir, ".claudeppt/pins.json", JSON.stringify(pins, null, 1)).catch(() => {});
-const persistTalk = (dir: string, turns: Turn[], sessionId: string | null) =>
-	api.writeText(dir, ".claudeppt/talk.json", JSON.stringify({ sessionId, turns: turns.map((t) => (t.status === "running" ? { ...t, status: "stopped" } : t)) }, null, 1)).catch(() => {});
+/** .claudeppt/talk.json — sessionId 는 세션이 하나뿐이던 때(2026.11.25 전)의 칸. 옛 앱도 읽게 지금 대화의 세션을 적어 둔다 */
+type TalkFile = { turns: Turn[]; sessions?: Session[]; bind?: Record<string, string>; talkKey?: string | null; sessionId?: string | null };
+const persistTalk = (dir: string, st: Pick<S, "turns" | "sessions" | "bind" | "talkKey">) => {
+	const file: TalkFile = {
+		sessions: st.sessions,
+		bind: st.bind,
+		talkKey: st.talkKey,
+		sessionId: st.sessions.find((x) => x.key === st.talkKey)?.claude ?? null,
+		turns: st.turns.map((t) => (t.status === "running" ? { ...t, status: "stopped" } : t)),
+	};
+	return api.writeText(dir, ".claudeppt/talk.json", JSON.stringify(file, null, 1)).catch(() => {});
+};
+/** 다음 세션 — s1 · s2 … */
+const nextSession = (list: Session[]): Session => ({ key: "s" + (Math.max(0, ...list.map((x) => Number(x.key.slice(1)) || 0)) + 1), claude: null, at: Date.now() });
+/** 「설정 › 협업」이 켜져 있나 — 꺼져 있으면 세션 하나 · 이름 없이 전처럼 돈다 */
+export const team = () => useSettings.getState().s.collab.on;
+/** 이 기기를 쓰는 팀원 — 협업을 켰을 때만. 판의 작성자로도 남긴다 (꺼져 있으면 빈 글 → 판 작성자는 전처럼 ClaudePPT) */
+export const me = () => (team() ? useSettings.getState().s.me.trim() : "");
+
+/**
+ * 이 요청이 갈 세션 — 보내기와 요청칸의 「보낼 곳」 미리보기가 같은 규칙을 쓴다.
+ * 협업을 켜면: 요청이 가리키는 쪽(@쪽 → 핀을 꽂은 쪽 → 지금 보는 쪽)을 처음 고친 세션이 있으면 그 세션을 잇는다 — 다른 팀원이 쓰던 세션이어도.
+ * 처음 보는 쪽이면 지금 대화(마지막에 쓰인 세션 · 「새 대화」로 연 세션). 꺼져 있으면 늘 지금 대화.
+ * 세션이 하나도 없으면 key 가 null — 보낼 때 새로 연다.
+ * via 는 세션을 정한 쪽의 번호 (지금 대화로 가면 없음)
+ */
+export function routeOf(st: Pick<S, "deck" | "current" | "pins" | "bind" | "sessions" | "talkKey">, text: string): { key: string | null; via?: number } {
+	const live = (k?: string | null) => !!k && st.sessions.some((x) => x.key === k);
+	const talk = live(st.talkKey) ? st.talkKey : st.sessions.at(-1)?.key ?? null;
+	const deck = st.deck;
+	if (!deck || !team()) return { key: talk };
+	const mentions = mentionsIn(text, deck);
+	const cur = deck.slides[st.current];
+	const targets = mentions.length ? mentions.map((m) => m.id) : st.pins.length ? st.pins.map((p) => p.slide) : cur ? [cur.id] : [];
+	const hit = targets.find((id) => live(st.bind[id]));
+	if (hit) return { key: st.bind[hit], via: deck.slides.findIndex((x) => x.id === hit) + 1 };
+	return { key: talk };
+}
 /** 답 글자 조각을 잠깐(30ms) 모았다 한 번에 넣는다. 조각마다 turns 를 바꾸면 대화 · 쪽 목록이 조각 수만큼 다시 그려진다.
  *  requestAnimationFrame 이 아니라 타이머 — 창을 내리거나 가려도 글자가 쌓이게 */
 const pendingText = new Map<string, string>();
@@ -278,7 +333,9 @@ export const useDeck = create<S>()((set, get) => ({
 	insertReq: null,
 	pins: [],
 	turns: [],
-	sessionId: null,
+	sessions: [],
+	bind: {},
+	talkKey: null,
 	running: null,
 	versions: [],
 	releases: [],
@@ -298,14 +355,19 @@ export const useDeck = create<S>()((set, get) => ({
 		const id = await api.open(dir);
 		await api.vcsInit(dir);
 		const pins = await readJson<Pin[]>(dir, ".claudeppt/pins.json", []);
-		const talk = await readJson<{ sessionId: string | null; turns: Turn[] }>(dir, ".claudeppt/talk.json", { sessionId: null, turns: [] });
+		const talk = await readJson<TalkFile>(dir, ".claudeppt/talk.json", { turns: [] });
+		// 2026.11.25 전 talk.json 은 세션 하나(sessionId)뿐이었다 — 그 세션을 세션 1 로 옮기고 지난 턴을 그 세션에 단다.
+		// 쪽 확정(bind)은 비워 둔다 — 그 쪽들은 다음에 고칠 때 지금 대화(= 세션 1)로 가서 확정된다
+		const sessions: Session[] = talk.sessions ?? (talk.sessionId ? [{ key: "s1", claude: talk.sessionId, at: 0 }] : []);
+		const turns = talk.sessions ? talk.turns : talk.turns.map((t) => ({ ...t, session: t.session ?? sessions[0]?.key }));
+		const talkKey = talk.talkKey ?? sessions.at(-1)?.key ?? null;
 		const releases = await readJson<Release[]>(dir, "releases/releases.json", []);
 		clearUndo();
-		set({ dir, id, deck, rev: {}, current: 0, mode: "edit", tool: "select", pins, turns: talk.turns, sessionId: talk.sessionId, versions: [], releases, preview: null, vdiff: null });
+		set({ dir, id, deck, rev: {}, current: 0, mode: "edit", tool: "select", pins, turns, sessions, bind: talk.bind ?? {}, talkKey, versions: [], releases, preview: null, vdiff: null });
 		useSettings.getState().remember(dir);
 		// 처음 여는 프로젝트(가져오기 직후)면 첫 판을 남긴다
 		const log = await api.log(dir, 1);
-		if (!log.length) await api.commit(dir, deck.source?.kind === "pptx" ? "PPTX 가져옴" : "새로 만듦");
+		if (!log.length) await api.commit(dir, deck.source?.kind === "pptx" ? "PPTX 가져옴" : "새로 만듦", me());
 		await get().refreshVersions();
 		listening ??= Promise.all([
 			listen<{ id: string; paths: string[] }>("deck-fs", async (e) => {
@@ -339,7 +401,12 @@ export const useDeck = create<S>()((set, get) => ({
 				// 글자가 아닌 사건(새 말 덩이 · 도구 · 끝) 앞에서는 모아 둔 글자를 먼저 넣는다 — 순서가 바뀌지 않게
 				if (!delta) flushText(get, set);
 				const patch = (fn: (t: Turn) => Turn) => set({ turns: get().turns.map((t) => (t.id === turn ? fn(t) : t)) });
-				if (m.type === "system" && m.subtype === "init" && m.session_id) set({ sessionId: m.session_id });
+				// Claude Code 의 세션 id 는 이 턴이 이어 쓴 세션에 적는다 — 다음에 그 세션을 이을 때 쓴다
+				const keep = (sid: string) => {
+					const key = get().turns.find((t) => t.id === turn)?.session;
+					if (key) set({ sessions: get().sessions.map((x) => (x.key === key ? { ...x, claude: sid } : x)) });
+				};
+				if (m.type === "system" && m.subtype === "init" && m.session_id) keep(m.session_id);
 				else if (m.type === "stream_event" && m.event?.type === "content_block_delta" && m.event.delta?.type === "text_delta") {
 					queueText(get, set, turn, m.event.delta.text);
 				} else if (m.type === "stream_event" && m.event?.type === "message_start") {
@@ -349,7 +416,7 @@ export const useDeck = create<S>()((set, get) => ({
 					const uses = (m.message?.content || []).filter((c: any) => c.type === "tool_use");
 					if (uses.length) patch((t) => ({ ...t, tools: [...t.tools, ...uses.map((u: any) => ({ name: u.name, file: relOf(get().dir, u.input?.file_path || u.input?.path || u.input?.pattern) }))] }));
 				} else if (m.type === "result") {
-					if (m.session_id) set({ sessionId: m.session_id });
+					if (m.session_id) keep(m.session_id);
 					patch((t) => ({ ...t, cost: m.total_cost_usd, reply: (t.reply.trim() || m.result || "").trim(), error: m.is_error ? m.result || "error" : t.error }));
 				}
 			}),
@@ -384,7 +451,7 @@ export const useDeck = create<S>()((set, get) => ({
 		unlisten = [];
 		const { id } = get();
 		if (id) await api.close(id).catch(() => {});
-		set({ dir: "", id: "", deck: null, turns: [], pins: [], versions: [], preview: null, running: null, vdiff: null });
+		set({ dir: "", id: "", deck: null, turns: [], sessions: [], bind: {}, talkKey: null, pins: [], versions: [], preview: null, running: null, vdiff: null });
 		// 닫은 덱의 슬라이드 창은 더 말을 받지 않는다 — 남은 것을 비운다
 		get().frames.clear();
 	},
@@ -469,6 +536,12 @@ export const useDeck = create<S>()((set, get) => ({
 		const { dir, deck, pins, running, current } = get();
 		if (!deck || running) return;
 		if (!text.trim() && !pins.length && !attachments.length) return;
+		// 협업을 켰으면 누가 보냈는지 남겨야 한다 — 이름이 없으면 보내지 않는다 (요청칸 위에 이름 칸이 뜬다)
+		const by = me();
+		if (team() && !by) {
+			if (text.trim()) get().refill(text);
+			return get().notify(tNow("myNameAsk"), "err");
+		}
 		// 앱 밖 Claude Code 가 방금 이 덱을 다뤘으면 한 번 묻는다 — 그쪽이 고치던 파일이 이 턴의 판에 섞이고, 같은 쪽을 둘이 고치면 한쪽이 덮인다.
 		// 요청칸은 보내며 비워지므로 글을 되돌려 놓는다
 		const out = get().outside;
@@ -485,14 +558,27 @@ export const useDeck = create<S>()((set, get) => ({
 		const s = useSettings.getState().s;
 		// 직접 편집이 남아 있으면 먼저 판으로 — Claude 의 판과 섞이지 않게
 		clearTimeout(directTimer);
-		await api.commit(dir, tNow("direct")).catch(() => {});
+		await api.commit(dir, tNow("direct"), by).catch(() => {});
 		const order = (id: string) => deck.slides.findIndex((x) => x.id === id) + 1;
 		const notes: PinNote[] = pins.map((p, i) => ({ n: i + 1, slide: p.slide, slideNo: order(p.slide), x: p.x, y: p.y, text: p.text, target: p.target, shape: p.shape }));
 		const cur = deck.slides[current];
 		const mentions = mentionsIn(text, deck);
 		const versionMentions = versionMentionsIn(text, get().versions);
-		const turn: Turn = { id: "t" + Date.now().toString(36), at: Date.now(), request: text.trim(), pins: notes, mentions, versionMentions, attach: attachments.length ? [...attachments] : undefined, reply: "", tools: [], status: "running" };
-		set({ turns: [...get().turns, turn], running: turn.id, pins: [] });
+		// 세션 고르기 (routeOf). 보고 있던 대화와 다른 세션으로 가면 알리고, 대화칸도 그 세션으로 옮긴다 — 보낸 요청이 보이게
+		const route = routeOf(get(), text);
+		let { sessions } = get();
+		let key = route.key;
+		if (!key) {
+			const ns = nextSession(sessions);
+			sessions = [...sessions, ns];
+			key = ns.key;
+			set({ sessions });
+		}
+		if (get().talkKey && key !== get().talkKey && route.via) get().notify(tNow("routedTo").replace("{no}", String(route.via)).replace("{n}", key.slice(1)), "ok");
+		const session = sessions.find((x) => x.key === key)!;
+		const turn: Turn = { id: "t" + Date.now().toString(36), at: Date.now(), request: text.trim(), pins: notes, mentions, versionMentions, attach: attachments.length ? [...attachments] : undefined, reply: "", tools: [], status: "running", by: by || undefined, session: key };
+		// 지금 대화 = 마지막에 쓰인 세션
+		set({ turns: [...get().turns, turn], running: turn.id, pins: [], talkKey: key });
 		persistPins(dir, []);
 		const patch = (fn: (t: Turn) => Turn) => set({ turns: get().turns.map((t) => (t.id === turn.id ? fn(t) : t)) });
 
@@ -512,12 +598,13 @@ export const useDeck = create<S>()((set, get) => ({
 			const r = await api.claudeRun({
 				turn: turn.id,
 				dir,
-				prompt: turnPrompt(text, notes, cur ? { id: cur.id, no: current + 1 } : null, attachments, mentions, vlines, deck),
+				// 협업을 켜면 한 세션을 여러 팀원이 이어 쓰므로 누가 시킨 것인지 알린다 — 「아까 말한 것」이 누구 말인지 가린다
+				prompt: (by ? `Request from teammate: ${by}\n\n` : "") + turnPrompt(text, notes, cur ? { id: cur.id, no: current + 1 } : null, attachments, mentions, vlines, deck),
 				system: systemPrompt(s, deck),
 				claudePath: s.claude.path,
 				model: s.claude.model,
 				effort: s.claude.effort,
-				resume: get().sessionId,
+				resume: session.claude,
 			});
 			flushText(get, set);
 			const t0 = get().turns.find((t) => t.id === turn.id)!;
@@ -530,16 +617,39 @@ export const useDeck = create<S>()((set, get) => ({
 				const errs = await fillGenerated(dir, fresh, s, (p) => patch((t) => ({ ...t, phase: `${tNow("generating")} · ${p}` })));
 				if (errs.length) patch((t) => ({ ...t, error: [t.error, ...errs].filter(Boolean).join("\n") }));
 			}
+			// 이 턴이 처음 고친 쪽은 이 세션으로 확정한다 — 이미 다른 세션에 확정된 쪽은 그대로 둔다
+			const wrote = new Set(get().turns.find((t) => t.id === turn.id)!.tools.filter((x) => x.name === "Write" || x.name === "Edit" || x.name === "MultiEdit").map((x) => x.file));
+			const bind = { ...get().bind };
+			for (const sl of fresh.slides) if (wrote.has(sl.file) && !bind[sl.id]) bind[sl.id] = key;
+			set({ bind });
 			const summary = (text.trim() || notes.map((n) => n.text).join(" · ") || "핀").replace(/\s+/g, " ").slice(0, 72);
-			const c = await api.commit(dir, summary).catch(() => null);
+			const c = await api.commit(dir, summary, by).catch(() => null);
 			patch((t) => ({ ...t, status, phase: undefined, version: c ? { n: c.n, short: c.short, hash: c.hash } : undefined }));
 		} catch (e) {
 			patch((t) => ({ ...t, status: "failed", error: String(e) }));
 		} finally {
 			set({ running: null });
-			persistTalk(dir, get().turns, get().sessionId);
+			persistTalk(dir, get());
 			get().refreshVersions();
 		}
+	},
+
+	newTalk: () => {
+		const { dir, sessions, talkKey, turns } = get();
+		if (!dir) return;
+		// 지금 대화가 아직 한 번도 쓰이지 않았으면 새로 만들지 않는다 — 빈 세션이 쌓이지 않게
+		const cur = sessions.find((x) => x.key === talkKey);
+		const ns = cur && !cur.claude && !turns.some((t) => t.session === cur.key) ? cur : nextSession(sessions);
+		if (ns !== cur) set({ sessions: [...sessions, ns], talkKey: ns.key });
+		persistTalk(dir, get());
+		get().notify(tNow("newTalkDone").replace("{n}", ns.key.slice(1)), "ok");
+	},
+
+	viewSession: (key) => {
+		const { dir, sessions } = get();
+		if (!dir || !sessions.some((x) => x.key === key)) return;
+		set({ talkKey: key });
+		persistTalk(dir, get());
 	},
 
 	stop: () => {
@@ -582,7 +692,7 @@ export const useDeck = create<S>()((set, get) => ({
 		set({ busy: tNow("restore") });
 		clearUndo();
 		try {
-			await api.restore(dir, c.hash, `v${c.n} 판으로 되돌림`);
+			await api.restore(dir, c.hash, `v${c.n} 판으로 되돌림`, me());
 			set({ preview: null, vdiff: null, deck: await readDeck(dir) });
 			await get().refreshVersions();
 		} catch (e) {
@@ -664,7 +774,7 @@ export const useDeck = create<S>()((set, get) => ({
 		// 손으로 고친 것이 남아 있으면 먼저 판으로 — 「지금」이 판 목록의 맨 위와 같아야 헷갈리지 않는다.
 		// 직전 판은 그 뒤에 고른다 — 먼저 고르면 방금 남긴 판 하나를 건너뛴다
 		clearTimeout(directTimer);
-		if (!get().running) { await api.commit(dir, tNow("direct")).catch(() => null); await get().refreshVersions(); }
+		if (!get().running) { await api.commit(dir, tNow("direct"), me()).catch(() => null); await get().refreshVersions(); }
 		const versions = get().versions;
 		const c = base ?? versions[1];
 		if (!c || c.hash === versions[0]?.hash) return get().notify(tNow("vsNoBase"), "err");
@@ -692,11 +802,11 @@ export const useDeck = create<S>()((set, get) => ({
 		clearUndo();
 		clearTimeout(directTimer);
 		try {
-			await api.commit(dir, tNow("direct")).catch(() => null);
+			await api.commit(dir, tNow("direct"), me()).catch(() => null);
 			const next = await restoreSlideFile(dir, id, deck, vdiff, slideId);
 			if (next !== deck) await get().saveDeck(next);
 			const no = next.slides.findIndex((x) => x.id === slideId) + 1;
-			await api.commit(dir, `${no}쪽을 v${vdiff.base.n} 판으로 되돌림`);
+			await api.commit(dir, `${no}쪽을 v${vdiff.base.n} 판으로 되돌림`, me());
 			await get().refreshVersions();
 			if (no > 0) get().setCurrent(no - 1);
 			set({ vdiff: await diffVersion(dir, id, get().deck!, vdiff.base) });
@@ -740,7 +850,7 @@ export const useDeck = create<S>()((set, get) => ({
 /** 릴리즈 하나 — 남은 변경을 판으로 남기고, PPTX 를 releases/ 에 굽고, 기록 · 태그를 단다.
  *  앱의 「릴리즈」 단추와 바깥 CLI(remote.ts)가 함께 쓴다. prev 는 지금까지의 releases.json */
 export async function makeRelease(dir: string, id: string, deck: Deck, prev: Release[], name: string, notes: string, progress: (i: number, n: number) => void, onBuilt?: (b: Built) => void): Promise<Release> {
-	await api.commit(dir, tNow("direct")).catch(() => null);
+	await api.commit(dir, tNow("direct"), me()).catch(() => null);
 	const log = await api.log(dir);
 	const head = log[0];
 	// 번호는 git 태그에서 — releases.json 이 지워지거나 어긋나도 같은 r<k> 를 두 번 달지 않는다
@@ -755,7 +865,7 @@ export async function makeRelease(dir: string, id: string, deck: Deck, prev: Rel
 	onBuilt?.(b);
 	const rel: Release = { name: name.trim() || tag, tag, n: head.n, hash: head.hash, file, notes: notes.trim(), at: new Date().toISOString() };
 	await api.writeText(dir, "releases/releases.json", JSON.stringify([...prev, rel], null, 2) + "\n");
-	await api.commit(dir, `릴리즈 ${tag} · ${rel.name}`);
+	await api.commit(dir, `릴리즈 ${tag} · ${rel.name}`, me());
 	await api.tag(dir, tag);
 	return rel;
 }
