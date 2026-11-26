@@ -13,7 +13,7 @@ import { type ImageProvider, type Template, templateId, useSettings } from "../l
 import { useDeck } from "../lib/store";
 import { useUpdate } from "../lib/updater";
 
-type Tab = "general" | "templates" | "claude" | "image" | "connect" | "update";
+type Tab = "general" | "templates" | "claude" | "image" | "connect" | "collab" | "update";
 
 function Seg<T extends string | number>({ value, options, onChange }: { value: T; options: { v: T; label: string }[]; onChange: (v: T) => void }) {
 	return (
@@ -30,8 +30,8 @@ function Row({ k, children }: { k: string; children: React.ReactNode }) {
 export default function Settings({ onClose }: { onClose: () => void }) {
 	const t = useT();
 	const [tab, setTab] = useState<Tab>("general");
-	const tabs: Tab[] = ["general", "templates", "claude", "image", "connect", "update"];
-	const names: Record<Tab, Key> = { general: "general", templates: "templates", claude: "claude", image: "image", connect: "connect", update: "update" };
+	const tabs: Tab[] = ["general", "templates", "claude", "image", "connect", "collab", "update"];
+	const names: Record<Tab, Key> = { general: "general", templates: "templates", claude: "claude", image: "image", connect: "connect", collab: "collab", update: "update" };
 	return (
 		<div className="settings" role="dialog" aria-label={t("settings")}>
 			<nav>
@@ -45,6 +45,7 @@ export default function Settings({ onClose }: { onClose: () => void }) {
 				{tab === "claude" && <Claude />}
 				{tab === "image" && <Images />}
 				{tab === "connect" && <Connect />}
+				{tab === "collab" && <Collab />}
 				{tab === "update" && <Update />}
 			</div>
 		</div>
@@ -332,6 +333,23 @@ function Connect() {
 					))}
 				</div>
 			</div>
+		</>
+	);
+}
+
+/** 협업 — 꺼져 있으면(기본) 전처럼 대화 세션 하나 · 이름 없이 돈다. 켜면 팀원 세션과 보낸 사람 이름 */
+function Collab() {
+	const t = useT();
+	const { s, set } = useSettings();
+	return (
+		<>
+			<Row k={t("collabUse")}><Seg value={s.collab.on ? 1 : 0} options={[{ v: 1, label: t("remoteOn") }, { v: 0, label: t("remoteOff") }]} onChange={(v) => set((x) => ({ ...x, collab: { ...x.collab, on: !!v } }))} /><span className="note" style={{ whiteSpace: "normal" }}>{t("collabUseHint")}</span></Row>
+			{s.collab.on && (
+				<>
+					<Row k={t("myName")}><input className="field" style={{ maxWidth: 200 }} placeholder={t("myNamePh")} value={s.me} onChange={(e) => set((x) => ({ ...x, me: e.target.value }))} /></Row>
+					<Row k=""><span className="note" style={{ whiteSpace: "normal" }}>{t("myNameNote")}</span></Row>
+				</>
+			)}
 		</>
 	);
 }
