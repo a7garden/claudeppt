@@ -44,7 +44,7 @@ $CPPT help
 | `shot [--slides 1,3-5] [--scale 1] [--out <폴더>]` | 쪽을 브라우저가 그린 그대로 PNG 로 (기본 `.claudeppt/shots/<n>.png`) | 띄운다 |
 | `inspect [--slides …]` | PPTX 로 나갈 때 그림으로 굳는 것(`baked`) · 쪽 밖으로 넘친 것(`overflow`) | 띄운다 |
 | `export <out.pptx> [--exact]` | PPTX 로 내보낸다. `--exact` 는 모양 그대로(그림 + 투명 글상자, 편집 불가) | 띄운다 |
-| `audit` | 쪽마다 템플릿을 벗어난 곳(글꼴 · 색 · 위계 · 모서리 · 여백)과 AI 티(긴 대시 · 이모지 · 상투어 · 그라데이션 · 같은 꼴 카드 …)를 짚는다 · `prompt` 는 고칠 거리 글 | 띄운다 |
+| `audit` | 점검: 쪽마다 서식(템플릿에 없는 글꼴 · 색 · 크기 · 모서리) · 배치(여백 · 넘침 · 제목 위치) · 표현(긴 줄표 · 이모지 · 상투적 표현 · 그라데이션 · 똑같은 카드 …)에 걸린 곳을 짚는다 · `prompt` 는 고칠 거리 글(덱의 추가 지시 `.claudeppt/audit/note.md` 포함) | 띄운다 |
 | `check` | PPTX 를 PowerPoint 로 그려 웹과 픽셀로 견준다 (PowerPoint 필요) · 쪽마다 차이 % 와 web/ppt/diff 그림 경로 · 그림으로 굳은 요소(`locked`)와 그 넓이 %(`stiff`) | 띄운다 |
 | `release [--name …] [--notes …]` | 릴리즈 r<k> — `releases/r<k>-v<n>.pptx` + git 태그 | 띄운다 |
 
@@ -103,7 +103,7 @@ $CPPT help
 
 - 오프라인 전용 — 바깥 URL · CDN · 웹 글꼴 · `<script>` 를 넣지 않는다.
 - 색 · 글꼴 · 모서리는 theme.css 변수로만 쓰고, 글자 크기 · 굵기는 .t-* 클래스로 준다. 되풀이되는 모양은 theme.css 의 템플릿 구획 아래에 작은 class 로 둔다.
-- 다 고친 뒤 `audit` 으로 템플릿을 벗어난 곳 · AI 티가 나는 곳이 남았는지 본다. 돌려준 `prompt` 가 고칠 거리 목록이다.
+- 다 고친 뒤 `audit` 으로 규칙에 걸린 곳이 남았는지 본다. 돌려준 `prompt` 가 고칠 거리 목록이다. 덱에 쪽 설정(`deck.json` 의 `page.margin`)이 있으면 쪽 여백은 `var(--margin-t)` · `-r` · `-b` · `-l` 로 쓴다.
 
 ## PPTX 로 잘 나가게
 

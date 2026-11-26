@@ -23,7 +23,7 @@ import { useSettings } from "../lib/settings";
 import { isMine, routeOf, type Turn, useDeck } from "../lib/store";
 import { noteDraft } from "../lib/updater";
 import { remote } from "../lib/transport";
-import { useCollab } from "../lib/collab";
+import { useCollab, useMine } from "../lib/collab";
 
 /** 사이드바 접힘 — 보는 사람의 편의라 이 PC 에만 남긴다. seen 은 접을 때 본 마지막 턴(그 뒤 끝난 턴이 「새 답」) */
 interface Fold { folded: boolean; seen: string | null; draft: boolean; set: (v: boolean) => void }
@@ -55,8 +55,11 @@ export default function Talk() {
 	const [list, setList] = useState(false);
 	// 「설정 › 협업」을 켰을 때만 세션을 나눠 보인다. 꺼져 있으면 전처럼 대화 하나
 	const team = useSettings((x) => x.s.collab.on);
-	// 대화칸은 한 세션의 대화만 — 「새 대화」면 빈 대화가 열린다. 세션을 고르면 그 세션의 대화
-	const turns = useMemo(() => (team && talkKey ? all.filter((x) => (x.session ?? sessions[0]?.key) === talkKey) : all), [team, all, sessions, talkKey]);
+	// 대화칸은 한 세션의 대화만 — 「새 대화」면 빈 대화가 열린다. 세션을 고르면 그 세션의 대화.
+	// 2026.11.26 : 협업을 꺼도 대화를 나눈다. 전에는 「새 대화」가 협업을 켜야만 보여, 새로 시작하는 길을 찾지 못했다
+	const turns = useMemo(() => (talkKey ? all.filter((x) => (x.session ?? sessions[0]?.key) === talkKey) : all), [all, sessions, talkKey]);
+	// 지금 대화가 비었으면 새 대화를 열 까닭이 없다 (store.newTalk 도 빈 세션을 다시 쓴다)
+	const fresh = turns.length === 0;
 	const logRef = useRef<HTMLDivElement>(null);
 	const stick = useRef(true);
 	useEffect(() => {
@@ -81,22 +84,24 @@ export default function Talk() {
 			{/* 접혀도 내리지 않는다 — 요청칸의 쓰던 글 · 첨부 · 고르기 상태를 잃지 않게 숨기기만 한다 */}
 			<div className="talk-body" hidden={folded}>
 				<header className="talk-head">
-					<b>{t("talk")}</b>
-					{/* 지금 보는 세션 — 누르면 세션 목록 */}
-					{team && talkKey && (
+					{/* 지금 보는 대화 — 누르면 대화 목록(지난 대화로 돌아간다). 대화가 하나뿐이면 이름만 */}
+					{talkKey && sessions.length > 1 ? (
 						<button className={"talk-sess" + (list ? " on" : "")} onClick={() => setList(!list)} aria-expanded={list} title={t("sessionList")}>
 							{t("sessionN").replace("{n}", talkKey.slice(1))}<span aria-hidden>▾</span>
 						</button>
-					)}
+					) : <b>{t("talk")}</b>}
 					{/* 지금 판 번호는 제목 줄에 있다 — 여기서는 이 대화의 턴 수만 */}
 					{turns.length > 0 && <span className="mono">{turns.length}{t("talkTurns")}</span>}
 					{/* 협업 중이면 덱의 열린 의견 — 누가 · 몇 쪽 · 무엇 (Collab.tsx) */}
 					<CommentsButton />
-					{team && turns.length > 0 && <button className="talk-new" onClick={() => { setList(false); useDeck.getState().newTalk(); }} title={t("newTalkHint")}>{t("newTalk")}</button>}
+					<button className="talk-new" disabled={fresh} onClick={() => { setList(false); useDeck.getState().newTalk(); }} title={fresh ? t("newTalkEmpty") : team ? t("newTalkHintTeam") : t("newTalkHint")}>
+						<svg width="12" height="12" viewBox="0 0 16 16" aria-hidden><path d="M8 3v10M3 8h10" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" /></svg>
+						{t("newTalk")}
+					</button>
 					<button className="talk-fold" onClick={() => useTalkFold.getState().set(true)} aria-expanded={true} title={`${t("talkFold")} (Ctrl+B)`} aria-label={t("talkFold")}>
 						<PanelIcon open />
 					</button>
-					{team && list && <SessionList onClose={() => setList(false)} />}
+					{list && <SessionList onClose={() => setList(false)} />}
 				</header>
 				<div className="log" ref={logRef} onScroll={(e) => { const el = e.currentTarget; stick.current = el.scrollHeight - el.scrollTop - el.clientHeight < 40; }}>
 					{turns.length === 0 ? (
@@ -194,6 +199,7 @@ function SessionList({ onClose }: { onClose: () => void }) {
 	const bind = useDeck((s) => s.bind);
 	const talkKey = useDeck((s) => s.talkKey);
 	const deck = useDeck((s) => s.deck)!;
+	const team = useSettings((x) => x.s.collab.on);
 	const ref = useRef<HTMLDivElement>(null);
 	useEffect(() => {
 		const k = (e: MouseEvent) => { if (!ref.current?.contains(e.target as Node) && !(e.target as Element).closest?.(".talk-sess")) onClose(); };
@@ -209,15 +215,17 @@ function SessionList({ onClose }: { onClose: () => void }) {
 			{[...sessions].reverse().map((s) => {
 				const mine = turns.filter((x) => (x.session ?? sessions[0]?.key) === s.key);
 				const last = mine.at(-1);
-				const nos = deck.slides.map((x, i) => (bind[x.id] === s.key ? i + 1 : 0)).filter((n) => n > 0);
+				const nos = team ? deck.slides.map((x, i) => (bind[x.id] === s.key ? i + 1 : 0)).filter((n) => n > 0) : [];
+				// 대화는 번호보다 무엇을 시켰는지로 알아본다 — 첫 요청 한 줄
+				const first = mine.find((x) => x.request)?.request.replace(/\s+/g, " ");
 				const on = s.key === talkKey;
 				return (
 					<button key={s.key} role="option" aria-selected={on} className={on ? "on" : ""} onClick={() => { useDeck.getState().viewSession(s.key); onClose(); }}>
 						<span className="s">
 							<b>{t("sessionN").replace("{n}", s.key.slice(1))}</b>
-							<span>{nos.length ? `${nos.join(" · ")}${t("slideN") === "쪽" ? "쪽" : ""}` : t("sessionNoSlides")}</span>
+							<span>{first ? first.slice(0, 60) : t("sessionEmpty")}{nos.length ? ` · ${nos.join(" · ")}${t("slideN") === "쪽" ? "쪽" : ""}` : ""}</span>
 						</span>
-						<span className="d">{last ? `${last.by ? last.by + " · " : ""}${when(last.at)} · ${mine.length}${t("talkTurns")}` : t("sessionEmpty")}</span>
+						<span className="d">{last ? `${last.by ? last.by + " · " : ""}${when(last.at)} · ${mine.length}${t("talkTurns")}` : ""}</span>
 					</button>
 				);
 			})}
@@ -244,7 +252,7 @@ const TurnView = memo(function TurnView({ turn, head: isHead }: { turn: Turn; he
 		...(commit ? [
 			{ label: `v${commit.n} ${t("viewVersion")}`, run: onVersion },
 			{ label: t("compareWith"), run: () => useDeck.getState().startCompare(commit), disabled: commit.hash === head },
-			{ label: t("mentionVersion"), kbd: `@v${commit.n}`, run: () => useDeck.getState().mentionVersion(commit.n), disabled: commit.hash === head },
+			{ label: t("mentionVersion"), run: () => useDeck.getState().mentionVersion(commit.n), disabled: commit.hash === head },
 			// 지금 판이면 되돌릴 것이 없다. 턴이 도는 중에 되돌리면 Claude 가 고치던 파일을 덮는다
 			{ label: t("restore"), run: () => restore(commit), disabled: commit.hash === head || !!running },
 		] : []),
@@ -263,7 +271,7 @@ const TurnView = memo(function TurnView({ turn, head: isHead }: { turn: Turn; he
 			{(turn.request || turn.pins.length > 0 || !!turn.attach?.length) && (
 				<div className="req">
 					{/* 보낸 팀원 — 같은 세션을 여럿이 이어 쓰므로 요청마다 누가 시켰는지 남긴다 */}
-					{turn.by && <div className="req-by">{turn.by}</div>}
+					{turn.by && <div className="req-by">{turn.by}{turn.runner && <span className="runner-tag" title={t("runnerTurnHint")}>{t("runnerBy").replace("{name}", turn.runner.name)}</span>}</div>}
 					{turn.request && <div className="req-text"><Mentioned text={turn.request} turn={turn} /></div>}
 					{!!turn.attach?.length && <div className="attach-row">{turn.attach.map((a) => <AttachTile key={a} rel={a} />)}</div>}
 					{turn.pins.length > 0 && (
@@ -371,8 +379,32 @@ function Composer() {
 		const m = typingMention(value, caret);
 		setPick(m ? { ...m, sel: 0 } : null);
 	};
-	/** 글의 [from, to) 를 「@번호 」 · 「@v번호 」로 바꾸고 커서를 그 뒤에 둔다 */
+	// 범위 — 이 요청이 닿는 쪽 · 참고할 판 (「@6」 · 「@v12」 꼴). 글 밖에 따로 쥐고 보낼 때 글 앞에 붙인다.
+	// 2026.11.26 : 전에는 범위를 고르면 요청 글에 「@6」이 끼어들었다. 글은 사람이 쓴 그대로 두고, 범위는 칩으로만 보인다.
+	// 요청칸에 @ 를 직접 치면 전처럼 글 안에 남는다(칩도 함께 선다)
+	const [scope, setScope] = useState<string[]>([]);
+	const addScope = (tag: string) => setScope((v) => (v.includes(tag) ? v : [...v, tag]));
+	// 범위 메뉴의 「다른 쪽 · 지난 판」이 고르기 창을 열었다 — 고르면 글이 아니라 범위로, 그만두면 넣었던 @ 를 걷는다
+	const toScope = useRef(false);
+	const cancelPick = () => {
+		if (toScope.current && pick) {
+			const end = pick.start + 1 + pick.q.length;
+			setText((x) => (x.slice(0, pick.start) + x.slice(end)).replace(/ $/, ""));
+		}
+		toScope.current = false;
+		setPick(null);
+	};
+	/** 글의 [from, to) 를 「@번호 」 · 「@v번호 」로 바꾸고 커서를 그 뒤에 둔다. 범위 메뉴에서 연 창이면 글에서 걷고 범위에 더한다 */
 	const put = (from: number, to: number, tag: string) => {
+		if (toScope.current) {
+			toScope.current = false;
+			addScope(tag);
+			const next = (text.slice(0, from).replace(/ $/, "") + text.slice(to)).trimEnd();
+			setText(next);
+			setPick(null);
+			requestAnimationFrame(() => { const el = ta.current; if (el) { el.focus(); el.setSelectionRange(next.length, next.length); } });
+			return;
+		}
 		const ins = `${tag} `;
 		const next = text.slice(0, from) + ins + text.slice(to).replace(/^ /, "");
 		setText(next);
@@ -391,6 +423,12 @@ function Composer() {
 		if (insertReq.whole) {
 			setText(insertReq.text);
 			requestAnimationFrame(() => { el?.focus(); el?.setSelectionRange(insertReq.text.length, insertReq.text.length); });
+			return;
+		}
+		// 쪽 · 판 언급(쪽 목록 메뉴 · 쪽 끌어 놓기 · 판 메뉴)은 범위로 — 글에는 넣지 않는다
+		if (/^@v?\d+(-\d+)?$/.test(insertReq.text)) {
+			addScope(insertReq.text);
+			requestAnimationFrame(() => el?.focus());
 			return;
 		}
 		const at = el ? el.selectionStart : text.length;
@@ -423,21 +461,31 @@ function Composer() {
 		return () => removeEventListener("keydown", k);
 	}, []);
 
-	const route = useMemo(() => routeOf({ deck, current, pins, bind, sessions, talkKey }, text), [deck, current, pins, bind, sessions, talkKey, text, team]);
+	// 보낼 글 — 범위를 앞에 붙인다. 세션 고르기(routeOf) · 보내기 모두 이 글로
+	const full = scope.length ? `${scope.join(" ")} ${text}` : text;
+	const route = useMemo(() => routeOf({ deck, current, pins, bind, sessions, talkKey }, full), [deck, current, pins, bind, sessions, talkKey, full, team]);
 	const routeText = !route.key ? t("routeNew") : (route.via ? t("routeVia").replace("{no}", String(route.via)) : t("routeTalk")).replace("{n}", route.key.slice(1));
 	// 협업을 켜면 세션마다 줄을 서므로 도는 중에도 보낼 수 있다. 꺼져 있으면 전처럼 도는 동안은 막는다
 	// 브라우저 팀원이 호스트와 끊겼으면 보내지 않는다 — 보낸 글이 어디에도 닿지 않고 사라졌다
 	const offline = useCollab((c) => remote && (!c.connected || c.ended));
-	const can = (team || !running) && !needName && !offline && (text.trim() || pins.length || attach.length);
+	// 내 PC 의 Claude — 이 기기가 붙여 두었으면(runner.rs) 요청칸에 고르기가 선다. 끄면 덱 주인 PC 의 Claude
+	const hasRunner = useCollab((c) => remote && !!c.members.find((m) => m.conn === c.conn)?.runner);
+	const mine = useMine();
+	useEffect(() => { if (hasRunner && !mine.seen) useMine.setState({ seen: true }); }, [hasRunner]);
+	// 내 Claude 를 쓰던 중 끊겼다 — 덱 주인 Claude 로 넘기지 않고 보내기를 막는다. 단추를 누르면 덱 주인 Claude 로 바꾼다
+	const runnerLost = remote && mine.use && mine.seen && !hasRunner;
+	const can = (team || !running) && !needName && !offline && !runnerLost && (text.trim() || pins.length || attach.length);
 	const go = () => {
 		if (!can) return;
 		// 보내다 실패하면(그 사이 끊김 · 호스트 거절) 비웠던 글 · 첨부를 되살린다. 그새 새로 적은 글은 덮지 않는다
-		const was = { text, attach };
-		send(text, attach).catch(() => {
+		const was = { text, attach, scope };
+		send(full, attach).catch(() => {
 			setText((x) => x || was.text);
+			setScope((x) => (x.length ? x : was.scope));
 			if (!useAttach.getState().files.length) useAttach.setState({ files: was.attach });
 		});
 		setText("");
+		setScope([]);
 		setPick(null);
 		useAttach.getState().clear();
 	};
@@ -499,7 +547,7 @@ function Composer() {
 							<button key={c.hash} role="option" aria-selected={i === pick.sel} className={"ver" + (i === pick.sel ? " on" : "")}
 								onMouseDown={(e) => { e.preventDefault(); choose(i, ta.current?.selectionStart ?? text.length); }}
 								onMouseEnter={() => setPick({ ...pick, sel: i })}>
-								<span className="mono">@v{c.n}</span>
+								<span className="mono">v{c.n}</span>
 								<span className="title">{c.subject}</span>
 								<span className="here mono">{c.date.slice(5, 16)}</span>
 							</button>
@@ -515,14 +563,12 @@ function Composer() {
 								{m.no === current + 1 && <span className="here">{t("here")}</span>}
 							</button>
 						))}
-						{/* 판도 멘션할 수 있다는 것을 쪽 고르기 창 끝에서 알린다 — 「@v」 를 모르면 쓸 길이 없다 */}
-						{!vpick && versions.length > 1 && <div className="none">{t("mentionVersionHint")}</div>}
 					</div>
 				)}
 				<textarea ref={ta} rows={2} value={text} placeholder={t("composerHint")} onPaste={onPaste}
 					onChange={(e) => { setText(e.target.value); sense(e.target.value, e.target.selectionStart); }}
 					onClick={(e) => sense(text, e.currentTarget.selectionStart)}
-					onBlur={() => setPick(null)}
+					onBlur={cancelPick}
 					onKeyDown={(e) => {
 						if (e.nativeEvent.isComposing) return;
 						// 고르기 창이 떠 있으면 위아래 · Enter · Tab · Esc 는 창이 쓴다
@@ -530,19 +576,28 @@ function Composer() {
 							if (e.key === "ArrowDown" || e.key === "ArrowUp") { e.preventDefault(); setPick({ ...pick, sel: (pick.sel + (e.key === "ArrowDown" ? 1 : count - 1)) % count }); return; }
 							if (e.key === "Enter" || e.key === "Tab") { e.preventDefault(); choose(pick.sel, e.currentTarget.selectionStart); return; }
 						}
-						if (pick && e.key === "Escape") { e.preventDefault(); e.stopPropagation(); setPick(null); return; }
+						if (pick && e.key === "Escape") { e.preventDefault(); e.stopPropagation(); cancelPick(); return; }
 						if (e.key === "Enter" && (e.ctrlKey || !e.shiftKey)) { e.preventDefault(); go(); }
 					}}
 					onKeyUp={(e) => { if (["ArrowLeft", "ArrowRight", "Home", "End"].includes(e.key)) sense(text, e.currentTarget.selectionStart); }} />
 				<div className="bar">
-					<ScopeLine text={text} setText={setText} ta={ta} />
+					<ScopeLine text={text} setText={setText} ta={ta} scope={scope} setScope={setScope} addScope={addScope} toScope={toScope} />
 					{/* 보낼 곳(세션). 범위 줄이 「어디에」면 이것은 「어느 세션으로」. 세션이 생긴 뒤부터 보이고, 보고 있는 대화와 다른 세션으로 가면 진하게.
 					    줄에는 세션 번호만, 까닭(어느 쪽을 처음 고친 세션인지)은 툴팁에. 까닭까지 적으면 좁은 사이드바에서 범위 줄이 두 줄로 밀린다 */}
 					{team && sessions.length > 0 && (
 						<span className={"route" + (route.key && route.key !== talkKey ? " away" : "")} title={`${routeText}\n${t("sessionHint")}`}>
-							{route.key ? `→ ${t("sessionN").replace("{n}", route.key.slice(1))}` : t("routeNew")}
+							{route.key ? `→ ${t("sessionN").replace("{n}", route.key.slice(1))}` : `→ ${t("newTalk")}`}
 						</span>
 					)}
+					{hasRunner ? (
+						<button className={"runner-pick" + (mine.use ? " on" : "")} aria-pressed={mine.use} onClick={() => mine.set(!mine.use)} title={mine.use ? t("runnerMineOnHint") : t("runnerMineOffHint")}>
+							{mine.use ? t("runnerMine") : t("runnerHost")}
+						</button>
+					) : runnerLost ? (
+						<button className="runner-pick lost" onClick={() => mine.set(false)} title={t("runnerLostHint")}>{t("runnerLost")}</button>
+					) : mine.seen && !mine.use ? (
+						<button className="runner-pick" onClick={() => mine.set(true)} title={t("runnerMineOffHint")}>{t("runnerHost")}</button>
+					) : null}
 					{sendBtn}
 				</div>
 			</div>
@@ -552,18 +607,30 @@ function Composer() {
 
 /**
  * 범위 줄. 이 요청이 닿는 곳을 보내기 바로 옆에 보인다.
- *   @쪽 · @판을 썼으면 그 덩이마다 칩 (누르면 그 쪽 · 판으로, × 는 글에서도 뺀다)
- *   안 썼으면 「덱 전체」와 지금 쪽 하나로 좁히는 「n쪽만」. 그 뒤 「@」는 쪽 고르기 창을 연다
- * 범위를 정하는 것은 글 안의 @ 하나다. 칩은 그 글을 비추고 고칠 뿐, 따로 상태를 쥐지 않는다
+ *   고른 쪽 · 판마다 칩 「6쪽 ×」 「v12 판 ×」 (누르면 그 쪽 · 판으로, × 는 범위에서 뺀다)
+ *   고른 것이 없으면 「덱 전체 ▾」. 누르면 메뉴: 덱 전체 · 지금 보는 쪽 · 다른 쪽 고르기 · 지난 판 참고
+ * 2026.11.26 : 「덱 전체 · n쪽만 · @」 세 단추를 메뉴 하나로 줄였다. @ 는 화면에 드러내지 않는다 — 요청칸에 직접 치는 사람만 쓴다
  */
-function ScopeLine({ text, setText, ta }: { text: string; setText: (v: string) => void; ta: React.RefObject<HTMLTextAreaElement | null> }) {
+function ScopeLine({ text, setText, ta, scope, setScope, addScope, toScope }: {
+	text: string; setText: (v: string) => void; ta: React.RefObject<HTMLTextAreaElement | null>;
+	scope: string[]; setScope: (f: (v: string[]) => string[]) => void; addScope: (tag: string) => void; toScope: React.MutableRefObject<boolean>;
+}) {
 	const t = useT();
 	const deck = useDeck((s) => s.deck)!;
 	const current = useDeck((s) => s.current);
 	const versions = useDeck((s) => s.versions);
 	const setCurrent = useDeck((s) => s.setCurrent);
 	const setPreview = useDeck((s) => s.setPreview);
-	const mentionSlide = useDeck((s) => s.mentionSlide);
+	const [menu, setMenu] = useState(false);
+	const wrap = useRef<HTMLSpanElement>(null);
+	useEffect(() => {
+		if (!menu) return;
+		const k = (e: MouseEvent) => { if (!wrap.current?.contains(e.target as Node)) setMenu(false); };
+		const esc = (e: KeyboardEvent) => { if (e.key === "Escape") { e.stopPropagation(); setMenu(false); } };
+		addEventListener("mousedown", k);
+		addEventListener("keydown", esc, true);
+		return () => { removeEventListener("mousedown", k); removeEventListener("keydown", esc, true); };
+	}, [menu]);
 	/** 클립. 파일을 골라 붙인다. 읽을 수 있는 종류만 보이게 거른다 */
 	const choose = async () => {
 		const p = await pickFiles({ multiple: true, filters: [{ name: t("attachKinds"), extensions: ATTACH_EXT }] });
@@ -571,50 +638,81 @@ function ScopeLine({ text, setText, ta }: { text: string; setText: (v: string) =
 		if (list.length) await useAttach.getState().addPaths(list);
 		ta.current?.focus();
 	};
-	const toks = useMemo(() => [
-		...mentionTokens(text).filter((x) => x.from >= 1 && x.from <= deck.slides.length).map((x) => ({ ...x, v: 0 })),
+	// 칩 — 범위(글 밖)와, 요청칸에 직접 친 @ (글 안). 글 안 것은 × 가 글에서 뺀다
+	const inText = useMemo(() => [
+		...mentionTokens(text).filter((x) => x.from >= 1 && x.from <= deck.slides.length).map((x) => ({ start: x.start, end: x.end, from: x.from, to: x.to, v: 0 })),
 		...versionTokens(text).filter((x) => versions.some((c) => c.n === x.n)).map((x) => ({ start: x.start, end: x.end, from: 0, to: 0, v: x.n })),
 	].sort((a, b) => a.start - b.start), [text, deck, versions]);
+	const parse = (tag: string) => {
+		const v = /^@v(\d+)$/.exec(tag);
+		if (v) return { from: 0, to: 0, v: +v[1] };
+		const m = /^@(\d+)(?:-(\d+))?$/.exec(tag)!;
+		return { from: +m[1], to: +(m[2] ?? m[1]), v: 0 };
+	};
+	const chips = [
+		...scope.map((tag) => ({ key: "s" + tag, ...parse(tag), drop: () => setScope((x) => x.filter((y) => y !== tag)) })),
+		...inText.map((x) => ({ key: "t" + x.start, ...x, drop: () => { setText((text.slice(0, x.start) + text.slice(x.end).replace(/^ /, "")).replace(/^ /, "")); requestAnimationFrame(() => ta.current?.focus()); } })),
+	];
 	const slideTitle = (no: number) => deck.slides[no - 1]?.title || "";
-	/** 칩의 ×. 글에서 그 덩이와 뒤 빈칸 하나를 뺀다 */
-	const drop = (start: number, end: number) => {
-		setText((text.slice(0, start) + text.slice(end).replace(/^ /, "")).replace(/^ /, ""));
+	const label = (x: { from: number; to: number; v: number }) =>
+		x.v ? t("scopeVer").replace("{n}", String(x.v)) : x.from === x.to ? t("scopeSlide").replace("{n}", String(x.from)) : t("scopeSlides").replace("{a}", String(x.from)).replace("{b}", String(x.to));
+	/** 덱 전체 — 범위와 글 안의 @ 를 모두 걷는다 */
+	const all = () => {
+		setScope(() => []);
+		let next = text;
+		for (const x of [...inText].reverse()) next = next.slice(0, x.start) + next.slice(x.end).replace(/^ /, "");
+		setText(next.replace(/^ /, ""));
+		setMenu(false);
 		requestAnimationFrame(() => ta.current?.focus());
 	};
-	/** 「@」. 커서 자리에 @ 를 넣고 고르기 창을 연다 (요청칸의 onChange 가 창을 띄운다) */
-	const pickSlide = () => {
+	/** 고르기 창 열기 — 글 끝에 「@」(쪽) · 「@v」(판)를 넣어 창을 띄우고, 고르면 글에서 걷어 범위로 옮긴다 (Composer put) */
+	const openPicker = (tag: "@" | "@v") => {
+		setMenu(false);
 		const el = ta.current;
 		if (!el) return;
 		el.focus();
-		const at = el.selectionStart ?? text.length;
-		const pad = at > 0 && !/\s/.test(text[at - 1]) ? " " : "";
+		const pad = text && !/\s$/.test(text) ? " " : "";
+		const next = text + pad + tag;
+		toScope.current = true;
 		// 리액트가 쥔 값을 바꾸고 input 사건을 일으켜 고르기 창 감지(sense)가 돌게 한다
-		const next = text.slice(0, at) + pad + "@" + text.slice(at);
 		const set = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, "value")!.set!;
 		set.call(el, next);
-		el.setSelectionRange(at + pad.length + 1, at + pad.length + 1);
+		el.setSelectionRange(next.length, next.length);
 		el.dispatchEvent(new Event("input", { bubbles: true }));
 	};
+	const here = `@${current + 1}`;
 	return (
 		<div className="scope" aria-label={t("scope")}>
-			{toks.length === 0 ? (
-				<>
-					<span className="scope-all">{t("scopeAll")}</span>
-					<button className="scope-btn" onClick={() => mentionSlide(current + 1)} title={slideTitle(current + 1)}>{t("scopeOnly").replace("{n}", String(current + 1))}</button>
-				</>
-			) : (
-				toks.map((x) => {
-					const label = x.v ? `@v${x.v}` : x.from === x.to ? `@${x.from}` : `@${x.from}-${x.to}`;
-					const tip = x.v ? versions.find((c) => c.n === x.v)?.subject : x.from === x.to ? slideTitle(x.from) : "";
-					return (
-						<span className="scope-chip" key={x.start}>
-							<button onClick={() => { if (x.v) { const c = versions.find((k) => k.n === x.v); if (c) setPreview(c); } else setCurrent(x.from - 1); }} title={tip || undefined}>{label}</button>
-							<button className="x" onClick={() => drop(x.start, x.end)} aria-label={`${label} ${t("delete")}`}>×</button>
-						</span>
-					);
-				})
-			)}
-			<button className="scope-btn at" onClick={pickSlide} title={t("scopePick")} aria-label={t("scopePick")}>@</button>
+			{chips.map((x) => (
+				<span className="scope-chip" key={x.key}>
+					<button onClick={() => { if (x.v) { const c = versions.find((k) => k.n === x.v); if (c) setPreview(c); } else setCurrent(x.from - 1); }}
+						title={(x.v ? versions.find((c) => c.n === x.v)?.subject : x.from === x.to ? slideTitle(x.from) : "") || undefined}>{label(x)}</button>
+					<button className="x" onClick={x.drop} aria-label={`${label(x)} ${t("delete")}`}>×</button>
+				</span>
+			))}
+			<span className="scope-wrap" ref={wrap}>
+				<button className={"scope-btn pick" + (menu ? " on" : "")} onClick={() => setMenu(!menu)} aria-expanded={menu} aria-haspopup="menu" title={t("scopeMenu")}>
+					{chips.length ? t("scopeMore") : t("scopeAll")}<span className="caret" aria-hidden>▾</span>
+				</button>
+				{menu && (
+					<div className="scope-menu" role="menu">
+						<button role="menuitemradio" aria-checked={!chips.length} onClick={all}>
+							<b>{t("scopeAll")}</b><span>{t("scopeAllHint")}</span>
+						</button>
+						<button role="menuitem" disabled={scope.includes(here)} onClick={() => { addScope(here); setMenu(false); ta.current?.focus(); }}>
+							<b>{t("scopeHere").replace("{n}", String(current + 1))}</b><span>{slideTitle(current + 1) || t("scopeHereHint")}</span>
+						</button>
+						<button role="menuitem" onClick={() => openPicker("@")}>
+							<b>{t("scopeOther")}</b><span>{t("scopeOtherHint")}</span>
+						</button>
+						{versions.length > 1 && (
+							<button role="menuitem" onClick={() => openPicker("@v")}>
+								<b>{t("scopeVersion")}</b><span>{t("scopeVersionHint")}</span>
+							</button>
+						)}
+					</div>
+				)}
+			</span>
 			{!remote && <button className="scope-btn clip" onClick={choose} title={t("attachAdd")} aria-label={t("attachAdd")}>
 				<svg width="14" height="14" viewBox="0 0 16 16" aria-hidden><path d="M10.5 4.5 5.4 9.6a1.6 1.6 0 0 0 2.3 2.3l5.4-5.4a3 3 0 0 0-4.3-4.3L3.3 7.7a4.4 4.4 0 0 0 6.2 6.2l4-4" fill="none" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" strokeLinejoin="round" /></svg>
 			</button>}

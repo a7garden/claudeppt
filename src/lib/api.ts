@@ -51,6 +51,8 @@ export const api = {
 	claudeDetect: (path: string) => invoke<{ path: string; version: string } | null>("claude_detect", { path }),
 	claudeRun: (spec: { turn: string; dir: string; prompt: string; system: string; claudePath: string; model: string; effort: string; resume?: string | null; sessionId?: string | null; mode?: "fonts" }) => invoke<{ code: number; stderr: string }>("claude_run", { spec }),
 	claudeStop: (turn: string) => invoke<void>("claude_stop", { turn }),
+	/** 팀원 PC 의 Claude 로 돌린다 (collab.rs claude_run_remote) — claudeRun 과 같은 답 */
+	claudeRunRemote: (spec: { turn: string; dir: string; device: string; prompt: string; system: string; resume?: string | null; sessionId?: string | null }) => invoke<{ code: number; stderr: string }>("claude_run_remote", { spec }),
 
 	toolsDetect: () => invoke<Tool[]>("tools_detect"),
 	imageGenerate: (spec: { provider: string; prompt: string; out: string; apiKey?: string; model?: string; size?: string }) => invoke<string>("image_generate", { spec }),

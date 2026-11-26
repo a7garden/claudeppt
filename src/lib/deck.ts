@@ -29,8 +29,32 @@ export interface Deck {
 	source?: { kind: "new" | "pptx"; file?: string; pages?: number };
 	/** 만들 때 쓴 템플릿 id (settings.templates) — 매 턴 그 템플릿의 스타일 규칙이 실린다. 가져온 PPTX 는 없다 */
 	template?: string;
+	/** 쪽 설정 — 이 덱의 쪽 여백(px). 없으면 템플릿 여백을 네 변에 똑같이 쓴다 (2026.11.26) */
+	page?: { margin: Margins };
 	created: string;
 	updated: string;
+}
+
+/** 쪽 여백 — 위 · 오른쪽 · 아래 · 왼쪽 (CSS padding 차례) */
+export interface Margins { t: number; r: number; b: number; l: number }
+
+/** 쪽 설정 구획 — 템플릿 구획 뒤에 둔다. 「이 덱에 적용」(rethemeCss)은 템플릿 구획만 갈아 끼우므로 쪽 설정이 남는다 */
+const PAGE_START = "/* @page start";
+const PAGE_END = "/* @page end */";
+
+/** theme.css 에 쪽 여백 변수(--margin-t · -r · -b · -l)를 쓴다. null 이면 구획을 걷는다 — 그때 Claude 에게는 var(--margin) 만 말한다(prompt.ts pageRules) */
+export function repageCss(css: string, m: Margins | null) {
+	const a = css.indexOf(PAGE_START), b = css.indexOf(PAGE_END);
+	const rest = a >= 0 && b > a ? css.slice(0, a).replace(/\n+$/, "\n") + css.slice(b + PAGE_END.length).replace(/^\n+/, "\n") : css;
+	if (!m) return rest;
+	const block = `${PAGE_START} · 쪽 설정(제목 줄 「쪽 설정」)이 쓰는 구획. 여백은 거기서 바꾼다 */
+:root { --margin-t: ${m.t}px; --margin-r: ${m.r}px; --margin-b: ${m.b}px; --margin-l: ${m.l}px; }
+${PAGE_END}`;
+	const e = rest.indexOf(TPL_END);
+	if (e >= 0) { const at = e + TPL_END.length; return rest.slice(0, at) + "\n\n" + block + rest.slice(at); }
+	const root = /:root\s*\{[^}]*\}/.exec(rest);
+	if (root) { const at = root.index + root[0].length; return rest.slice(0, at) + "\n\n" + block + rest.slice(at); }
+	return block + "\n\n" + rest;
 }
 
 export const newId = () => "s" + Math.random().toString(36).slice(2, 8);

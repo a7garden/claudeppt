@@ -16,7 +16,7 @@ export interface TypeStep { size: number; weight: number }
 /** 템플릿 — 덱 만드는 스타일 한 벌. 새 덱의 theme.css 와 매 턴 Claude 에게 실리는 스타일 규칙이 여기서 나온다.
  *  덱은 deck.json 의 template 에 어느 템플릿으로 만들었는지 남겨, 기본 템플릿을 바꿔도 지난 덱은 제 스타일을 따른다.
  *  파일로 주고받을 때는 templates.ts 의 claudeppt-template/1 (.ctpl) 꼴이다.
- *  2026.11.26 : 제목 글꼴 · 보조 색 · 글자 위계 · 여백을 더했다. 감사(audit.ts)가 이 값으로 쪽이 템플릿을 벗어났는지 잰다 */
+ *  2026.11.26 : 제목 글꼴 · 보조 색 · 글자 위계 · 여백을 더했다. 점검(audit.ts)이 이 값으로 쪽이 템플릿을 벗어났는지 잰다 */
 export interface Template {
 	id: string;
 	name: string;
@@ -65,7 +65,11 @@ export interface Settings {
 	collab: { on: boolean };
 	/** 이 기기를 쓰는 팀원 이름 — 협업을 켰을 때 대화의 요청과 판(git 작성자)에 남는다. 기기마다 한 번 정한다 */
 	me: string;
+	/** 앱으로 들어간 공유 덱 — 호스트 주소(origin)와 마지막으로 연 때. 기기 쿠키가 앱에 남아 주소만으로 다시 들어간다 (collab.rs collab_join) */
+	shared: SharedDeck[];
 }
+/** mine — 이 덱 주인에게 내 PC 의 Claude 를 쓰게 한다 (runner.rs). 사람이 덱 주인마다 켠다 */
+export interface SharedDeck { url: string; at: number; mine?: boolean }
 
 export const SCALE: Record<Level, TypeStep> = {
 	display: { size: 64, weight: 700 },
@@ -110,6 +114,7 @@ export const DEFAULTS: Settings = {
 	remote: { enabled: true },
 	collab: { on: false },
 	me: "",
+	shared: [],
 };
 
 export const templateId = () => "t" + Math.random().toString(36).slice(2, 8);
@@ -139,6 +144,7 @@ const merge = (v: any): Settings => {
 		remote: { ...DEFAULTS.remote, ...(v?.remote || {}) },
 		collab: { ...DEFAULTS.collab, ...(v?.collab || {}) },
 		me: typeof v?.me === "string" ? v.me : "",
+		shared: Array.isArray(v?.shared) ? v.shared.filter((x: any) => typeof x?.url === "string" && /^https?:\/\//.test(x.url)).map((x: any) => ({ url: x.url, at: +x.at || 0, mine: !!x.mine })).slice(0, 12) : [],
 	};
 };
 

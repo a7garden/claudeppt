@@ -182,7 +182,7 @@ pub struct RunSpec {
 // (.claudeppt 는 판에 들지 않고 .cppt 에는 든다 — 대화 기록 talk.json 과 같은 자리)
 
 /// 세션 id 는 화면에서 온다 — 경로에 쓰므로 uuid 꼴만 받는다
-fn valid_sid(s: &str) -> bool {
+pub fn valid_sid(s: &str) -> bool {
 	!s.is_empty() && s.len() <= 64 && s.chars().all(|c| c.is_ascii_hexdigit() || c == '-')
 }
 
@@ -217,10 +217,16 @@ fn restore_transcript(root: &Path, dir: &Path, sid: &str) {
 		return;
 	}
 	let here = root.join(&key).join(format!("{sid}.jsonl"));
+	let backup = backup_path(dir, sid);
+	// 2026.11.26 : 덱에 남긴 기록이 더 길면 그것으로 — 팀원 PC 에서 이어 쓴 턴(collab.rs)은 덱의 기록에만 붙는다. 기록은 뒤에 덧붙기만 한다
+	let len = |p: &Path| std::fs::metadata(p).map(|m| m.len()).unwrap_or(0);
 	if here.is_file() {
+		if backup.is_file() && len(&backup) > len(&here) {
+			let _ = std::fs::copy(&backup, &here);
+		}
 		return;
 	}
-	let src = live_transcript(root, dir, sid).or_else(|| Some(backup_path(dir, sid)).filter(|p| p.is_file()));
+	let src = live_transcript(root, dir, sid).or_else(|| Some(backup.clone()).filter(|p| p.is_file()));
 	if let Some(src) = src {
 		let _ = std::fs::create_dir_all(here.parent().unwrap());
 		let _ = std::fs::copy(src, &here);
@@ -239,6 +245,46 @@ fn backup_transcript(root: &Path, dir: &Path, sid: &str) {
 	}
 }
 
+/// 그 세션의 기록 글 — claude 쪽 것과 덱에 남긴 것 중 긴 것. 팀원 PC 에 이어 쓸 기록을 보낼 때 쓴다
+pub fn transcript_text(dir: &Path, sid: &str) -> Option<String> {
+	if !valid_sid(sid) {
+		return None;
+	}
+	let live = projects_root().and_then(|r| live_transcript(&r, dir, sid)).and_then(|p| std::fs::read_to_string(p).ok());
+	let saved = std::fs::read_to_string(backup_path(dir, sid)).ok();
+	match (live, saved) {
+		(Some(a), Some(b)) => Some(if b.len() > a.len() { b } else { a }),
+		(a, b) => a.or(b),
+	}
+}
+
+/// 받은 기록을 이 작업 폴더의 claude 자리에 놓는다(덮어쓴다) — 팀원 PC 가 이어 쓰기 전에
+pub fn place_transcript(dir: &Path, sid: &str, text: &str) {
+	let key = project_key(dir);
+	let Some(root) = projects_root() else { return };
+	if !valid_sid(sid) || key.len() > 200 {
+		return;
+	}
+	let here = root.join(key).join(format!("{sid}.jsonl"));
+	let _ = std::fs::create_dir_all(here.parent().unwrap());
+	let _ = std::fs::write(here, text);
+}
+
+/// 덱에 남긴 기록 글
+pub fn saved_transcript(dir: &Path, sid: &str) -> Option<String> {
+	valid_sid(sid).then(|| std::fs::read_to_string(backup_path(dir, sid)).ok()).flatten()
+}
+
+/// 덱에 기록을 남긴다 — 팀원 PC 에서 이어 쓴 턴의 기록을 받았을 때. 다음에 누가 이어 쓰든 이것을 놓는다(restore_transcript)
+pub fn save_transcript(dir: &Path, sid: &str, text: &str) {
+	if !valid_sid(sid) {
+		return;
+	}
+	let to = backup_path(dir, sid);
+	let _ = std::fs::create_dir_all(to.parent().unwrap());
+	let _ = std::fs::write(to, text);
+}
+
 #[derive(Serialize, Clone)]
 struct Line {
 	turn: String,
@@ -252,64 +298,75 @@ pub struct Done {
 	stderr: String,
 }
 
-#[tauri::command]
-pub async fn claude_run(app: AppHandle, state: State<'_, AppState>, spec: RunSpec) -> Res<Done> {
-	let exe = resolve(&spec.claude_path).ok_or("claude 실행 파일을 찾지 못했다 — 설정 › Claude 에서 경로를 준다")?;
-	let dir = PathBuf::from(&spec.dir);
-	let run_dir = dir.join(".claudeppt/run");
+/// claude 한 번 돌리기에 드는 것 — 덱 주인 실행(claude_run)과 팀원 PC 실행(runner.rs)이 같이 쓴다
+pub struct Job<'a> {
+	pub exe: PathBuf,
+	pub dir: &'a Path,
+	pub prompt: &'a str,
+	pub system: &'a str,
+	pub model: &'a str,
+	pub effort: &'a str,
+	pub resume: Option<&'a str>,
+	pub session_id: Option<&'a str>,
+	pub fonts: bool,
+}
+
+/// 끝난 claude — 종료 코드 · 오류 출력 끝부분 · 이 턴이 쓴 세션 id
+pub struct Ended {
+	pub code: i32,
+	pub stderr: String,
+	pub sid: Option<String>,
+}
+
+/// claude 를 띄워 끝날 때까지 출력 줄을 넘긴다. 격리 인자는 여기 한 곳에 — 어디서 돌든 같은 울타리 안이다 (머리말).
+/// on_pid 로 프로세스 번호를 알린다 — 멈출 때 트리째 끈다(kill_tree)
+pub async fn execute(job: Job<'_>, mut on_line: impl FnMut(String) + Send, on_pid: impl FnOnce(u32) + Send) -> Res<Ended> {
+	let run_dir = job.dir.join(".claudeppt/run");
 	std::fs::create_dir_all(&run_dir).map_err(err)?;
 	let sys_file = run_dir.join("system.md");
-	std::fs::write(&sys_file, &spec.system).map_err(err)?;
+	std::fs::write(&sys_file, job.system).map_err(err)?;
 
-	let fonts = spec.mode.as_deref() == Some("fonts");
 	let mut args: Vec<String> = [
 		"-p", "--output-format", "stream-json", "--verbose", "--include-partial-messages",
 		"--safe-mode", "--setting-sources", "",
 		"--strict-mcp-config", "--disable-slash-commands",
-		"--tools", if fonts { FONT_TOOLS } else { TOOLS },
+		"--tools", if job.fonts { FONT_TOOLS } else { TOOLS },
 		"--permission-mode", "acceptEdits", "--permission-prompts", "none",
 	]
 	.map(String::from)
 	.to_vec();
-	if fonts {
+	if job.fonts {
 		// 웹 도구는 acceptEdits 로 허락되지 않는다 — 물어볼 사람이 없으니 미리 허락해 둔다
 		args.extend(["--allowedTools".into(), FONT_TOOLS.into()]);
 	}
 	args.extend(["--system-prompt-file".into(), sys_file.to_string_lossy().into()]);
-	if !spec.model.trim().is_empty() {
-		args.extend(["--model".into(), spec.model.trim().into()]);
+	if !job.model.trim().is_empty() {
+		args.extend(["--model".into(), job.model.trim().into()]);
 	}
-	if !spec.effort.trim().is_empty() {
-		args.extend(["--effort".into(), spec.effort.trim().into()]);
+	if !job.effort.trim().is_empty() {
+		args.extend(["--effort".into(), job.effort.trim().into()]);
 	}
-	let root = projects_root();
-	let resume = spec.resume.as_deref().filter(|s| !s.is_empty());
-	if let Some(sid) = resume {
-		if let Some(r) = &root {
-			restore_transcript(r, &dir, sid);
-		}
+	if let Some(sid) = job.resume {
 		args.extend(["--resume".into(), sid.into()]);
-	} else if let Some(sid) = spec.session_id.as_deref().filter(|s| valid_sid(s)) {
+	} else if let Some(sid) = job.session_id.filter(|s| valid_sid(s)) {
 		args.extend(["--session-id".into(), sid.into()]);
 	}
 
-	let mut cmd = tokio::process::Command::new(&exe);
-	cmd.current_dir(&dir).args(&args).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped()).kill_on_drop(true);
+	let mut cmd = tokio::process::Command::new(&job.exe);
+	cmd.current_dir(job.dir).args(&args).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped()).kill_on_drop(true);
 	#[cfg(windows)]
 	cmd.creation_flags(0x0800_0000);
 	let mut child = cmd.spawn().map_err(|e| format!("claude 를 띄우지 못했다: {e}"))?;
 	adopt(&child);
 	if let Some(pid) = child.id() {
-		state.runs.lock().unwrap().insert(spec.turn.clone(), pid);
+		on_pid(pid);
 	}
 	let mut stdin = child.stdin.take().unwrap();
-	stdin.write_all(spec.prompt.as_bytes()).await.map_err(err)?;
+	stdin.write_all(job.prompt.as_bytes()).await.map_err(err)?;
 	drop(stdin);
 
 	let stdout = child.stdout.take().unwrap();
 	let stderr = child.stderr.take().unwrap();
-	let turn = spec.turn.clone();
-	let app2 = app.clone();
 	let err_task = tokio::spawn(async move {
 		let mut s = String::new();
 		let mut r = BufReader::new(stderr).lines();
@@ -323,33 +380,66 @@ pub async fn claude_run(app: AppHandle, state: State<'_, AppState>, spec: RunSpe
 	});
 	let mut lines = BufReader::new(stdout).lines();
 	// 이 턴이 쓴 세션 id — 남길 기록을 찾는 데 쓴다. 이어 쓰기 · 새 id 를 준 경우가 아니면 init 사건에서 읽는다
-	let mut sid = resume.map(String::from).or_else(|| spec.session_id.clone().filter(|s| valid_sid(s)));
+	let mut sid = job.resume.map(String::from).or_else(|| job.session_id.filter(|s| valid_sid(s)).map(String::from));
 	while let Ok(Some(line)) = lines.next_line().await {
 		if sid.is_none() && line.contains("\"subtype\":\"init\"") {
 			sid = serde_json::from_str::<serde_json::Value>(&line).ok().and_then(|v| v["session_id"].as_str().map(String::from));
 		}
-		let _ = app2.emit("claude", Line { turn: turn.clone(), line });
+		on_line(line);
 	}
 	let status = child.wait().await.map_err(err)?;
 	let stderr = err_task.await.unwrap_or_default();
-	if let (Some(r), Some(s)) = (&root, &sid) {
-		backup_transcript(r, &dir, s);
-	}
 	// 시스템 프롬프트를 덱 폴더에 남기지 않는다 — claude 는 시작할 때 한 번 읽고 끝이다
 	let _ = std::fs::remove_file(&sys_file);
-	app.state::<AppState>().runs.lock().unwrap().remove(&turn);
-	Ok(Done { turn, code: status.code().unwrap_or(-1), stderr })
+	Ok(Ended { code: status.code().unwrap_or(-1), stderr, sid })
 }
 
-use tauri::Manager;
-
 #[tauri::command]
-pub fn claude_stop(state: State<AppState>, turn: String) -> Res<()> {
-	if let Some(pid) = state.runs.lock().unwrap().remove(&turn) {
-		let mut c = std::process::Command::new("taskkill");
-		crate::hidden(&mut c);
-		let _ = c.args(["/PID", &pid.to_string(), "/T", "/F"]).status();
+pub async fn claude_run(app: AppHandle, state: State<'_, AppState>, spec: RunSpec) -> Res<Done> {
+	let exe = resolve(&spec.claude_path).ok_or("claude 실행 파일을 찾지 못했다 — 설정 › Claude 에서 경로를 준다")?;
+	let dir = PathBuf::from(&spec.dir);
+	let root = projects_root();
+	let resume = spec.resume.as_deref().filter(|s| !s.is_empty());
+	if let (Some(sid), Some(r)) = (resume, &root) {
+		restore_transcript(r, &dir, sid);
 	}
+	let turn = spec.turn.clone();
+	let (app2, turn2) = (app.clone(), turn.clone());
+	let runs = &state.runs;
+	let job = Job {
+		exe,
+		dir: &dir,
+		prompt: &spec.prompt,
+		system: &spec.system,
+		model: &spec.model,
+		effort: &spec.effort,
+		resume,
+		session_id: spec.session_id.as_deref(),
+		fonts: spec.mode.as_deref() == Some("fonts"),
+	};
+	let ended = execute(job, move |line| { let _ = app2.emit("claude", Line { turn: turn2.clone(), line }); }, |pid| { runs.lock().unwrap().insert(turn.clone(), pid); }).await;
+	state.runs.lock().unwrap().remove(&turn);
+	let ended = ended?;
+	if let (Some(r), Some(s)) = (&root, &ended.sid) {
+		backup_transcript(r, &dir, s);
+	}
+	Ok(Done { turn, code: ended.code, stderr: ended.stderr })
+}
+
+/// 프로세스를 자식까지 끈다
+pub fn kill_tree(pid: u32) {
+	let mut c = std::process::Command::new("taskkill");
+	crate::hidden(&mut c);
+	let _ = c.args(["/PID", &pid.to_string(), "/T", "/F"]).status();
+}
+
+/// 멈춤 — 이 PC 에서 도는 턴이면 claude 를 끄고, 팀원 PC 에서 도는 턴이면 그 PC 에 멈추라고 보낸다 (collab.rs)
+#[tauri::command]
+pub fn claude_stop(app: AppHandle, state: State<AppState>, turn: String) -> Res<()> {
+	if let Some(pid) = state.runs.lock().unwrap().remove(&turn) {
+		kill_tree(pid);
+	}
+	crate::collab::stop_remote(&app, &turn);
 	Ok(())
 }
 
@@ -442,10 +532,15 @@ mod tests {
 		restore_transcript(&root, &deck, sid);
 		assert_eq!(std::fs::read_to_string(root.join(project_key(&deck)).join(format!("{sid}.jsonl"))).unwrap(), "{\"a\":1}\n");
 
-		// 이미 있으면 덮지 않는다 (claude 쪽이 더 새것)
-		std::fs::write(root.join(project_key(&deck)).join(format!("{sid}.jsonl")), "newer\n").unwrap();
+		// 이미 있으면 덮지 않는다 (claude 쪽이 더 길다 = 더 새것. 기록은 덧붙기만 한다)
+		std::fs::write(root.join(project_key(&deck)).join(format!("{sid}.jsonl")), "{\"a\":1}\n{\"b\":2}\n").unwrap();
 		restore_transcript(&root, &deck, sid);
-		assert_eq!(std::fs::read_to_string(root.join(project_key(&deck)).join(format!("{sid}.jsonl"))).unwrap(), "newer\n");
+		assert_eq!(std::fs::read_to_string(root.join(project_key(&deck)).join(format!("{sid}.jsonl"))).unwrap(), "{\"a\":1}\n{\"b\":2}\n");
+
+		// 팀원 PC 에서 이어 써 덱의 기록이 더 길면 그것으로 (collab.rs 가 save_transcript 로 남긴다)
+		save_transcript(&deck, sid, "{\"a\":1}\n{\"b\":2}\n{\"c\":3}\n");
+		restore_transcript(&root, &deck, sid);
+		assert_eq!(std::fs::read_to_string(root.join(project_key(&deck)).join(format!("{sid}.jsonl"))).unwrap(), "{\"a\":1}\n{\"b\":2}\n{\"c\":3}\n");
 
 		// 이상한 id 는 경로에 쓰지 않는다
 		restore_transcript(&root, &deck, "../../evil");

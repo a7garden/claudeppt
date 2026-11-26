@@ -30,6 +30,8 @@ pub fn start(app: AppHandle, id: String, root: PathBuf) -> Res<Handle> {
 		paths.sort();
 		paths.dedup();
 		if !paths.is_empty() {
+			// 팀원 PC 의 사본도 맞춘다 (collab.rs 「팀원 PC 의 Claude」)
+			crate::collab::files_changed(&app, &paths);
 			let _ = app.emit("deck-fs", Changed { id: id.clone(), paths });
 		}
 	})

@@ -14,7 +14,8 @@ import { tNow } from "./i18n";
 import { useSettings } from "./settings";
 import { isMine, me, nextSession, persistTalk, type Turn, useDeck } from "./store";
 
-export interface Member { conn: number; device: string; name: string; slide: string | null; host: boolean; since: number }
+/** runner — 이 기기가 「내 PC 의 Claude」를 붙여 두었다 (runner.rs) */
+export interface Member { conn: number; device: string; name: string; slide: string | null; host: boolean; since: number; runner?: boolean }
 export interface InviteLink { id: string; url: string; name: string | null; expires: number | null; expired: boolean }
 export interface Device { id: string; name: string; seen: number; online: boolean }
 /** 서버 정보 — bases: 이 서버에 닿는 주소 · links: 초대 링크 · devices: 링크로 들어온 기기 · locked: 회의 잠금 */
@@ -116,7 +117,7 @@ export async function startHost(): Promise<CollabInfo> {
 	hostListening ??= Promise.all([
 		listen<Member[]>("collab-members", (e) => useCollab.setState({ members: e.payload })),
 		listen<CollabInfo>("collab-info", (e) => useCollab.setState({ info: e.payload, members: e.payload.members })),
-		listen<{ id: string; from: { conn: number; name: string }; name: string; args: any }>("collab-intent", (e) => handleIntent(e.payload)),
+		listen<{ id: string; from: From; name: string; args: any }>("collab-intent", (e) => handleIntent(e.payload)),
 	]);
 	await hostListening;
 	watchComments();
@@ -188,10 +189,11 @@ export async function stopHost() {
 }
 
 /** 의도 처리기 — 이름 → (보낸 사람, 인자) → 값. 여기 없는 이름은 거절한다 (서버 INTENTS 와 함께 지킨다) */
-const handlers: Record<string, (from: { conn: number; name: string }, args: any) => Promise<unknown>> = {};
-export const onIntent = (name: string, fn: (from: { conn: number; name: string }, args: any) => Promise<unknown>) => { handlers[name] = fn; };
+type From = { conn: number; name: string; device?: string };
+const handlers: Record<string, (from: From, args: any) => Promise<unknown>> = {};
+export const onIntent = (name: string, fn: (from: From, args: any) => Promise<unknown>) => { handlers[name] = fn; };
 
-async function handleIntent(p: { id: string; from: { conn: number; name: string }; name: string; args: any }) {
+async function handleIntent(p: { id: string; from: From; name: string; args: any }) {
 	const fn = handlers[p.name];
 	let reply: any;
 	try {
@@ -215,8 +217,14 @@ onIntent("send", (from, a) => new Promise((ok, no) => {
 	const pins = d.pins.filter((p) => Array.isArray(a.pins) && a.pins.includes(p.id) && isMine(p, from.name));
 	// 첨부는 그 팀원이 올린 것(.claudeppt/attach/)만 — 다른 곳의 경로를 적어 보내 Claude 가 읽게 하지 못하게
 	const atts: string[] = (Array.isArray(a.attachments) ? a.attachments : []).filter((x: unknown) => typeof x === "string" && /^\.claudeppt\/attach\/[^\\/]+$/.test(x));
+	// 「내 PC 의 Claude」 — 그 기기가 지금 붙어 있을 때만. 서버가 정한 기기(from.device)라 남의 PC 를 고를 수 없다
+	let runner: string | undefined;
+	if (a.runner === "mine") {
+		if (!from.device || !useCollab.getState().members.some((m) => m.device === from.device && m.runner)) return no(new Error(tNow("runnerOff")));
+		runner = from.device;
+	}
 	let started = false;
-	d.send(String(a.text ?? ""), atts, true, { by: from.name || tNow("collabNoName"), current: typeof a.current === "string" ? a.current : null, talkKey: typeof a.talkKey === "string" ? a.talkKey : null, pins, onStart: (r) => { started = true; ok(r); } })
+	d.send(String(a.text ?? ""), atts, true, { by: from.name || tNow("collabNoName"), current: typeof a.current === "string" ? a.current : null, talkKey: typeof a.talkKey === "string" ? a.talkKey : null, pins, runner, onStart: (r) => { started = true; ok(r); } })
 		.then(() => { if (!started) ok(null); }, no);
 }));
 
@@ -296,6 +304,20 @@ onIntent("upload", async (_from, a) => {
 });
 
 // ── 브라우저 ──
+
+/** 내 기기가 「내 PC 의 Claude」를 붙여 두었나 — 서버가 준 내 연결 번호로 접속 목록에서 찾는다 */
+export function myRunner() {
+	const { members, conn } = useCollab.getState();
+	return !!members.find((m) => m.conn === conn)?.runner;
+}
+/** 요청을 내 PC 의 Claude 로 보낼지 — 붙어 있으면 기본으로 켠다. 보는 사람 몫이라 이 브라우저에만 기억한다.
+ *  seen — 이번에 내 Claude 가 붙은 적이 있다. 그 뒤 끊기면 요청을 덱 주인 Claude 로 조용히 넘기지 않고 막는다 (덱 주인 사용량을 모르게 쓰지 않게) */
+const MINE_KEY = "cppt.useMine";
+export const useMine = create<{ use: boolean; seen: boolean; set: (v: boolean) => void }>()((set) => ({
+	seen: false,
+	use: (() => { try { return localStorage.getItem(MINE_KEY) !== "0"; } catch { return true; } })(),
+	set: (use) => { set({ use }); try { localStorage.setItem(MINE_KEY, use ? "1" : "0"); } catch {} },
+}));
 
 let ws: WebSocket | null = null;
 let seq = 0;
@@ -442,9 +464,11 @@ function remoteActions() {
 		closeProject: hostOnly,
 		send: async (text: string, attachments: string[] = []) => {
 			const st = useDeck.getState();
+			const m = useMine.getState();
+			if (m.use && m.seen && !myRunner()) { const e = new Error(tNow("runnerLostHint")); fail(e); throw e; }
 			const mine = st.pins.filter((p) => isMine(p, useSettings.getState().s.me.trim())).map((p) => p.id);
 			// 못 보냈으면 알리고 다시 던진다 — 요청칸(Talk)이 비웠던 글 · 첨부를 되살린다
-			const r = await intent<{ key: string; via?: number } | null>("send", { text, attachments, pins: mine, talkKey: st.talkKey, current: st.deck?.slides[st.current]?.id ?? null }).catch((e) => { fail(e); throw e; });
+			const r = await intent<{ key: string; via?: number } | null>("send", { text, attachments, pins: mine, talkKey: st.talkKey, current: st.deck?.slides[st.current]?.id ?? null, runner: useMine.getState().use && myRunner() ? "mine" : undefined }).catch((e) => { fail(e); throw e; });
 			if (!r || !r.key) return;
 			// 보던 대화와 다른 세션(그 쪽을 처음 고친 세션)으로 갔으면 알리고 대화칸을 그리로
 			if (st.talkKey && r.key !== st.talkKey && r.via) d.notify(tNow("routedTo").replace("{no}", String(r.via)).replace("{n}", r.key.slice(1)), "ok");

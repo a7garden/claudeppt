@@ -31,7 +31,7 @@ use axum::routing::{get, post};
 use serde::Serialize;
 use serde_json::{Map, Value, json};
 use std::collections::{BTreeMap, HashMap};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -74,6 +74,12 @@ pub struct Hub {
 	members: Mutex<BTreeMap<u64, Member>>,
 	pending: Mutex<HashMap<String, oneshot::Sender<Value>>>,
 	next: AtomicU64,
+	/// 팀원 PC 의 Claude — 기기 id → 연결 (아래 「팀원 PC 의 Claude」)
+	runners: Mutex<HashMap<String, Runner>>,
+	/// 팀원 PC 에서 도는 턴 — 턴 id → 그 턴
+	remote_runs: Mutex<HashMap<String, RemoteRun>>,
+	/// 세션 기록을 마지막으로 이어 쓴 기기와 그때 기록 길이 — 같은 기기가 그 뒤 아무도 안 쓴 세션을 이으면 기록을 다시 보내지 않는다
+	transcript_at: Mutex<HashMap<String, (String, usize)>>,
 }
 
 /// 호스트가 올린 상태. turns 는 따로 — 글자가 흐르는 동안 바뀐 턴만 오간다
@@ -94,6 +100,8 @@ pub struct Member {
 	slide: Option<String>,
 	host: bool,
 	since: i64,
+	/// 이 기기가 「내 PC 의 Claude」를 붙여 두었나 — 요청칸이 고르기를 보인다
+	runner: bool,
 }
 
 #[derive(Serialize, Clone)]
@@ -277,6 +285,9 @@ pub async fn collab_start(app: AppHandle) -> Res<Info> {
 		members: Mutex::new(BTreeMap::new()),
 		pending: Mutex::new(HashMap::new()),
 		next: AtomicU64::new(1),
+		runners: Mutex::new(HashMap::new()),
+		remote_runs: Mutex::new(HashMap::new()),
+		transcript_at: Mutex::new(HashMap::new()),
 	});
 	let (stop_tx, stop_rx) = oneshot::channel::<()>();
 	let router = routes(h.clone());
@@ -326,6 +337,9 @@ pub fn collab_kick(app: AppHandle, device: String) -> Res<Info> {
 				let _ = tx.send(CLOSE.into());
 			}
 		}
+		if let Some(r) = h.runners.lock().unwrap().get(&device) {
+			let _ = r.tx.send(CLOSE.into());
+		}
 	})
 }
 
@@ -356,6 +370,46 @@ pub async fn collab_tunnel(app: AppHandle, on: bool) -> Res<Info> {
 	Ok(h.info())
 }
 
+/// 다른 사람의 공유 덱에 이 앱으로 들어간다 (2026.11.26) — 초대 링크나 들어간 적 있는 주소를 이 앱의 새 창으로 연다.
+/// 창 안은 호스트가 내준 화면이라 협업 브라우저와 똑같이 돈다(__CPPT_REMOTE__ → transport.ts 의 remote).
+/// 권한(capabilities/default.json)은 main 창에만 있다 — 남의 PC 가 내준 스크립트가 이 PC 의 파일 · claude · 설정을 부르지 못하게.
+/// 기기 쿠키는 앱의 웹뷰 저장소에 남아, 다음에는 주소만으로 다시 들어온다. 같은 호스트는 창 하나 (다시 열면 그 창으로)
+#[tauri::command]
+pub async fn collab_join(app: AppHandle, url: String) -> Res<String> {
+	let u = tauri::Url::parse(url.trim()).map_err(|_| "링크가 올바르지 않다".to_string())?;
+	let host = u.host_str().ok_or("링크에 주소가 없다")?.to_string();
+	if !matches!(u.scheme(), "http" | "https") {
+		return Err("http · https 링크만 열 수 있다".into());
+	}
+	let origin = u.origin().ascii_serialization();
+	let label = join_label(&origin);
+	if let Some(w) = app.get_webview_window(&label) {
+		let _ = w.unminimize();
+		let _ = w.set_focus();
+		// 초대 링크면 그리로(이름 묻기 · 쿠키 받기), 주소만이면 보던 화면 그대로
+		if u.path().starts_with("/j/") {
+			w.navigate(u).map_err(err)?;
+		}
+		return Ok(origin);
+	}
+	tauri::WebviewWindowBuilder::new(&app, &label, tauri::WebviewUrl::External(u))
+		.title(format!("ClaudePPT · {host}"))
+		.inner_size(1440.0, 900.0)
+		.min_inner_size(900.0, 600.0)
+		.center()
+		// 파일 · 쪽 끌어 놓기를 화면(HTML)이 받게 — Tauri 가 가로채면 첨부 · 쪽 끌어 놓기가 먹지 않는다
+		.disable_drag_drop_handler()
+		.initialization_script("window.__CPPT_REMOTE__ = true;")
+		.build()
+		.map_err(err)?;
+	Ok(origin)
+}
+
+/// 공유 덱 창의 이름 — 호스트 주소마다 하나. 내 PC 의 Claude(runner.rs)가 이 창에서 기기 쿠키를 읽는다
+pub fn join_label(origin: &str) -> String {
+	format!("join-{}", etag(origin.as_bytes()).trim_matches('"'))
+}
+
 /// 바깥 길에 쓸 수 있는 도구 — 화면이 안내 글을 고른다
 #[tauri::command]
 pub async fn collab_tools() -> crate::tunnel::Tools {
@@ -377,6 +431,14 @@ pub fn collab_stop(state: State<Collab>) {
 		// 다시 켠 서버에 다시 붙지 못한다
 		for (_, tx) in h.conns.lock().unwrap().values() {
 			let _ = tx.send(CLOSE.into());
+		}
+		for r in h.runners.lock().unwrap().values() {
+			let _ = r.tx.send(CLOSE.into());
+		}
+		for run in h.remote_runs.lock().unwrap().values_mut() {
+			if let Some(d) = run.done.take() {
+				let _ = d.send(json!({ "code": -1, "stderr": "협업을 껐다" }));
+			}
 		}
 		let h2 = h.clone();
 		tauri::async_runtime::spawn(async move {
@@ -417,7 +479,7 @@ pub fn collab_reply(app: AppHandle, id: String, reply: Value) {
 #[tauri::command]
 pub fn collab_view(app: AppHandle, name: String, slide: Option<String>) {
 	if let Some(h) = hub(&app) {
-		h.members.lock().unwrap().insert(0, Member { conn: 0, device: String::new(), name, slide, host: true, since: now() });
+		h.members.lock().unwrap().insert(0, Member { conn: 0, device: String::new(), name, slide, host: true, since: now(), runner: false });
 		h.members_changed();
 	}
 }
@@ -428,6 +490,9 @@ fn routes(h: Arc<Hub>) -> Router {
 	Router::new()
 		.route("/_/ws", get(ws))
 		.route("/_/rpc", post(rpc))
+		.route("/_/runner", get(runner_ws))
+		.route("/_/runner/manifest", get(runner_manifest))
+		.route("/_/runner/file", get(runner_file))
 		.route("/_/d/{key}/{*rest}", get(deck))
 		.route("/__rt.js", get(deck_rt))
 		.route("/j/{token}", get(join_page).post(join))
@@ -451,7 +516,7 @@ async fn auth(Ax(h): Ax<Arc<Hub>>, mut req: Request, next: Next) -> Response {
 		return next.run(req).await;
 	}
 	let public = h.public.lock().unwrap().as_ref().map(|(u, _)| u.clone());
-	if (path == "/_/ws" || path == "/_/rpc") && !same_origin(req.headers(), public.as_deref()) {
+	if (path == "/_/ws" || path == "/_/rpc" || path.starts_with("/_/runner")) && !same_origin(req.headers(), public.as_deref()) {
 		return StatusCode::FORBIDDEN.into_response();
 	}
 	let who = cookie_of(req.headers()).and_then(|c| h.book.lock().unwrap().device(&c, now())).map(|d| Who { device: d.id, name: d.name });
@@ -663,7 +728,7 @@ async fn conn(h: Arc<Hub>, who: Who, mut socket: WebSocket) {
 	let (direct, mut inbox) = mpsc::unbounded_channel::<String>();
 	let mut rx = h.tx.subscribe();
 	h.conns.lock().unwrap().insert(id, (who.device.clone(), direct.clone()));
-	h.members.lock().unwrap().insert(id, Member { conn: id, device: who.device.clone(), name: who.name.clone(), slide: None, host: false, since: now() });
+	h.members.lock().unwrap().insert(id, Member { conn: id, device: who.device.clone(), name: who.name.clone(), slide: None, host: false, since: now(), runner: h.runners.lock().unwrap().contains_key(&who.device) });
 	h.members_changed();
 	let hello = json!({ "t": "hello", "conn": id, "deckKey": h.deck_key, "name": who.name }).to_string();
 	if socket.send(Message::Text(hello.into())).await.is_err() || socket.send(Message::Text(h.snapshot().into())).await.is_err() {
@@ -751,6 +816,307 @@ fn on_message(h: &Arc<Hub>, conn: u64, direct: &mpsc::UnboundedSender<String>, t
 	}
 }
 
+// ── 팀원 PC 의 Claude (runner.rs 가 붙는다) ──
+//
+// 2026.11.26 : 팀원이 「내 PC 의 Claude」로 보낸 턴도 덱 주인 앱이 지금처럼 지휘한다(줄 세우기 · 대화 · 판 · 그림 채우기).
+// claude 프로세스만 팀원 PC 의 사본 폴더에서 돈다. 그래서 겪는 것이 덱 주인 Claude 와 같다:
+//   출력 줄      팀원 PC 가 보낸 줄을 이 PC 의 「claude」 사건으로 그대로 낸다 — 대화칸 · 도구 목록 · 세션 id 가 같은 코드로 돈다
+//   파일 쓰기    Claude 가 사본에 쓰는 즉시 그 파일을 보낸다(put). 여기서 덱에 쓰면 폴더 감시가 모두의 화면을 바로 다시 그린다
+//   사본 맞추기  /_/runner/manifest · file 로 받고, 덱이 바뀌면 바뀐 경로를 알린다(files_changed) — Claude 는 늘 최신 파일을 읽는다
+//   대화 기록    이어 쓸 세션이면 기록 글을 함께 보내고, 끝나면 늘어난 뒷부분을 받아 덱에 남긴다 — 누가 어느 PC 에서 이어 써도 맥락이 같다.
+//                그 PC 가 마지막으로 이어 쓴 뒤 아무도 이어 쓰지 않았으면 기록을 다시 보내지 않는다 (기록은 수 MB 까지 커진다 — 바깥 길에서 시작이 늦었다)
+//   경로        출력 줄 안의 사본 경로는 팀원 PC 가 표시(DECK_MARK)로 바꿔 보내고 여기서 덱 경로로 채운다 — 서로의 PC 경로(사용자 이름)가 건너가지 않는다
+// 받는 쓰기는 그 기기의 턴이 도는 동안, 덱 폴더 안, .git · .claudeppt 밖만. 팀원 PC 가 덱 주인 PC 의 다른 곳을 건드리지 못하게
+
+/// 팀원 PC 의 Claude 연결 하나
+struct Runner {
+	tx: mpsc::UnboundedSender<String>,
+	conn: u64,
+}
+
+/// 출력 줄 안에서 사본 폴더 자리를 가리키는 표시 — runner.rs 와 같아야 한다. JSON 글 안에서 역슬래시로 쓴 경로 · 빗금으로 쓴 경로
+pub const DECK_MARK: &str = "@@CPPT_DECK@@";
+pub const DECK_MARK_FWD: &str = "@@CPPT_DECK_FWD@@";
+
+/// 팀원 PC 에서 도는 턴
+struct RemoteRun {
+	device: String,
+	dir: PathBuf,
+	done: Option<oneshot::Sender<Value>>,
+}
+
+/// 사본에 넣는 파일인가 — 판 이력 · 앱 상태는 빼고, 턴이 읽는 첨부 · 판 펼침은 넣는다
+fn mirrored(rel: &str) -> bool {
+	!rel.is_empty()
+		&& !rel.starts_with(".git")
+		&& !rel.starts_with("releases/")
+		&& (!rel.starts_with(".claudeppt/") || rel.starts_with(".claudeppt/attach/") || rel.starts_with(".claudeppt/versions/"))
+}
+
+/// 팀원 PC 가 써도 되는 파일인가 — Claude 가 고치는 덱 파일만
+fn writable(rel: &str) -> bool {
+	!rel.is_empty() && !rel.starts_with(".git") && !rel.starts_with(".claudeppt") && !rel.starts_with("releases/") && !rel.contains("..") && !rel.starts_with('/')
+}
+
+impl Hub {
+	/// 지금 내준 덱 폴더 — 호스트 화면이 올린 상태의 dir. 열린 프로젝트일 때만
+	fn deck_dir(&self) -> Option<(String, PathBuf)> {
+		let (dir, id) = {
+			let s = self.shared.lock().unwrap();
+			(s.set.get("dir")?.as_str()?.to_string(), s.set.get("id")?.as_str()?.to_string())
+		};
+		let open = self.app.state::<AppState>().projects.lock().unwrap().get(&id).cloned()?;
+		(open == PathBuf::from(&dir)).then_some((id, open))
+	}
+
+	fn set_runner_flag(&self, device: &str, on: bool) {
+		for m in self.members.lock().unwrap().values_mut() {
+			if m.device == device {
+				m.runner = on;
+			}
+		}
+		self.members_changed();
+	}
+}
+
+/// 덱이 바뀌었다 (watch.rs) — 붙어 있는 팀원 PC 들이 사본을 맞춘다. 경로마다 내용 지문(없어졌으면 null)을 함께 보낸다 —
+/// 팀원 PC 가 방금 보낸 파일이면 지문이 같아 다시 받지 않는다
+pub fn files_changed(app: &AppHandle, paths: &[String]) {
+	let Some(h) = hub(app) else { return };
+	if h.runners.lock().unwrap().is_empty() {
+		return;
+	}
+	let Some((_, dir)) = h.deck_dir() else { return };
+	let mut files = Map::new();
+	for p in paths.iter().filter(|p| mirrored(p)) {
+		let hash = std::fs::read(dir.join(p)).ok().map(|b| etag(&b).trim_matches('"').to_string());
+		files.insert(p.clone(), hash.map(Value::from).unwrap_or(Value::Null));
+	}
+	if files.is_empty() {
+		return;
+	}
+	let msg = json!({ "t": "changed", "files": files }).to_string();
+	for r in h.runners.lock().unwrap().values() {
+		let _ = r.tx.send(msg.clone());
+	}
+}
+
+/// 사본에 넣을 파일 목록과 내용 지문
+async fn runner_manifest(Ax(h): Ax<Arc<Hub>>) -> Response {
+	let Some((id, dir)) = h.deck_dir() else { return (StatusCode::NOT_FOUND, "덱이 열려 있지 않다").into_response() };
+	let files = tokio::task::spawn_blocking(move || {
+		let mut out = Map::new();
+		let mut stack = vec![dir.clone()];
+		while let Some(d) = stack.pop() {
+			for e in std::fs::read_dir(&d).into_iter().flatten().flatten() {
+				let p = e.path();
+				let rel = p.strip_prefix(&dir).unwrap().to_string_lossy().replace('\\', "/");
+				if p.is_dir() {
+					if rel != ".git" && rel != "releases" {
+						stack.push(p);
+					}
+				} else if mirrored(&rel) {
+					if let Ok(b) = std::fs::read(&p) {
+						out.insert(rel, Value::from(etag(&b).trim_matches('"').to_string()));
+					}
+				}
+			}
+		}
+		out
+	})
+	.await
+	.unwrap_or_default();
+	axum::Json(json!({ "id": id, "files": files })).into_response()
+}
+
+#[derive(serde::Deserialize)]
+struct FileQ {
+	path: String,
+}
+
+async fn runner_file(Ax(h): Ax<Arc<Hub>>, axum::extract::Query(q): axum::extract::Query<FileQ>) -> Response {
+	let Some((_, dir)) = h.deck_dir() else { return StatusCode::NOT_FOUND.into_response() };
+	if !mirrored(&q.path) {
+		return StatusCode::FORBIDDEN.into_response();
+	}
+	match crate::fsx::inside(&dir.to_string_lossy(), &q.path).and_then(|p| std::fs::read(p).map_err(err)) {
+		Ok(b) => (StatusCode::OK, [(header::CONTENT_TYPE, "application/octet-stream")], b).into_response(),
+		Err(_) => StatusCode::NOT_FOUND.into_response(),
+	}
+}
+
+async fn runner_ws(Ax(h): Ax<Arc<Hub>>, axum::Extension(who): axum::Extension<Who>, up: WebSocketUpgrade) -> Response {
+	// 대화 기록 · 그림 파일이 한 번에 온다
+	up.max_message_size(256 << 20).on_upgrade(move |s| runner_conn(h, who, s))
+}
+
+async fn runner_conn(h: Arc<Hub>, who: Who, mut socket: WebSocket) {
+	let id = h.next.fetch_add(1, Ordering::SeqCst);
+	let (tx, mut inbox) = mpsc::unbounded_channel::<String>();
+	// 한 기기에 하나 — 다시 붙으면 옛 연결을 끊는다
+	let old = h.runners.lock().unwrap().insert(who.device.clone(), Runner { tx, conn: id });
+	if let Some(old) = old {
+		let _ = old.tx.send(CLOSE.into());
+		// 옛 연결에서 돌던 턴은 그 PC 가 이미 껐다(runner.rs 는 끊기면 claude 를 끈다). 끝내지 않으면 3시간 동안 「도는 중」으로 남는다
+		fail_runs(&h, &who.device, "팀원 PC 가 다시 붙었다");
+	}
+	h.set_runner_flag(&who.device, true);
+	let mut beat = tokio::time::interval_at(tokio::time::Instant::now() + BEAT, BEAT);
+	let mut heard = tokio::time::Instant::now();
+	loop {
+		tokio::select! {
+			m = socket.recv() => match m {
+				Some(Ok(Message::Text(t))) => { heard = tokio::time::Instant::now(); on_runner_message(&h, &who.device, t.as_str()) }
+				Some(Ok(Message::Close(_))) | None | Some(Err(_)) => break,
+				_ => heard = tokio::time::Instant::now(),
+			},
+			d = inbox.recv() => match d {
+				Some(s) if s == CLOSE => { let _ = socket.send(Message::Close(None)).await; break; }
+				Some(s) => { if socket.send(Message::Text(s.into())).await.is_err() { break; } }
+				None => break,
+			},
+			_ = beat.tick() => {
+				if heard.elapsed() > BEAT * 3 { break; }
+				if socket.send(Message::Ping(Default::default())).await.is_err() { break; }
+			},
+		}
+	}
+	let mine = {
+		let mut r = h.runners.lock().unwrap();
+		let mine = r.get(&who.device).is_some_and(|x| x.conn == id);
+		if mine {
+			r.remove(&who.device);
+		}
+		mine
+	};
+	if mine {
+		h.set_runner_flag(&who.device, false);
+		// 그 PC 에서 돌던 턴은 끝낸다 — 그때까지 보낸 파일은 덱에 남는다(이 PC 에서 멈춘 턴과 같다)
+		fail_runs(&h, &who.device, "팀원 PC 와 연결이 끊겼다");
+	}
+}
+
+fn fail_runs(h: &Hub, device: &str, why: &str) {
+	for run in h.remote_runs.lock().unwrap().values_mut().filter(|r| r.device == device) {
+		if let Some(d) = run.done.take() {
+			let _ = d.send(json!({ "code": -1, "stderr": why }));
+		}
+	}
+}
+
+/// 출력 줄 안의 사본 자리 표시를 덱 경로로 — JSON 글 안이라 역슬래시는 둘이다
+fn rewrite(line: &str, dir: &Path) -> String {
+	let host = dir.to_string_lossy().to_string();
+	line.replace(DECK_MARK, &host.replace('\\', "\\\\")).replace(DECK_MARK_FWD, &host.replace('\\', "/"))
+}
+
+fn on_runner_message(h: &Arc<Hub>, device: &str, text: &str) {
+	let Ok(m) = serde_json::from_str::<Value>(text) else { return };
+	let turn = m["turn"].as_str().unwrap_or("").to_string();
+	// 그 기기의 턴인가 — 남의 턴 이름으로 줄 · 파일을 보내지 못하게
+	let run_dir = || h.remote_runs.lock().unwrap().get(&turn).filter(|r| r.device == device).map(|r| r.dir.clone());
+	match m["t"].as_str().unwrap_or("") {
+		"line" => {
+			let Some(dir) = run_dir() else { return };
+			let line = rewrite(m["line"].as_str().unwrap_or(""), &dir);
+			let _ = h.app.emit("claude", json!({ "turn": turn, "line": line }));
+		}
+		"put" => {
+			let Some(dir) = run_dir() else { return };
+			let rel = m["path"].as_str().unwrap_or("");
+			use base64::Engine;
+			let Ok(bytes) = base64::engine::general_purpose::STANDARD.decode(m["data"].as_str().unwrap_or("")) else { return };
+			if !writable(rel) || bytes.len() > 64 << 20 {
+				return;
+			}
+			if let Ok(p) = crate::fsx::inside(&dir.to_string_lossy(), rel) {
+				if let Some(d) = p.parent() {
+					let _ = std::fs::create_dir_all(d);
+				}
+				let _ = std::fs::write(p, bytes);
+			}
+		}
+		"exit" => {
+			let Some(dir) = run_dir() else { return };
+			// 기록은 덧붙기만 한다 — 팀원 PC 는 받은(또는 이미 있던) 길이 base 뒤의 것만 보낸다. 덱의 기록 길이가 base 와 같을 때만 잇는다
+			if let (Some(sid), Some(tail)) = (m["sid"].as_str(), m["tail"].as_str()) {
+				let base = m["base"].as_u64().unwrap_or(0) as usize;
+				let have = crate::claude::saved_transcript(&dir, sid).unwrap_or_default();
+				let full = if base == 0 { Some(tail.to_string()) } else if have.len() == base { Some(have + tail) } else { None };
+				if let Some(full) = full {
+					crate::claude::save_transcript(&dir, sid, &full);
+					h.transcript_at.lock().unwrap().insert(sid.to_string(), (device.to_string(), full.len()));
+				}
+			}
+			if let Some(d) = h.remote_runs.lock().unwrap().get_mut(&turn).and_then(|r| r.done.take()) {
+				let _ = d.send(json!({ "code": m["code"].as_i64().unwrap_or(-1), "stderr": m["stderr"].as_str().unwrap_or("") }));
+			}
+		}
+		_ => {}
+	}
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RemoteSpec {
+	turn: String,
+	dir: String,
+	device: String,
+	prompt: String,
+	system: String,
+	resume: Option<String>,
+	session_id: Option<String>,
+}
+
+/// 턴을 팀원 PC 의 Claude 로 돌린다 — claude_run 과 같은 답({code, stderr})을 준다. 줄은 그 사이 「claude」 사건으로 온다
+#[tauri::command]
+pub async fn claude_run_remote(app: AppHandle, spec: RemoteSpec) -> Res<Value> {
+	let h = hub(&app).ok_or("협업이 꺼져 있다")?;
+	let tx = h.runners.lock().unwrap().get(&spec.device).map(|r| r.tx.clone()).ok_or("그 팀원 PC 의 Claude 가 연결되어 있지 않다")?;
+	let dir = PathBuf::from(&spec.dir);
+	let resume = spec.resume.clone().filter(|s| !s.is_empty());
+	// 이어 쓸 기록 — 덱에 남겨 두고(끝나면 뒷부분을 여기에 잇는다), 그 PC 가 이미 같은 기록을 쥐고 있으면 보내지 않는다
+	let mut transcript = None;
+	let mut transcript_len = 0usize;
+	if let Some(sid) = resume.as_deref() {
+		if let Some(t) = crate::claude::transcript_text(&dir, sid) {
+			if crate::claude::saved_transcript(&dir, sid).as_deref() != Some(t.as_str()) {
+				crate::claude::save_transcript(&dir, sid, &t);
+			}
+			transcript_len = t.len();
+			let held = h.transcript_at.lock().unwrap().get(sid).is_some_and(|(d, n)| *d == spec.device && *n == t.len());
+			if !held {
+				transcript = Some(t);
+			}
+		}
+	}
+	let (done_tx, done_rx) = oneshot::channel();
+	h.remote_runs.lock().unwrap().insert(spec.turn.clone(), RemoteRun { device: spec.device.clone(), dir, done: Some(done_tx) });
+	let job = json!({ "t": "run", "turn": spec.turn, "prompt": spec.prompt, "system": spec.system, "resume": resume, "sessionId": spec.session_id, "transcript": transcript, "transcriptLen": transcript_len });
+	if tx.send(job.to_string()).is_err() {
+		h.remote_runs.lock().unwrap().remove(&spec.turn);
+		return Err("그 팀원 PC 의 Claude 가 연결되어 있지 않다".into());
+	}
+	let r = tokio::time::timeout(INTENT_WAIT, done_rx).await;
+	h.remote_runs.lock().unwrap().remove(&spec.turn);
+	let v = match r {
+		Ok(Ok(v)) => v,
+		_ => json!({ "code": -1, "stderr": "팀원 PC 가 답하지 않았다" }),
+	};
+	Ok(json!({ "turn": spec.turn, "code": v["code"], "stderr": v["stderr"] }))
+}
+
+/// 팀원 PC 에서 도는 턴이면 멈추라고 보낸다 (claude_stop 이 부른다)
+pub fn stop_remote(app: &AppHandle, turn: &str) {
+	let Some(h) = hub(app) else { return };
+	let device = h.remote_runs.lock().unwrap().get(turn).map(|r| r.device.clone());
+	if let Some(d) = device {
+		if let Some(r) = h.runners.lock().unwrap().get(&d) {
+			let _ = r.tx.send(json!({ "t": "stop", "turn": turn }).to_string());
+		}
+	}
+}
+
 #[cfg(test)]
 mod tests {
 	use super::*;
@@ -800,6 +1166,31 @@ mod tests {
 		assert_eq!(etag(b"a"), etag(b"a"));
 		assert_ne!(etag(b"a"), etag(b"b"));
 		assert!(etag(b"").starts_with('"') && etag(b"").ends_with('"'));
+	}
+
+	#[test]
+	fn runner_reads_and_writes_only_deck_files() {
+		for ok in ["slides/s1.html", "theme.css", "assets/a.png", ".claudeppt/attach/x.png", ".claudeppt/versions/v3/slides/s1.html", "deck.json"] {
+			assert!(mirrored(ok), "{ok}");
+		}
+		for no in [".git/config", ".claudeppt/talk.json", ".claudeppt/sessions/a.jsonl", "releases/r1.pptx", ""] {
+			assert!(!mirrored(no), "{no}");
+		}
+		for ok in ["slides/s1.html", "theme.css", "assets/new.svg", "deck.json"] {
+			assert!(writable(ok), "{ok}");
+		}
+		for no in [".git/hooks/post-commit", ".claudeppt/talk.json", "../x", "/etc/x", "slides/../../x", "releases/r.pptx"] {
+			assert!(!writable(no), "{no}");
+		}
+	}
+
+	#[test]
+	fn fills_deck_marks_in_json_lines() {
+		// 출력 줄은 JSON 이라 경로의 역슬래시가 둘이다. 팀원 PC 는 사본 자리를 표시로 바꿔 보낸다
+		let line = r#"{"file_path":"@@CPPT_DECK@@\\slides\\s1.html","p":"@@CPPT_DECK_FWD@@/theme.css"}"#;
+		let out = rewrite(line, Path::new(r"D:\d\덱"));
+		assert_eq!(out, r#"{"file_path":"D:\\d\\덱\\slides\\s1.html","p":"D:/d/덱/theme.css"}"#);
+		assert!(serde_json::from_str::<Value>(&out).is_ok());
 	}
 
 	#[test]

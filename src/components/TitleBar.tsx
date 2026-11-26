@@ -158,7 +158,7 @@ function VersionList({ onClose }: { onClose: () => void }) {
 							{ label: t("restore"), run: () => restore(c), disabled: c === head || !!running },
 							"-",
 							{ label: t("compareWith"), run: () => { onClose(); useDeck.getState().startCompare(c); }, disabled: c === head },
-							{ label: `${t("mentionVersion")}`, kbd: `@v${c.n}`, run: () => { onClose(); useDeck.getState().mentionVersion(c.n); }, disabled: c === head },
+							{ label: `${t("mentionVersion")}`, run: () => { onClose(); useDeck.getState().mentionVersion(c.n); }, disabled: c === head },
 						])}>
 						{/* 대화의 판 알약과 같은 모양 — 지금 판만 채운다 */}
 						<span className={"node" + (c === head ? " head" : "")}>v{c.n}</span>

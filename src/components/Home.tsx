@@ -1,6 +1,7 @@
 // 처음 화면 — 위에 주제 한 줄(쓰면 바로 Claude 가 짓기 시작) · 가져오기 · 열기, 그 아래 최근 덱을 첫 쪽 미리보기 카드로 깐다.
 // 창에 끌어 놓기는 DropZone(App 에 하나)이 받는다.
 // 2026.11.18 : 최근 목록을 오른쪽 글자 줄에서 화면 대부분을 쓰는 카드로 바꿨다 — 가장 잦은 일이 지난 덱을 여는 것이고, 덱은 모양으로 알아본다.
+// 2026.11.26 : 「공유 덱 열기」 — 팀원이 보낸 초대 링크를 브라우저 대신 이 앱의 새 창으로 연다 (collab.rs collab_join). 들어간 곳은 아래 「공유 덱」에 남는다.
 import { open } from "@tauri-apps/plugin-dialog";
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { api, deckUrl, type LibItem } from "../lib/api";
@@ -8,6 +9,23 @@ import { openAny, startNew } from "../lib/flows";
 import { useT } from "../lib/i18n";
 import { useSettings } from "../lib/settings";
 import { useDeck } from "../lib/store";
+import { call } from "../lib/transport";
+import { type RunnerState, setMine, useRunners } from "../lib/runner";
+
+/** 공유 덱에 앱으로 들어간다 — 새 창이 뜬다. 들어간 호스트 주소를 남겨 다음에는 주소만으로 (기기 쿠키가 앱에 남는다) */
+async function joinShared(raw: string) {
+	const url = raw.trim();
+	if (!url) return false;
+	try {
+		const origin = await call<string>("collab_join", { url });
+		const at = origin + "/";
+		useSettings.getState().set((s) => ({ ...s, shared: [{ url: at, at: Date.now() }, ...s.shared.filter((x) => x.url !== at)].slice(0, 12) }));
+		return true;
+	} catch (e) {
+		useDeck.getState().notify(String(e), "err");
+		return false;
+	}
+}
 
 export default function Home() {
 	const t = useT();
@@ -18,6 +36,9 @@ export default function Home() {
 	const [working, setWorking] = useState(false);
 	// 이번에 만들 덱의 템플릿 — 처음엔 설정의 「새 덱」 템플릿. 여기서 바꿔도 설정은 그대로 둔다
 	const [tpl, setTpl] = useState(s.template);
+	// 공유 덱 열기 — 초대 링크 칸
+	const [joining, setJoining] = useState(false);
+	const [link, setLink] = useState("");
 
 	useEffect(() => {
 		(async () => {
@@ -88,9 +109,35 @@ export default function Home() {
 					)}
 					<button onClick={pickPptx}>{t("openPptx")}<kbd>Ctrl O</kbd></button>
 					<button onClick={pickDeck}>{t("openDeck")}<kbd>Ctrl ⇧ O</kbd></button>
+					<button onClick={() => setJoining(!joining)} aria-expanded={joining}>{t("joinShared")}</button>
 				</div>
+				{joining && (
+					<form className="join-row" onSubmit={async (e) => { e.preventDefault(); if (await joinShared(link)) { setLink(""); setJoining(false); } }}>
+						<input className="field" autoFocus value={link} onChange={(e) => setLink(e.target.value)} placeholder={t("joinPh")} aria-label={t("joinShared")}
+							onKeyDown={(e) => { if (e.key === "Escape") setJoining(false); }} />
+						<button className="send" disabled={!link.trim()}>{t("joinGo")}</button>
+						<span className="dim">{t("joinNote")}</span>
+					</form>
+				)}
 			</section>
 			<section className="home-decks" aria-label={t("recentDecks")}>
+				{s.shared.length > 0 && (
+					<div className="shared">
+						<div className="side-head">{t("sharedDecks")}<span>{s.shared.length}</span></div>
+						<div className="shared-list">
+							{s.shared.map((x) => (
+								<span className="shared-item" key={x.url}>
+									<button onClick={() => joinShared(x.url)} title={x.url}>
+										<b>{x.url.replace(/^https?:\/\//, "").replace(/\/$/, "")}</b>
+										<span className="dim">{new Date(x.at).toLocaleDateString()}</span>
+									</button>
+									<MineToggle url={x.url} on={!!x.mine} />
+									<button className="x" onClick={() => useSettings.getState().set((v) => ({ ...v, shared: v.shared.filter((y) => y.url !== x.url) }))} aria-label={t("delete")} title={t("sharedForget")}>×</button>
+								</span>
+							))}
+						</div>
+					</div>
+				)}
 				<div className="side-head">{t("recentDecks")}<span>{items.length || ""}</span></div>
 				{items.length === 0 ? (
 					<div className="decks-empty">{t("decksEmpty")}</div>
@@ -107,6 +154,21 @@ export default function Home() {
 				)}
 			</section>
 		</main>
+	);
+}
+
+/** 「내 Claude 쓰기」 — 이 덱 주인에게 내 PC 의 Claude 를 붙인다 (runner.ts). 켜면 지금 상태(기다림 · 연결 · 일하는 중)를 함께 */
+const RUNNER_LABEL: Record<RunnerState, "runnerWaiting" | "runnerConnected" | "runnerRunning" | "runnerError" | "runnerUse"> = {
+	waiting: "runnerWaiting", connected: "runnerConnected", running: "runnerRunning", error: "runnerError", off: "runnerUse",
+};
+function MineToggle({ url, on }: { url: string; on: boolean }) {
+	const t = useT();
+	const st = useRunners((r) => r.st[new URL(url).origin]);
+	return (
+		<label className={"mine" + (on ? " on" : "") + (st ? " " + st.state : "")} title={st?.detail || t("runnerUseHint")}>
+			<input type="checkbox" checked={on} onChange={() => setMine(url, !on).catch((e) => useDeck.getState().notify(String(e), "err"))} />
+			<span>{on && st ? t(RUNNER_LABEL[st.state]) : t("runnerUse")}</span>
+		</label>
 	);
 }
 

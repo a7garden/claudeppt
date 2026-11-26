@@ -20,6 +20,7 @@ import { VersionBar, VersionLens } from "./VersionLens";
 import { Ribbon, type SelInfo, useRibbon } from "./Ribbon";
 import { SketchBoard } from "./Sketch";
 import { EditingNote, SlideFaces, StageFaces } from "./Collab";
+import { CheckBar, CheckMarks, PageGuides } from "./CheckMarks";
 import { remote } from "../lib/transport";
 import { useSettings } from "../lib/settings";
 import Talk, { useTalkFold } from "./Talk";
@@ -151,7 +152,7 @@ function dragSlide(e: React.DragEvent, id: string) {
 function slideItems(i: number, n: number, t: ReturnType<typeof useT>): MenuItem[] {
 	const st = useDeck.getState();
 	return [
-		{ label: t("mention"), kbd: `@${i + 1}`, run: () => st.mentionSlide(i + 1) },
+		{ label: t("mention"), run: () => st.mentionSlide(i + 1) },
 		"-",
 		{ label: t("insertAbove"), run: () => st.addSlide(i) },
 		{ label: t("insertBelow"), run: () => st.addSlide(i + 1) },
@@ -462,7 +463,7 @@ function Stage() {
 		}
 		const i = current, n = deck.slides.length;
 		openMenu(e, [
-			{ label: t("mention"), kbd: `@${i + 1}`, run: () => st.mentionSlide(i + 1) },
+			{ label: t("mention"), run: () => st.mentionSlide(i + 1) },
 			...(at && !flow && !compare ? [{ label: t("pinHere"), run: () => pinAt(at.x, at.y) }] : []),
 			...(mode === "edit" && hit?.path?.length && !flow && !compare ? [
 				{ label: t("rbCopy"), kbd: "Ctrl+C", run: () => cmd("copy") },
@@ -502,6 +503,7 @@ function Stage() {
 			<div className="stage-banner">
 				<StageFaces slideId={slide.id} />
 				<EditingNote slideId={slide.id} />
+				{!preview && !compare && !flow && <CheckBar slideId={slide.id} />}
 				{compare && <VersionBar slideId={slide.id} />}
 				{preview && (
 					<div className="past" role="status">
@@ -510,7 +512,7 @@ function Stage() {
 						<span className="dim mono">{preview.date}</span>
 						<button className="primary" onClick={() => restore(preview)}>{t("restore")}</button>
 						<button onClick={() => useDeck.getState().startCompare(preview)}>{t("compareWith")}</button>
-						<button onClick={() => useDeck.getState().mentionVersion(preview.n)} title={t("mentionVersionHint")}>@v{preview.n}</button>
+						<button onClick={() => useDeck.getState().mentionVersion(preview.n)} title={t("mentionVersionHint")}>{t("mentionVersion")}</button>
 						<button onClick={() => setPreview(null)}>{t("backToNow")}</button>
 					</div>
 				)}
@@ -524,6 +526,8 @@ function Stage() {
 									onWin={(w, file) => { win.current = w; const id = useDeck.getState().deck?.slides.find((s) => s.file === file)?.id; if (id) owner.current.set(w, id); }} />
 							</div>
 						</div>
+						{!preview && !compare && <PageGuides w={deck.size.w} h={deck.size.h} scale={scale} />}
+						{!preview && !compare && <CheckMarks slideId={slide.id} scale={scale} />}
 						{compare && <VersionLens slideId={slide.id} w={deck.size.w} h={deck.size.h} scale={scale} />}
 						{!preview && !compare && (
 							<SlideMarks slideId={slide.id} w={deck.size.w} h={deck.size.h} scale={scale} drawing={mode === "pin" && tool !== "sketch"} active={active} setActive={setActive} onMark={onMark} />

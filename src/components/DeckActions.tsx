@@ -1,19 +1,22 @@
 // 제목 줄 오른쪽 — 내보내기(PPTX 두 갈래 · CPPT 묶음 · 폴더 열기)와 릴리즈. 누른 단추 아래에 작은 띄움 상자로 편다.
 // 2026.11.18 : 내보내기의 「비교」는 무대 도구 띠 오른쪽으로 옮겼다 — 내보내는 일이 아니라 무대에서 보는 일이다.
-// 2026.11.26 : 「감사」를 더했다 — 템플릿을 벗어난 곳 · AI 티가 나는 곳을 쪽마다 짚고, 고르면 Claude 에게 고치게 한다 (audit.ts).
+// 2026.11.26 : 「점검」(처음 이름은 감사)을 더했다 — 서식 · 배치 · 표현 규칙에 걸린 곳을 쪽마다 짚고, 고르면 Claude 에게 고치게 한다 (audit.ts).
+//              「쪽 설정」을 더했다 — 덱의 쪽 여백을 네 변으로 정한다.
 import { save } from "@tauri-apps/plugin-dialog";
 import { useEffect, useRef, useState } from "react";
 import { api, join } from "../lib/api";
-import { safeName } from "../lib/deck";
-import type { AuditKind, AuditReport } from "../lib/audit";
+import { type Margins, repageCss, safeName } from "../lib/deck";
+import type { AuditKind } from "../lib/audit";
+import { focus, hideCheck, runCheck, useCheck, useGuides } from "../lib/checkView";
 import { type Key, useT } from "../lib/i18n";
-import { deckTemplate } from "../lib/prompt";
+import { deckTemplate, pageMargins } from "../lib/prompt";
 import { useSettings } from "../lib/settings";
 import { me, useDeck } from "../lib/store";
+import { remote } from "../lib/transport";
 
 export default function DeckActions() {
 	const t = useT();
-	const [open, setOpen] = useState<"" | "audit" | "export" | "release">("");
+	const [open, setOpen] = useState<"" | "audit" | "page" | "export" | "release">("");
 	const ref = useRef<HTMLDivElement>(null);
 	useEffect(() => {
 		if (!open) return;
@@ -31,10 +34,12 @@ export default function DeckActions() {
 	const busy = useDeck((s) => !!s.busy || !!s.running);
 	return (
 		<div ref={ref} className="deck-acts">
+			<button className={"tb-btn" + (open === "page" ? " on" : "")} onClick={() => setOpen(open === "page" ? "" : "page")} disabled={busy || remote}>{t("pageSetup")}</button>
 			<button className={"tb-btn" + (open === "audit" ? " on" : "")} onClick={() => setOpen(open === "audit" ? "" : "audit")} disabled={busy}>{t("audit")}</button>
 			<button className={"tb-btn" + (open === "export" ? " on" : "")} onClick={() => setOpen(open === "export" ? "" : "export")} disabled={busy}>{t("export")}</button>
 			<button className={"tb-btn" + (open === "release" ? " on" : "")} onClick={() => setOpen(open === "release" ? "" : "release")} disabled={busy}>{t("release")}</button>
 			{open === "audit" && <AuditPop onDone={() => setOpen("")} />}
+			{open === "page" && <PagePop onDone={() => setOpen("")} />}
 			{open === "export" && <ExportPop onDone={() => setOpen("")} />}
 			{open === "release" && <ReleasePop onDone={() => setOpen("")} />}
 		</div>
@@ -126,81 +131,203 @@ function ReleasePop({ onDone }: { onDone: () => void }) {
 	);
 }
 
-/** 덱마다 마지막 감사 — 상자를 닫았다 열어도 다시 돌리지 않는다. 고친 뒤에는 「다시 감사」 */
-let lastAudit: { dir: string; report: AuditReport } | null = null;
-const KINDS: { k: AuditKind | "all"; label: Key }[] = [
-	{ k: "all", label: "auditAll" }, { k: "template", label: "auditKindTemplate" }, { k: "slop", label: "auditKindSlop" }, { k: "layout", label: "auditKindLayout" },
+/** 점검 갈래 — 이름과 무엇을 보는지 한 줄 */
+const KINDS: { k: AuditKind; label: Key; hint: Key }[] = [
+	{ k: "template", label: "auditKindTemplate", hint: "auditKindTemplateHint" },
+	{ k: "layout", label: "auditKindLayout", hint: "auditKindLayoutHint" },
+	{ k: "slop", label: "auditKindSlop", hint: "auditKindSlopHint" },
 ];
+const kindLabel = (k: AuditKind): Key => KINDS.find((x) => x.k === k)!.label;
+/** 고른 갈래 — 이 PC 에 기억한다 */
+const KINDS_KEY = "cppt.checkKinds";
+const savedKinds = (): AuditKind[] => {
+	try { const v = JSON.parse(localStorage.getItem(KINDS_KEY) || "null"); if (Array.isArray(v) && v.length) return v; } catch {}
+	return KINDS.map((x) => x.k);
+};
 
-/** 감사 — 쪽마다 짚은 것을 한 줄씩. 쪽 줄을 누르면 그 쪽으로 가고, 「Claude 에게 고치기」는 지금 고른 갈래만 보낸다 */
+/** 점검 — 누르면 먼저 무엇을 볼지(갈래 · 추가 지시)를 정하고 「점검 시작」. 결과의 항목을 누르면 그 쪽으로 가서 걸린 요소를 무대에 표시한다.
+ *  2026.11.26 : 누르자마자 돌던 것을 시작 화면으로 바꿨다. 규칙 점검은 자동이고, 사람이 적은 지시는 「Claude 에게 고치기」에 함께 실린다 */
 function AuditPop({ onDone }: { onDone: () => void }) {
 	const t = useT();
 	const dir = useDeck((s) => s.dir);
-	const [report, setReport] = useState<AuditReport | null>(lastAudit?.dir === dir ? lastAudit.report : null);
+	const report = useCheck((s) => s.report);
+	const [setup, setSetup] = useState(!report);
+	const [kinds, setKinds] = useState<AuditKind[]>(savedKinds);
+	// 추가 지시 — 덱 안 파일에 둔다. 읽기 전에는 null
+	const [note, setNote] = useState<string | null>(null);
+	const loaded = useRef("");
+	useEffect(() => { import("../lib/audit").then((a) => a.readAuditNote(dir)).then((n) => { loaded.current = n; setNote(n); }); }, [dir]);
 	const [step, setStep] = useState<[number, number] | null>(null);
 	const [kind, setKind] = useState<AuditKind | "all">("all");
-	const run = async () => {
-		const { deck, id, notify } = useDeck.getState();
+	const run = async (ks?: AuditKind[]) => {
+		const { deck, notify } = useDeck.getState();
 		if (!deck) return;
+		try { localStorage.setItem(KINDS_KEY, JSON.stringify(kinds)); } catch {}
 		setStep([0, deck.slides.length]);
 		try {
-			const { runAudit } = await import("../lib/audit");
-			const r = await runAudit(dir, id, deck, deckTemplate(useSettings.getState().s, deck), (i, n) => setStep([i, n]));
-			lastAudit = { dir, report: r };
-			setReport(r);
+			if (note !== null && note.trim() !== loaded.current) {
+				const { writeAuditNote } = await import("../lib/audit");
+				await writeAuditNote(dir, note);
+				loaded.current = note.trim();
+			}
+			await runCheck((i, n) => setStep([i, n]), ks);
+			setKind("all");
+			setSetup(false);
 		} catch (e) { notify(String(e), "err"); }
 		finally { setStep(null); }
 	};
-	useEffect(() => { if (!report) run(); }, []);
-	// 쪽 안에서는 갈래끼리 모아 보인다 (템플릿 · 배치 · AI 티)
-	const order: AuditKind[] = ["template", "layout", "slop"];
-	const pick = (k: AuditKind | "all") => (report?.slides || []).map((s) => ({ ...s, findings: s.findings.filter((f) => k === "all" || f.kind === k).sort((a, b) => order.indexOf(a.kind) - order.indexOf(b.kind)) })).filter((s) => s.findings.length);
+	const toggle = (k: AuditKind) => setKinds((v) => (v.includes(k) ? v.filter((x) => x !== k) : KINDS.map((x) => x.k).filter((x) => x === k || v.includes(x))));
+
+	if (step) {
+		return (
+			<div className="pop audit">
+				<div className="head"><b>{t("auditRunning")}</b><span className="mono">{step[0]}/{step[1]}</span><div className="audit-bar"><i style={{ width: `${step[1] ? (step[0] / step[1]) * 100 : 0}%` }} /></div></div>
+			</div>
+		);
+	}
+
+	if (setup || !report) {
+		return (
+			<div className="pop audit">
+				<div className="head"><b>{t("audit")}</b><span>{t("auditIntro")}</span></div>
+				<div className="audit-pick" role="group" aria-label={t("auditWhat")}>
+					{KINDS.map((x) => (
+						<label key={x.k} className="check">
+							<input type="checkbox" checked={kinds.includes(x.k)} onChange={() => toggle(x.k)} />
+							<span><b>{t(x.label)}</b><span className="dim">{t(x.hint)}</span></span>
+						</label>
+					))}
+				</div>
+				<label className="audit-note">
+					<span className="lbl">{t("auditNote")}</span>
+					<textarea className="field" rows={3} value={note ?? ""} disabled={note === null} onChange={(e) => setNote(e.target.value)} placeholder={t("auditNotePh")} />
+					<span className="dim">{t("auditNoteHint")}</span>
+				</label>
+				<div className="acts">
+					{report ? <button className="ghost" onClick={() => setSetup(false)}>{t("auditBack")}</button> : <button className="ghost" onClick={onDone}>{t("cancel")}</button>}
+					<button className="send" disabled={!kinds.length || note === null} onClick={() => run(kinds)}>{t("auditStart")}</button>
+				</div>
+			</div>
+		);
+	}
+
+	const pick = (k: AuditKind | "all") => report.slides.map((s) => ({ ...s, findings: s.findings.map((f, i) => ({ f, i })).filter((x) => k === "all" || x.f.kind === k) })).filter((s) => s.findings.length);
 	const shown = pick(kind);
 	const count = (k: AuditKind | "all") => pick(k).reduce((n, s) => n + s.findings.length, 0);
 	const fix = async () => {
-		if (!report) return;
 		const { auditFixPrompt } = await import("../lib/audit");
 		const text = auditFixPrompt(report, kind === "all" ? undefined : [kind]);
 		if (!text) return;
 		onDone();
-		lastAudit = null;
+		hideCheck();
 		useDeck.getState().send(text);
 	};
+	const canFix = count(kind) > 0 || !!report.note;
 	return (
 		<div className="pop audit">
-			{step ? (
-				<div className="head"><b>{t("auditRunning")}</b><span className="mono">{step[0]}/{step[1]}</span><div className="audit-bar"><i style={{ width: `${step[1] ? (step[0] / step[1]) * 100 : 0}%` }} /></div></div>
-			) : report && (
-				<>
-					<div className="head">
-						<b>{count("all") ? t("auditSummary").replace("{s}", String(pick("all").length)).replace("{n}", String(count("all"))) : t("auditClean")}</b>
-						<span>{report.template ? t("auditOf").replace("{v}", report.template) : t("auditNoTemplate")}</span>
-					</div>
-					{count("all") > 0 && (
-						<div className="seg audit-kinds" role="group">
-							{KINDS.map((x) => <button key={x.k} aria-pressed={kind === x.k} disabled={!count(x.k)} onClick={() => setKind(x.k)}>{t(x.label)} <span className="mono">{count(x.k)}</span></button>)}
-						</div>
-					)}
-					{shown.length > 0 && (
-						<div className="audit-list">
-							{shown.map((s) => (
-								<section key={s.id}>
-									<button className="slide-row" onClick={() => useDeck.getState().setCurrent(s.no - 1)} title={s.title}>
-										<span className="mono">{s.no}</span><span className="t">{s.title || t("untitled")}</span>
-									</button>
-									<ul>
-										{s.findings.map((f, i) => <li key={i}><span className="k">{t(KINDS.find((x) => x.k === f.kind)!.label)}</span><span>{f.msg}</span></li>)}
-									</ul>
-								</section>
-							))}
-						</div>
-					)}
-					<div className="acts">
-						<button className="ghost" onClick={run}>{t("auditAgain")}</button>
-						{count(kind) > 0 && <button className="send" onClick={fix}>{t("auditFix")}</button>}
-					</div>
-				</>
+			<div className="head">
+				<b>{count("all") ? t("auditSummary").replace("{s}", String(pick("all").length)).replace("{n}", String(count("all"))) : t("auditClean")}</b>
+				<span>{[report.template ? t("auditOf").replace("{v}", report.template) : t("auditNoTemplate"), report.kinds.map((k) => t(kindLabel(k))).join(" · ")].join(" · ")}</span>
+				{report.note && <span className="audit-noted" title={report.note}>{t("auditNote")}: {report.note.replace(/\s+/g, " ")}</span>}
+			</div>
+			{count("all") > 0 && report.kinds.length > 1 && (
+				<div className="seg audit-kinds" role="group">
+					<button aria-pressed={kind === "all"} onClick={() => setKind("all")}>{t("auditAll")} <span className="mono">{count("all")}</span></button>
+					{KINDS.filter((x) => report.kinds.includes(x.k)).map((x) => <button key={x.k} aria-pressed={kind === x.k} disabled={!count(x.k)} onClick={() => setKind(x.k)}>{t(x.label)} <span className="mono">{count(x.k)}</span></button>)}
+				</div>
 			)}
+			{shown.length > 0 && (
+				<div className="audit-list">
+					{shown.map((s) => (
+						<section key={s.id}>
+							<button className="slide-row" onClick={() => { focus(s.id, s.findings[0].i); onDone(); }} title={s.title}>
+								<span className="mono">{s.no}</span><span className="t">{s.title || t("untitled")}</span>
+							</button>
+							<ul>
+								{s.findings.map(({ f, i }) => (
+									<li key={i}>
+										<button onClick={() => { focus(s.id, i); onDone(); }} title={t("auditShow")}>
+											<span className={"k k-" + f.kind}>{t(kindLabel(f.kind))}</span><span>{f.msg}</span>
+										</button>
+									</li>
+								))}
+							</ul>
+						</section>
+					))}
+				</div>
+			)}
+			<div className="acts">
+				<button className="ghost" onClick={() => setSetup(true)}>{t("auditSetup")}</button>
+				<button className="ghost" onClick={() => run()}>{t("auditAgain")}</button>
+				{canFix && <button className="send" onClick={fix}>{count(kind) ? t("auditFix") : t("auditFixNote")}</button>}
+			</div>
+		</div>
+	);
+}
+
+/** 쪽 설정 — 워드의 쪽 설정처럼 이 덱의 여백을 네 변으로 정한다. theme.css 의 --margin-t · -r · -b · -l 과 deck.json 에 남고,
+ *  Claude 에게도 매 턴 그 값이 실린다(prompt.ts pageRules). 이미 있는 쪽은 숫자를 직접 쓴 곳이 있어 저절로 따라오지 않으므로, 맞추기를 함께 맡길 수 있다 */
+function PagePop({ onDone }: { onDone: () => void }) {
+	const t = useT();
+	const deck = useDeck((s) => s.deck)!;
+	const dir = useDeck((s) => s.dir);
+	const tpl = deckTemplate(useSettings.getState().s, deck);
+	const base = tpl?.margin ?? 72;
+	const cur = pageMargins(deck, tpl) ?? { t: base, r: base, b: base, l: base };
+	const [m, setM] = useState<Margins>(cur);
+	const [linked, setLinked] = useState(cur.t === cur.r && cur.r === cur.b && cur.b === cur.l);
+	const [refit, setRefit] = useState(true);
+	const guides = useGuides();
+	const SIDES: { k: keyof Margins; label: Key }[] = [{ k: "t", label: "pageTop" }, { k: "b", label: "pageBottom" }, { k: "l", label: "pageLeft" }, { k: "r", label: "pageRight" }];
+	const clamp = (v: number, k: keyof Margins) => Math.max(0, Math.min(Math.round(v) || 0, Math.floor((k === "t" || k === "b" ? deck.size.h : deck.size.w) / 2) - 20));
+	const put = (k: keyof Margins, v: number) => setM((x) => (linked ? { t: clamp(v, "t"), r: clamp(v, "r"), b: clamp(v, "b"), l: clamp(v, "l") } : { ...x, [k]: clamp(v, k) }));
+	const preset = (v: number) => setM({ t: v, r: v, b: v, l: v });
+	const same = (a: Margins, b: Margins) => a.t === b.t && a.r === b.r && a.b === b.b && a.l === b.l;
+	const apply = async (next: Margins | null) => {
+		const st = useDeck.getState();
+		onDone();
+		try {
+			await api.writeText(dir, "theme.css", repageCss(await api.readText(dir, "theme.css"), next));
+			const { page: _, ...rest } = deck;
+			await st.saveDeck(next ? { ...rest, page: { margin: next } } : rest);
+			st.notify(next ? t("pageDone").replace("{v}", `${next.t} · ${next.r} · ${next.b} · ${next.l}`) : t("pageReset"), "ok");
+			const eff = next ?? { t: base, r: base, b: base, l: base };
+			if (refit && !same(eff, cur)) {
+				st.send(`Page setup changed: margins are now top ${eff.t}px, right ${eff.r}px, bottom ${eff.b}px, left ${eff.l}px${next ? " (var(--margin-t), var(--margin-r), var(--margin-b), var(--margin-l))" : " (var(--margin))"}. Update every slide so its text and content sit inside the new margins, using the variables instead of fixed numbers. Do not change the content or the design otherwise.`);
+			}
+		} catch (e) { st.notify(String(e), "err"); }
+	};
+	return (
+		<div className="pop page-set">
+			<div className="head"><b>{t("pageSetup")}</b><span>{t("pageSize").replace("{w}", String(deck.size.w)).replace("{h}", String(deck.size.h))}</span></div>
+			<div className="page-body">
+				{/* 쪽 미리보기 — 여백 안쪽이 글이 놓일 자리 */}
+				<div className="page-mini" style={{ aspectRatio: `${deck.size.w} / ${deck.size.h}` }} aria-hidden>
+					<i style={{ left: `${(m.l / deck.size.w) * 100}%`, right: `${(m.r / deck.size.w) * 100}%`, top: `${(m.t / deck.size.h) * 100}%`, bottom: `${(m.b / deck.size.h) * 100}%` }} />
+				</div>
+				<div className="page-fields">
+					{SIDES.map((x) => (
+						<label key={x.k}>
+							<span>{t(x.label)}</span>
+							<input className="field mono" type="number" min={0} step={4} value={m[x.k]} onChange={(e) => put(x.k, +e.target.value)} />
+							<span className="dim">px</span>
+						</label>
+					))}
+				</div>
+			</div>
+			<label className="check"><input type="checkbox" checked={linked} onChange={() => { setLinked(!linked); if (!linked) preset(m.t); }} /><span>{t("pageLinked")}</span></label>
+			<div className="seg" role="group" aria-label={t("pagePresets")}>
+				<button onClick={() => preset(40)}>{t("pageNarrow")} 40</button>
+				<button onClick={() => preset(base)}>{t("pageNormal")} {base}</button>
+				<button onClick={() => preset(Math.round(base * 1.5))}>{t("pageWide")} {Math.round(base * 1.5)}</button>
+			</div>
+			<label className="check"><input type="checkbox" checked={guides.on} onChange={() => guides.set(!guides.on)} /><span>{t("pageGuides")}</span></label>
+			<label className="check"><input type="checkbox" checked={refit} onChange={() => setRefit(!refit)} /><span>{t("pageRefit")}</span></label>
+			<div className="acts">
+				{deck.page && <button className="ghost" onClick={() => apply(null)} title={t("pageFollowHint")}>{t("pageFollow")}</button>}
+				<button className="ghost" onClick={onDone}>{t("cancel")}</button>
+				<button className="send" disabled={!!deck.page && same(m, cur)} onClick={() => apply(m)}>{t("pageApply")}</button>
+			</div>
 		</div>
 	);
 }

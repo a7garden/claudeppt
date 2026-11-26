@@ -70,7 +70,7 @@ const HELP: &str = "ClaudePPT CLI — 출력은 JSON 하나. 쪽 번호는 1부�
                                      쪽을 브라우저가 그린 그대로 PNG 로 굽는다 (기본 .claudeppt/shots/<n>.png)
   inspect [--slides 1,3-5]           PPTX 로 나갈 때 무엇이 편집 가능한 도형 · 글상자가 되고 무엇이 그림으로 굳는지, 쪽 밖으로 넘친 것
   check                              PPTX 를 PowerPoint 로 그려 웹과 픽셀로 견준다 (PowerPoint 필요)
-  audit                              쪽마다 템플릿을 벗어난 곳(글꼴 · 색 · 글자 위계 · 모서리 · 여백)과 AI 티가 나는 곳을 짚는다
+  audit                              점검: 쪽마다 서식 · 배치 · 표현 규칙에 걸린 곳을 짚는다
                                      prompt 는 그대로 고칠 거리로 쓸 수 있는 글
   release [--name <이름>] [--notes <메모>]
                                      릴리즈 r<k> — releases/r<k>-v<n>.pptx 와 git 태그

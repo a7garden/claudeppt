@@ -18,6 +18,7 @@ mod invite;
 mod metafile;
 mod project;
 mod pptsnap;
+mod runner;
 mod vcs;
 mod tunnel;
 mod watch;
@@ -49,6 +50,7 @@ pub fn run() {
 		.manage(AppState::default())
 		.manage(control::Control::new())
 		.manage(collab::Collab::default())
+		.manage(runner::Runners::default())
 		.setup(|app| {
 			// 통로를 못 열어도 앱은 그대로 쓴다 — 바깥 제어만 안 된다
 			if let Err(e) = control::start(app.handle()) {
@@ -111,6 +113,11 @@ pub fn run() {
 			collab::collab_lock,
 			collab::collab_tunnel,
 			collab::collab_tools,
+			collab::collab_join,
+			collab::claude_run_remote,
+			runner::runner_start,
+			runner::runner_stop,
+			runner::runner_list,
 		])
 		.build(tauri::generate_context!())
 		.expect("앱을 띄우지 못했다")

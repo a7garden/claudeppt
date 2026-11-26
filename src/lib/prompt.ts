@@ -2,7 +2,7 @@
 // 덱의 템플릿(「설정 › 템플릿」 — 글꼴 · 색 · 모양 · 화풍 · 스타일 지침)과 그림 규칙을 매번 덧붙인다 — 설정을 바꾸면 다음 턴부터 따른다.
 // 2026.11.24 : 기본 프롬프트를 갈아 끼우는 칸 · 「추가 지침」 칸을 없앴다. 갈아 끼우면 내보내기 규칙이 빠져 PPTX 가 깨지고, 스타일 규칙은 템플릿 지침이 맡는다.
 
-import type { Deck } from "./deck";
+import type { Deck, Margins } from "./deck";
 import { describe, type Shape } from "./markup";
 import type { Mention } from "./mention";
 import { type Settings, type Template, templateOf } from "./settings";
@@ -58,11 +58,26 @@ export function deckTemplate(s: Settings, deck: Deck): Template | null {
 /** 덱의 스타일 규칙 — 템플릿 규칙, 가져온 PPTX 면 원본을 지키라는 말. 앱 안 Claude 의 시스템 프롬프트와 바깥 CLI 의 style 이 같은 글이다 */
 export function houseStyle(s: Settings, deck: Deck) {
 	const tpl = deckTemplate(s, deck);
-	return tpl ? templateRules(tpl) : "# House style\nThis deck was imported from a PPTX. Keep its own fonts, colors and layout (theme.css and the existing slides); do not restyle it.";
+	return (tpl ? templateRules(tpl) : "# House style\nThis deck was imported from a PPTX. Keep its own fonts, colors and layout (theme.css and the existing slides); do not restyle it.") + pageRules(deck);
+}
+
+/** 쪽 여백 — 쪽 설정(deck.page)이 있으면 그 값, 없으면 템플릿 여백을 네 변에. 가져온 덱에 쪽 설정도 없으면 null (점검이 여백을 보지 않는다) */
+export function pageMargins(deck: Deck, tpl: Template | null): Margins | null {
+	if (deck.page) return deck.page.margin;
+	return tpl ? { t: tpl.margin, r: tpl.margin, b: tpl.margin, l: tpl.margin } : null;
+}
+
+/** 쪽 설정이 있을 때만 붙는 규칙 — 템플릿 여백 줄보다 뒤에 와서 이긴다 */
+function pageRules(deck: Deck) {
+	const m = deck.page?.margin;
+	if (!m) return "";
+	return `\n\n## Page margins of this deck (set by the person in Page setup; they override the template margin)
+- Top ${m.t}px, right ${m.r}px, bottom ${m.b}px, left ${m.l}px: var(--margin-t), var(--margin-r), var(--margin-b), var(--margin-l) in theme.css.
+- Keep all text and content inside them: pad the slide with padding: var(--margin-t) var(--margin-r) var(--margin-b) var(--margin-l) rather than fixed numbers, so changing the page setup moves everything. Full-bleed color bands and pictures may touch the edge.`;
 }
 
 /** 템플릿 하나의 스타일 규칙 — 앱 안 Claude 의 시스템 프롬프트와, 바깥 CLI 의 new 가 돌려주는 style 이 같은 글이다 */
-// 2026.11.26 : 글자 위계(.t-*) · 제목 글꼴 · 보조 색 · 여백을 더했다. 감사(audit.ts)가 같은 값으로 벗어난 곳을 잡는다 — 여기서 말하지 않은 규칙으로 잡으면 Claude 가 억울하다
+// 2026.11.26 : 글자 위계(.t-*) · 제목 글꼴 · 보조 색 · 여백을 더했다. 점검(audit.ts)이 같은 값으로 벗어난 곳을 잡는다 — 여기서 말하지 않은 규칙으로 잡으면 Claude 가 억울하다
 export function templateRules(sh: Template) {
 	const s = sh.scale;
 	return `# House style (template "${sh.name}")

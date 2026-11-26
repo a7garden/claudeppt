@@ -115,7 +115,7 @@ export function CollabChip() {
 						return (
 							<div className="row" key={m.conn}>
 								<Face m={m} />
-								<span className="nm">{m.name || t("collabNoName")}{m.host && <em> · {t("collabHostTag")}</em>}</span>
+								<span className="nm">{m.name || t("collabNoName")}{m.host && <em> · {t("collabHostTag")}</em>}{m.runner && <em title={t("runnerUseHint")}> · {t("runnerMine")}</em>}</span>
 								<span className="dim mono">{no > 0 ? `${no}${t("slideN") === "쪽" ? "쪽" : ""}` : ""}</span>
 							</div>
 						);

@@ -61,6 +61,8 @@ export interface Turn {
 	by?: string;
 	/** 이 턴이 이어 쓴 세션 (Session.key) */
 	session?: string;
+	/** 팀원 PC 의 Claude 로 돈 턴 — 그 기기와 사람 (collab.rs 「팀원 PC 의 Claude」). 없으면 이 PC 의 Claude */
+	runner?: { device: string; name: string };
 }
 /**
  * 대화 세션 하나 — 팀원은 같은 Claude 계정을 쓰므로 세션을 사람마다 두지 않는다.
@@ -69,7 +71,9 @@ export interface Turn {
  */
 export interface Session { key: string; claude: string | null; at: number }
 /** 협업 브라우저에서 온 요청 — by 는 서버가 정한 기기 이름. onStart 는 턴이 만들어지자마자(끝나기 전에) 부른다 */
-export interface SendFrom { by: string; current: string | null; talkKey: string | null; pins: Pin[]; onStart?: (r: { key: string; via?: number; turn: string }) => void }
+export interface SendFrom { by: string; current: string | null; talkKey: string | null; pins: Pin[]; onStart?: (r: { key: string; via?: number; turn: string }) => void;
+	/** 보낸 팀원의 PC 에서 Claude 를 돌린다 — 그 기기 id (collab.ts 가 그 기기가 붙어 있는지 본다) */
+	runner?: string }
 /** 화면 뒤에서 도는 긴 일(PPTX 가져오기) 하나. n 이 0 이면 아직 전체 양을 모른다 */
 export interface Job { id: string; label: string; i: number; n: number; note?: string }
 export interface Release { name: string; tag: string; n: number; hash: string; file: string; notes: string; at: string }
@@ -490,7 +494,7 @@ async function sendTurn(get: () => S, set: (p: Partial<S>) => void, text: string
 	if (!from && get().talkKey && key !== get().talkKey && route.via) get().notify(tNow("routedTo").replace("{no}", String(route.via)).replace("{n}", key.slice(1)), "ok");
 	// 같은 세션의 앞 턴이 돌거나 기다리는 중이면, 또는 동시에 도는 수가 찼으면 기다린다 — 같은 세션은 차례로, 다른 세션끼리는 함께
 	const wait = !!get().runs[key] || waiting.some((w) => w.key === key) || Object.keys(get().runs).length >= MAX_RUNS;
-	const turn: Turn = { id: "t" + Date.now().toString(36) + Math.random().toString(36).slice(2, 5), at: Date.now(), request: text.trim(), pins: notes, mentions, versionMentions, attach: attachments.length ? [...attachments] : undefined, reply: "", tools: [], status: wait ? "queued" : "running", by: by || undefined, session: key };
+	const turn: Turn = { id: "t" + Date.now().toString(36) + Math.random().toString(36).slice(2, 5), at: Date.now(), request: text.trim(), pins: notes, mentions, versionMentions, attach: attachments.length ? [...attachments] : undefined, reply: "", tools: [], status: wait ? "queued" : "running", by: by || undefined, session: key, runner: from?.runner ? { device: from.runner, name: by } : undefined };
 	// 지금 대화 = 마지막에 쓰인 세션. 팀원의 요청이면 호스트가 보는 대화는 그대로 두고 그 팀원의 핀만 걷는다
 	set(from ? { turns: [...get().turns, turn], pins: get().pins.filter((p) => !pins.includes(p)) } : { turns: [...get().turns, turn], pins: get().pins.filter((p) => !pins.includes(p)), talkKey: key });
 	persistPins(dir, get().pins);
@@ -518,8 +522,11 @@ async function sendTurn(get: () => S, set: (p: Partial<S>) => void, text: string
 			// 협업을 켜면 한 세션을 여러 팀원이 이어 쓰므로 누가 시킨 것인지 알린다 — 「아까 말한 것」이 누구 말인지 가린다
 			const prompt = (by ? `Request from teammate: ${by}\n\n` : "") + turnPrompt(text, notes, cur ? { id: cur.id, no: current + 1 } : null, attachments, mentions, vlines, deck);
 			// 새 세션은 앱이 id 를 정한다 — 턴이 멈춰도 그 세션의 기록을 찾아 덱에 남긴다 (claude.rs)
-			const run = (p: string, resume: string | null) =>
-				api.claudeRun({ turn: turn.id, dir, prompt: p, system: systemPrompt(s, deck), claudePath: s.claude.path, model: s.claude.model, effort: s.claude.effort, resume, sessionId: resume ? null : uuid() });
+			// 팀원 PC 의 Claude 로 보낸 턴이면 claude 만 그 PC 에서 돈다 — 줄 · 파일은 이 PC 로 와서 이 PC 에서 돈 턴과 똑같이 그려지고 판에 남는다.
+			// 모델 · 생각 깊이 · claude 경로는 그 PC 의 설정을 쓴다 (runner.rs)
+			const run = (p: string, resume: string | null) => turn.runner
+				? api.claudeRunRemote({ turn: turn.id, dir, device: turn.runner.device, prompt: p, system: systemPrompt(s, deck), resume, sessionId: resume ? null : uuid() })
+				: api.claudeRun({ turn: turn.id, dir, prompt: p, system: systemPrompt(s, deck), claudePath: s.claude.path, model: s.claude.model, effort: s.claude.effort, resume, sessionId: resume ? null : uuid() });
 			let r = await run(prompt, session.claude);
 			flushText(get, set);
 			// 세션 기록을 claude 쪽에서도 덱에서도 찾지 못했다 (기록 없이 옮겨 온 덱 · 지운 기록 · UUID 가 아닌 옛 id). 그대로 두면 이 세션을 이을 때마다 실패하고
