@@ -277,7 +277,7 @@ function refreshCompare(get: () => S, set: (p: Partial<S>) => void) {
  * 그 쪽 번호와 「차이 고치기」를 알린다. PowerPoint 가 없는 PC 에서는 확인하지 못했다고만 알린다.
  * 2026.11.24 : 무대의 「비교」(PowerPoint 대조 렌즈)를 걷고 여기로 옮겼다 — 사용자가 바라는 것은 늘 「완전히 같다」라서, 켜서 볼 화면보다 내보낼 때 저절로 확인하는 편이 맞다.
  */
-function verifyPptx(get: () => S, deck: Deck, built: Built) {
+function verifyPptx(get: () => S, deck: Deck, built: Built, reveal?: { label: string; run: () => void }) {
 	const { dir, id, versions } = get();
 	const job = "verify" + Date.now().toString(36);
 	const note = (n: string) => useDeck.setState((st) => ({
@@ -288,7 +288,8 @@ function verifyPptx(get: () => S, deck: Deck, built: Built) {
 		.then((report) => {
 			if (get().dir !== dir) return;
 			const bad = report.slides.filter(needsFix);
-			if (!bad.length) return get().notify(tNow("pptxSame"), "ok");
+			// 같으면 내보낸 파일로 가는 단추를 다시 단다 — 검사 결과가 앞 알림(폴더에서 보기)을 덮는다
+			if (!bad.length) return get().notify(tNow("pptxSame"), "ok", reveal ? { action: reveal, sticky: false } : {});
 			// 모양이 다른 쪽이 먼저다. 그림으로 굳은 곳만 있으면(돌린 배지처럼 일부러 쓴 효과일 수 있다) 알리기만 하고 붉게 칠하지 않는다
 			const differ = bad.filter((x) => x.score > SAME).map((x) => x.no);
 			const stiff = bad.filter((x) => x.locked?.length).map((x) => x.no);
@@ -348,6 +349,24 @@ async function step(get: () => S, from: Snap[], to: Snap[], by: string) {
 	directCommit(dir, get, by);
 }
 
+/** 쪽 더하기 · 빼기 · 옮기기 · 복제도 Ctrl+Z 로 되돌린다 — 바꾸기 전후의 deck.json 글을 한 걸음으로 쌓는다.
+ *  뺀 쪽의 HTML 파일은 남으므로 deck.json 만 되쓰면 되살아난다. 되쓴 deck.json 은 감시가 목차로 다시 읽는다.
+ *  2026.11.27 : 전에는 쪽을 지우면 되돌릴 길이 비교(C)의 「빠진 쪽」뿐이었고, Ctrl+Z 는 다른 쪽의 예전 손 편집을 되돌렸다 */
+function deckStep(get: () => S, change: () => Promise<void>) {
+	return serial(async () => {
+		const dir = get().dir;
+		const before = await api.readText(dir, "deck.json").catch(() => null);
+		await change();
+		const after = await api.readText(dir, "deck.json").catch(() => null);
+		if (before == null || after == null || before === after) return;
+		const by = me();
+		undoStack.push({ file: "deck.json", text: before, after, by });
+		if (undoStack.length > UNDO_MAX) undoStack.shift();
+		redoStack = redoStack.filter((x) => x.by !== by);
+		syncHist();
+	});
+}
+
 /** 이 쪽을 지금 손으로 고친 사람 — 협업 화면이 「○○ 님이 고치는 중」을 보인다 */
 function markEditing(get: () => S, slideId: string | undefined, by: string) {
 	if (!slideId) return;
@@ -372,7 +391,8 @@ export const persistTalk = (dir: string, st: Pick<S, "turns" | "sessions" | "bin
 		bind: st.bind,
 		talkKey: st.talkKey,
 		sessionId: st.sessions.find((x) => x.key === st.talkKey)?.claude ?? null,
-		turns: st.turns.map((t) => (t.status === "running" ? { ...t, status: "stopped" } : t)),
+		// 기다리던 턴도 멈춘 것으로 — 다시 켜면 줄이 비어 있어 「대기 중」인 채 영영 돌지 않는다 (2026.11.27). 멈춘 턴은 「요청 다시 쓰기」로 되살린다
+		turns: st.turns.map((t) => (t.status === "running" || t.status === "queued" ? { ...t, status: "stopped" } : t)),
 	};
 	return api.writeText(dir, ".claudeppt/talk.json", JSON.stringify(file, null, 1)).catch(() => {});
 };
@@ -707,7 +727,12 @@ async function sendTurn(get: () => S, set: (p: Partial<S>) => void, text: string
 			}
 			const t0 = get().turns.find((t) => t.id === turn.id)!;
 			let status: Turn["status"] = t0.status === "stopped" ? "stopped" : r.code === 0 && !t0.error ? "done" : "failed";
-			if (status === "failed" && !t0.error) patch((t) => ({ ...t, error: r.stderr.trim().split("\n").slice(-3).join("\n") || `exit ${r.code}` }));
+			// 로그인이 안 됐으면 CLI 의 영어 줄 앞에 할 일을 적는다 (2026.11.27)
+			if (status === "failed" && !t0.error) {
+				const tail = r.stderr.trim().split("\n").slice(-3).join("\n") || `exit ${r.code}`;
+				const login = /not logged in|\/login|invalid api key|authenticat|unauthori[sz]ed|oauth token/i.test(r.stderr);
+				patch((t) => ({ ...t, error: login ? `${tNow("claudeLogin")}\n${tail}` : tail }));
+			}
 			// 비워 둔 남의 쪽 · 덱 목차를 되돌린다 — 울타리(unfence)보다 먼저, 그래야 비운 것을 「고친 것」으로 알리지 않는다
 			await hidden?.restore();
 			// 담당 밖을 고쳤으면 턴 앞 내용으로 되돌리고 알린다
@@ -959,7 +984,7 @@ export const useDeck = create<S>()((set, get) => ({
 	refill: (text) => set({ insertReq: { text, whole: true, k: Date.now() } }),
 
 	// 쪽을 빼도 HTML 파일은 남긴다 — 지난 판 미리 보기 · 되돌리기가 그 파일을 읽는다
-	addSlide: async (at) => {
+	addSlide: (at) => deckStep(get, async () => {
 		const { dir, deck } = get();
 		if (!deck) return;
 		const id = newId();
@@ -968,8 +993,8 @@ export const useDeck = create<S>()((set, get) => ({
 		s.splice(at, 0, { id, file: `slides/${id}.html` });
 		await get().saveDeck({ ...deck, slides: s });
 		get().setCurrent(at);
-	},
-	duplicateSlide: async (i) => {
+	}),
+	duplicateSlide: (i) => deckStep(get, async () => {
 		const { dir, deck } = get();
 		const src = deck?.slides[i];
 		if (!deck || !src) return;
@@ -980,23 +1005,23 @@ export const useDeck = create<S>()((set, get) => ({
 		s.splice(i + 1, 0, { ...src, id, file: `slides/${id}.html` });
 		await get().saveDeck({ ...deck, slides: s });
 		get().setCurrent(i + 1);
-	},
+	}),
 	/** to 는 「이 자리 앞에」 — 끌어 놓기가 주는 값 그대로다 */
-	moveSlide: (from, to) => {
+	moveSlide: (from, to) => void deckStep(get, async () => {
 		const deck = get().deck;
 		if (!deck || from === to || from + 1 === to) return;
 		const s = [...deck.slides];
 		const [x] = s.splice(from, 1);
 		s.splice(to > from ? to - 1 : to, 0, x);
-		get().saveDeck({ ...deck, slides: s });
 		get().setCurrent(to > from ? to - 1 : to);
-	},
-	removeSlide: (i) => {
+		await get().saveDeck({ ...deck, slides: s });
+	}),
+	removeSlide: (i) => void deckStep(get, async () => {
 		const deck = get().deck;
 		if (!deck || deck.slides.length < 2) return;
-		get().saveDeck({ ...deck, slides: deck.slides.filter((_, k) => k !== i) });
 		get().setCurrent(Math.min(get().current > i ? get().current - 1 : get().current, deck.slides.length - 2));
-	},
+		await get().saveDeck({ ...deck, slides: deck.slides.filter((_, k) => k !== i) });
+	}),
 
 	addPin: (p, by = me(), id) => {
 		const pin: Pin = { ...p, id: id && /^[a-z0-9]{4,16}$/.test(id) && !get().pins.some((x) => x.id === id) ? id : Math.random().toString(36).slice(2, 9), at: Date.now(), by: by || undefined };
@@ -1208,9 +1233,17 @@ export const useDeck = create<S>()((set, get) => ({
 		set({ busy: tNow("restore") });
 		clearUndo();
 		try {
+			const head0 = get().versions[0]?.hash;
 			await api.restore(dir, c.hash, `#${c.n} 때로 되돌림`, me());
 			set({ preview: null, vdiff: null, deck: await readDeck(dir) });
 			await get().refreshVersions();
+			// 되돌렸다고 알리고, 되돌리기 바로 전 판으로 돌아갈 단추를 단다 — 되돌리기는 손 편집 되돌리기(Ctrl+Z)를 비운다.
+			// 2026.11.27 : 전에는 아무 알림도 없었다
+			const vs = get().versions;
+			if (vs[0] && vs[0].hash !== head0 && vs[1]) {
+				const back = vs[1];
+				get().notify(tNow("restoredTo").replace("{n}", String(c.n)), "ok", { action: { label: tNow("restoreBack"), run: () => void get().restore(back) }, sticky: false });
+			}
 		} catch (e) {
 			get().notify(String(e), "err");
 		} finally {
@@ -1225,11 +1258,24 @@ export const useDeck = create<S>()((set, get) => ({
 		try {
 			const { buildPptx } = await import("./exportPptx");
 			const b = await buildPptx(deck, id, (i, n) => set({ busy: `${tNow("exporting")} ${i}/${n}` }), exact);
-			await api.absWriteBytes(path, b.data);
-			// 깔리지 않은 글꼴은 PowerPoint 에서 다른 글꼴로 보인다 — 알린다
-			get().notify(path.split(/[\\/]/).pop()! + (b.missingFonts.length ? ` · ${tNow("missingFont")}: ${b.missingFonts.join(", ")}` : ""), b.missingFonts.length ? "err" : "ok");
-			// 「모양 그대로」는 쪽 그림이라 견줄 것이 없다
-			if (!exact) verifyPptx(get, deck, b);
+			const name = path.split(/[\\/]/).pop()!;
+			const reveal = { label: tNow("showInFolder"), run: () => void api.reveal(path).catch(() => {}) };
+			// PowerPoint 에서 같은 파일을 열어 두면 쓰기가 막힌다(os error 32) — 다 구운 것을 버리지 않고, 닫은 뒤 「다시 쓰기」로 그대로 쓴다.
+			// 2026.11.27 : 전에는 끝까지 구운 뒤 「os error 32」만 보이고, 처음부터 다시 내보내야 했다
+			const write = async () => {
+				try {
+					await api.absWriteBytes(path, b.data);
+				} catch (e) {
+					if (!/os error 3[23]\b/.test(String(e))) throw e;
+					get().notify(tNow("pptxLocked").replace("{name}", name), "err", { action: { label: tNow("writeAgain"), run: () => void write().catch((e) => get().notify(String(e), "err")) } });
+					return;
+				}
+				// 깔리지 않은 글꼴은 PowerPoint 에서 다른 글꼴로 보인다 — 알린다
+				get().notify(name + (b.missingFonts.length ? ` · ${tNow("missingFont")}: ${b.missingFonts.join(", ")}` : ""), b.missingFonts.length ? "err" : "ok", { action: reveal, sticky: false });
+				// 「모양 그대로」는 쪽 그림이라 견줄 것이 없다
+				if (!exact) verifyPptx(get, deck, b, reveal);
+			};
+			await write();
 		} catch (e) {
 			get().notify(String(e), "err");
 		} finally {
@@ -1256,10 +1302,13 @@ export const useDeck = create<S>()((set, get) => ({
 	},
 
 	notify: (text, kind = "ok", opt = {}) => {
-		const sticky = !!(opt.action || opt.sticky);
-		set({ toast: { text, kind, action: opt.action, sticky } });
-		// 누를 단추가 있거나 꼭 읽어야 할 글이면 사용자가 닫을 때까지 둔다 — 다른 일을 하다 돌아와도 놓치지 않게
-		if (!sticky) setTimeout(() => { if (get().toast?.text === text) set({ toast: null }); }, kind === "err" ? 7000 : 3500);
+		const sticky = opt.sticky ?? !!opt.action;
+		const toast = { text, kind, action: opt.action, sticky };
+		set({ toast });
+		// 누를 단추가 있거나 꼭 읽어야 할 글이면 사용자가 닫을 때까지 둔다 — 다른 일을 하다 돌아와도 놓치지 않게.
+		// 단추가 있어도 sticky: false 면(「폴더에서 보기」 같은 덤) 조금 길게 두고 스스로 닫는다
+		// 이 알림만 닫는다 — 글로 견주면 같은 글의 새 알림(다시 쓴 뒤의 파일 이름)을 앞 알림의 시계가 닫았다
+		if (!sticky) setTimeout(() => { if (get().toast === toast) set({ toast: null }); }, kind === "err" ? 7000 : opt.action ? 8000 : 3500);
 	},
 
 	fixFonts: async (missing) => {

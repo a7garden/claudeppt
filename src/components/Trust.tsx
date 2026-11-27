@@ -3,7 +3,6 @@
 //   주고받기  묶음 파일로 보내기 · 들이기, 공유 폴더 우편함, 이 PC 에만 있는 변경 알림
 //   제안      승인자에게는 남의 제안 · 참여 요청, 승인자가 아닌 사람에게는 승인을 기다리는 내 변경
 // 승인자가 한 명이고 열쇠가 이 PC 하나뿐이거나, 이 PC 에만 있는 변경이 있으면 경고색이다
-import { getCurrentWindow } from "@tauri-apps/api/window";
 import { ask as askBox, open as pickFile, save } from "@tauri-apps/plugin-dialog";
 import { useEffect, useRef, useState } from "react";
 import { api, type SyncStatus, type TrustPending, type TrustRole, type TrustView } from "../lib/api";
@@ -49,23 +48,17 @@ export function useSync(dir: string | null) {
 
 /** 창을 닫을 때 이 PC 에만 있는 변경이 있으면 붙잡는다. 우편함을 정했으면 먼저 한 번 보내 보고, 그래도 남으면 묻는다.
  *  Windows 를 끌 때는 이것이 돌지 않는다: 앱이 종료를 막을 수 없어 1분마다 주고받는 것과 경고로 줄인다 (design/분산 협업 조사 보고서) */
-export function useCloseGuard(on: boolean) {
-	useEffect(() => {
-		if (!on) return;
-		const un = getCurrentWindow().onCloseRequested(async (e) => {
-			const st = useDeck.getState();
-			if (!st.dir || st.line?.sian) return;
-			let s = await api.syncStatus(st.dir).catch(() => null);
-			if (s?.unsent && s.mailbox) {
-				await api.syncMailboxRun(st.dir).catch(() => null);
-				s = await api.syncStatus(st.dir).catch(() => null);
-			}
-			if (!s?.unsent) return;
-			const quit = await askBox(tNow("syncCloseAsk"), { title: "ClaudePPT", kind: "warning", okLabel: tNow("syncCloseAnyway"), cancelLabel: tNow("syncCloseStay") });
-			if (!quit) e.preventDefault();
-		});
-		return () => { un.then((f) => f()); };
-	}, [on]);
+/** 닫아도 되면 true. 창 닫기 묻기(TitleBar leaveOk)와 한 처리기에서 차례로 부른다 : 처리기가 둘이면 먼저 끝난 쪽이 창을 닫아 버린다 */
+export async function unsentOk(): Promise<boolean> {
+	const st = useDeck.getState();
+	if (!st.dir || st.line?.sian) return true;
+	let s = await api.syncStatus(st.dir).catch(() => null);
+	if (s?.unsent && s.mailbox) {
+		await api.syncMailboxRun(st.dir).catch(() => null);
+		s = await api.syncStatus(st.dir).catch(() => null);
+	}
+	if (!s?.unsent) return true;
+	return askBox(tNow("syncCloseAsk"), { title: "ClaudePPT", kind: "warning", okLabel: tNow("syncCloseAnyway"), cancelLabel: tNow("syncCloseStay") }).catch(() => true);
 }
 
 /** 서명 대기 명부 판 한 줄 : 무엇이 바뀌는지 */

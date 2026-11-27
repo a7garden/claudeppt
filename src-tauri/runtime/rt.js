@@ -930,32 +930,43 @@
 		const el = e.target.nodeType === 1 && root.contains(e.target) ? (sel && sel.contains(e.target) ? sel : e.target) : root;
 		post({ t: "menu", x: e.clientX, y: e.clientY, path: pathOf(el), tag: el.tagName.toLowerCase(), text: el === root ? "" : label(el) });
 	});
+	// 아직 파일에 쓰지 않은 방향키 이동을 바로 쓴다 — 되돌리기 · 쪽 넘김 전에 (늦게 쓰이면 되돌림을 덮거나, 쪽을 넘긴 뒤에 쓰인다)
+	const flushNudge = () => { if (sel?.__nudge) { clearTimeout(sel.__nudge); sel.__nudge = null; post({ t: "patch", path: pathOf(sel), style: posPatch(sel, ["left", "top"]) }); } };
 	addEventListener("keydown", (e) => {
 		const k = e.key.toLowerCase(), ctrl = e.ctrlKey && !e.altKey;
 		// 되돌리기 · 다시 하기는 앱이 한다 (손으로 고친 것을 파일째 되쓴다). 글자를 고치는 중이면 그 글의 되돌리기를 쓴다
 		if (ctrl && ["z", "y"].includes(k) && !document.activeElement?.isContentEditable) {
 			// 아직 파일에 쓰지 않은 방향키 이동이 있으면 먼저 쓴다 — 안 그러면 되돌린 뒤에 늦게 쓰여 되돌림을 덮는다
-			if (sel?.__nudge) { clearTimeout(sel.__nudge); sel.__nudge = null; post({ t: "patch", path: pathOf(sel), style: posPatch(sel, ["left", "top"]) }); }
+			flushNudge();
 			post({ t: k === "y" || e.shiftKey ? "redo" : "undo" });
 			e.preventDefault();
 			return;
 		}
-		// 고른 요소가 없으면(보기만 하는 중) 넘김 키는 쪽을 넘긴다 — 고르기 도구가 늘 켜져 있어도 방향키로 쪽을 넘길 수 있게
-		if ((mode !== "edit" || !sel) && !place && !document.activeElement?.isContentEditable && ["ArrowDown", "ArrowUp", "ArrowLeft", "ArrowRight", "PageDown", "PageUp", "Home", "End"].includes(e.key) && !e.ctrlKey && !e.altKey) {
+		// 고른 요소가 없으면(보기만 하는 중) 넘김 키는 쪽을 넘긴다 — 고르기 도구가 늘 켜져 있어도 방향키로 쪽을 넘길 수 있게.
+		// 쪽 넘김 키(PageUp · PageDown · Home · End)는 고른 요소가 있어도 넘긴다 — 방향키만 요소 옮기기에 쓴다.
+		// 2026.11.27 : 슬라이드를 한 번 누르면 거의 늘 무언가 골라져, Esc 를 먼저 누르기 전에는 PageDown 이 듣지 않았다
+		const pageKey = ["PageDown", "PageUp", "Home", "End"].includes(e.key);
+		if ((pageKey || mode !== "edit" || !sel) && !place && !document.activeElement?.isContentEditable && (pageKey || e.key.startsWith("Arrow")) && !e.ctrlKey && !e.altKey) {
+			flushNudge();
 			post({ t: "key", key: e.key });
 			e.preventDefault();
 			return;
 		}
-		// 도구 키(V · 1~4 · C · S · F)도 앱으로 넘긴다 — 슬라이드를 한 번 누르면 포커스가 이 창에 와서 앱이 키를 못 받는다
-		if (!edit && !e.ctrlKey && !e.altKey && !e.metaKey && /^[vepcsf1-4]$/i.test(e.key) && !document.activeElement?.isContentEditable) {
+		// 도구 키(V · 1~4 · C · S · F)도 앱으로 넘긴다 — 슬라이드를 한 번 누르면 포커스가 이 창에 와서 앱이 키를 못 받는다.
+		// 요소를 고른 채로는 넘기지 않는다 — 2026.11.27 : PowerPoint 처럼 상자를 고르고 타자를 치면 C 에 비교가, S 에 이어 보기가 켜졌다
+		if (!edit && !(mode === "edit" && sel) && !e.ctrlKey && !e.altKey && !e.metaKey && /^[vepcsf1-4]$/i.test(e.key) && !document.activeElement?.isContentEditable) {
 			if (place) setPlace(null);
 			post({ t: "key", key: e.key });
 			e.preventDefault();
 			return;
 		}
+		// Esc 는 앱이 한다(비교 닫기 · 지난 판 보기에서 지금으로) — 글을 고치는 중 · 넣는 중 · 고른 것이 있으면 여기서 먼저 푼다
+		if (e.key === "Escape" && !edit && !place && !(mode === "edit" && sel)) { post({ t: "key", key: e.key }); e.preventDefault(); return; }
 		if (mode !== "edit") return;
 		if (edit) {
-			if (e.key === "Escape") { edit.cancel = true; edit.el.blur(); e.preventDefault(); }
+			// Esc 는 쓴 글을 남기고 마친다(PowerPoint 와 같다) — 되돌리려면 Ctrl+Z.
+			// 2026.11.27 : 전에는 Esc 가 쓴 글을 모두 버렸고, 파일에 쓰이지 않아 Ctrl+Z 로도 못 살렸다
+			if (e.key === "Escape") { edit.el.blur(); e.preventDefault(); }
 			else if (e.key === "Enter" && !e.shiftKey && !e.isComposing && listEnter()) e.preventDefault();
 			else if (e.key === "Enter" && !e.shiftKey && !e.isComposing) { edit.el.blur(); e.preventDefault(); }
 			else if (e.key === "Enter" && e.shiftKey && !e.isComposing) { document.execCommand("insertLineBreak"); e.preventDefault(); }
@@ -975,7 +986,10 @@
 			startEdit(textAt(sel, null), null, true);
 			e.preventDefault();
 		} else if (e.key === "Delete" || e.key === "Backspace") {
-			post({ t: "remove", path: pathOf(sel) });
+			// 리본 「지우기」와 같은 것을 지운다 — 글 하나만 든 카드면 카드째 (전에는 글만 지워 빈 카드가 남았다)
+			const x = shapeOf(sel);
+			post({ t: "remove", path: pathOf(x) });
+			x.remove();
 			select(null);
 		} else if (e.key.startsWith("Arrow") && canMove(sel)) {
 			const d = e.shiftKey ? 10 : 1, { l, t, rel } = posOf(sel);

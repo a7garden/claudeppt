@@ -1,5 +1,6 @@
 // 팀 협업 화면 조각 — 제목 줄 「공유」(공유 창) · 쪽 목록 · 무대의 「보는 사람」 표시 (상태: lib/collab.ts)
 //   2026.11.27 : 쪽 담당 · 권한 — 쪽 목록의 담당 표시(AssignTag) · 쪽 우클릭 「담당」(assignItems) · 공유 창 사람마다 권한 고르기 · 팀원 창 「내 담당」
+import { ask } from "@tauri-apps/plugin-dialog";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { assignedTo, collabKick, collabLimit, collabLinkNew, collabLinkRemove, collabLock, collabRole, collabTools, follow, ROLES, type Role, setShareClaude, setVia, type InviteLink, type TunnelTools, type Member, startHost, stopHost, useCollab, useRole } from "../lib/collab";
 import { useT } from "../lib/i18n";
@@ -387,7 +388,8 @@ export function SharePanel({ bare }: { bare?: boolean }) {
 							<Face m={{ conn: 0, device: d.id, name: d.name, slide: null, host: false, since: d.seen }} />
 							<span className="nm">{d.name}{m?.runner && <em title={t("runnerUseHint")}> · {t("runnerMine")}</em>}</span>
 							<span className={"st" + (m ? " on" : "")}>{m ? (no > 0 ? `${t("collabOnline")} · ${no}${t("slideN") === "쪽" ? "쪽" : ""}` : t("collabOnline")) : new Date(d.seen).toLocaleDateString()}</span>
-							<button className="rm" disabled={busy} onClick={() => run(() => collabKick(d.id))} title={t("collabKickHint")}>{t("collabKick")}</button>
+							<button className="rm" disabled={busy} title={t("collabKickHint")}
+								onClick={async () => { if (await ask(t("collabKickAsk").replace("{name}", d.name), { title: t("collabKick"), kind: "warning", okLabel: t("collabKick"), cancelLabel: t("cancel") })) run(() => collabKick(d.id)); }}>{t("collabKick")}</button>
 							{/* 권한 · 맡은 쪽 (2026.11.27) — 담당은 쪽 목록에서 쪽을 우클릭해 정한다 */}
 							<div className="perm">
 								<select className="field" value={d.role} disabled={busy} aria-label={`${d.name} · ${t("roleH")}`} title={t((roleKey(d.role) + "Note") as "roleEditNote")}
@@ -443,7 +445,12 @@ export function SharePanel({ bare }: { bare?: boolean }) {
 
 			<div className="share-foot">
 				<span className="dim">{t("shareStopNote")}</span>
-				<button disabled={busy} onClick={() => run(stopHost)}>{t("shareStop")}</button>
+				{/* 들어와 있는 팀원이 있으면 묻는다 — 모두 끊기고 팀원이 돌리던 Claude 요청도 멈춘다 (2026.11.27) */}
+				<button disabled={busy} onClick={async () => {
+					const n = useCollab.getState().members.filter((m) => !m.host).length;
+					if (n && !(await ask(t("shareStopAsk").replace("{n}", String(n)), { title: t("shareStop"), kind: "warning", okLabel: t("shareStop"), cancelLabel: t("cancel") }))) return;
+					run(stopHost);
+				}}>{t("shareStop")}</button>
 			</div>
 		</>
 	);
