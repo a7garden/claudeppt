@@ -1233,6 +1233,12 @@
 		// Shift · Ctrl 누르기 — 고른 것에 더하거나 뺀다 (상자 단위)
 		if ((e.shiftKey || e.ctrlKey) && e.button === 0 && sel && !edit) {
 			const b = boxOf(t) || (canMove(t) ? t : null);
+			// Ctrl 로 이미 고른 것을 누름 — 끌면 복제해서 옮기고(PowerPoint Ctrl+끌기), 끌지 않고 떼면 고른 것에서 뺀다
+			if (b && e.ctrlKey && !e.shiftKey && picks().includes(b) && picks().every(movable)) {
+				drag = { el: b, x: e.clientX, y: e.clientY, moved: false, copy: true, group: picks().map((x) => ({ el: x, ...posOf(x) })) };
+				e.preventDefault();
+				return;
+			}
 			if (b) { togglePick(b); picked = Date.now(); e.preventDefault(); return; }
 		}
 		const m = boxOf(t);
@@ -1313,6 +1319,13 @@
 		if (!drag) return;
 		let dx = e.clientX - drag.x, dy = e.clientY - drag.y;
 		if (!drag.moved && Math.hypot(dx, dy) < 3) return;
+		// Shift 를 누르고 끌면 가로 · 세로 한쪽으로만 (PowerPoint 와 같다)
+		if (e.shiftKey) { if (Math.abs(dx) >= Math.abs(dy)) dy = 0; else dx = 0; }
+		// Ctrl+끌기: 처음 움직일 때 제자리에 복제본을 두고 복제본을 끈다 (원본에 쓰는 것은 놓을 때)
+		if (!drag.moved && drag.copy) {
+			drag.group = drag.group.map((it) => { const c = clean(it.el); if (it.rel) c.style.position = "relative"; it.el.after(c); return { ...it, el: c, src: it.el }; });
+			drag.el = drag.group[0].el;
+		}
 		if (!drag.moved) drag.z = snapTargets(drag.el, drag.group ? drag.group.map((g) => g.el) : [drag.el]);
 		drag.moved = true;
 		const g = e.altKey ? null : snapMove(drag.z, dx, dy);
@@ -1352,6 +1365,19 @@
 			const got = inside(b.r);
 			const all = b.add ? [...picks(), ...got.filter((x) => !picks().some((p) => p === x || p.contains(x) || x.contains(p)))] : got;
 			if (all.length) { select(all[0], all.slice(1)); picked = Date.now(); }
+			return;
+		}
+		if (drag?.copy) {
+			showGuides(null, null);
+			const d = drag;
+			drag = null;
+			if (!d.moved) { togglePick(d.el); return; }
+			// 복제본을 걷었다가 하나씩 다시 넣으며 원본 바로 뒤 자리로 보낸다 — 길은 그때그때 잰다
+			const made = d.group.map((it) => it.el);
+			for (const c of made) c.remove();
+			together(() => d.group.forEach((it) => { post({ t: "after", path: pathOf(it.src), html: it.el.outerHTML }); it.src.after(it.el); }));
+			select(made[0], made.slice(1));
+			keep(made[0]);
 			return;
 		}
 		if (drag?.group) {
@@ -1408,6 +1434,34 @@
 		post({ t: "menu", x: e.clientX, y: e.clientY, path: pathOf(el), tag: el.tagName.toLowerCase(), text: el === root ? "" : label(el) });
 	});
 	// 아직 파일에 쓰지 않은 방향키 이동을 바로 쓴다 — 되돌리기 · 쪽 넘김 전에 (늦게 쓰이면 되돌림을 덮거나, 쪽을 넘긴 뒤에 쓰인다)
+	// ── PowerPoint 단축키 ── Ctrl+E · L · R · J 맞춤, Ctrl+] · [ (Ctrl+Shift+> · <) 글자 크기, Ctrl+Shift+C · V 서식 복사 · 붙여 넣기
+	const PTS = [8, 9, 10, 10.5, 11, 12, 14, 16, 18, 20, 24, 28, 32, 36, 40, 44, 48, 54, 60, 66, 72, 80, 88, 96];
+	let fmt = null;
+	const hotkey = (e) => {
+		const k = e.key.toLowerCase(), el = edit ? edit.el : sel;
+		if (!el) return false;
+		if (!e.shiftKey && ["e", "l", "r", "j"].includes(k)) { command("align", { e: "center", l: "left", r: "right", j: "justify" }[k]); return true; }
+		const grow = (!e.shiftKey && e.key === "]") || (e.shiftKey && (e.key === ">" || e.key === "."));
+		const shrink = (!e.shiftKey && e.key === "[") || (e.shiftKey && (e.key === "<" || e.key === ","));
+		if (grow || shrink) {
+			const pt = Math.round(parseFloat(css(el).fontSize) * 0.75 * 10) / 10;
+			const next = grow ? PTS.find((s) => s > pt + 0.05) ?? pt + 4 : [...PTS].reverse().find((s) => s < pt - 0.05) ?? Math.max(1, pt - 1);
+			command("size", next);
+			return true;
+		}
+		if (e.shiftKey && k === "c") {
+			const s = css(el), b = shapeOf(el), bs = css(b);
+			fmt = { text: Object.fromEntries(PAINT_TEXT.map((x) => [x, s.getPropertyValue(x)])), box: color(bs.backgroundColor) ? Object.fromEntries(PAINT_BOX.map((x) => [x, bs.getPropertyValue(x)])) : null };
+			return true;
+		}
+		if (e.shiftKey && k === "v" && fmt) {
+			const f = fmt;
+			// 글을 고치는 중이면 그 글에 (상자 서식은 마칠 때 함께 쓴다)
+			together(() => { for (const x of edit ? [edit.el] : picks()) { const tt = edit ? x : textAt(x, null) || x; setStyle(tt, f.text); if (f.box) setStyle(shapeOf(tt), f.box); } });
+			return true;
+		}
+		return false;
+	};
 	// 여러 개를 함께 밀었으면 모두를 묶음 하나로 쓴다
 	let nudge = null;
 	const flushNudge = () => { if (nudge) { clearTimeout(nudge.timer); const f = nudge.fn; nudge = null; f(); } };
@@ -1453,21 +1507,23 @@
 			else if (e.key === "Enter" && !e.shiftKey && !e.isComposing && listEnter()) e.preventDefault();
 			else if (e.key === "Enter" && !e.shiftKey && !e.isComposing) { edit.el.blur(); e.preventDefault(); }
 			else if (e.key === "Enter" && e.shiftKey && !e.isComposing) { document.execCommand("insertLineBreak"); e.preventDefault(); }
+			else if (ctrl && hotkey(e)) e.preventDefault();
 			return;
 		}
 		if (place) { if (e.key === "Escape") { setPlace(null); e.preventDefault(); } return; }
 		if (painter && e.key === "Escape") { painter = null; document.documentElement.removeAttribute("data-deck-paint"); announce(); e.preventDefault(); return; }
 		// 붙여 넣기는 고른 것이 없어도 된다 — 복사한 요소는 앱이 들고 있다가 paste 명령으로 돌려준다
-		if (ctrl && k === "v") { post({ t: "pasteReq" }); e.preventDefault(); return; }
+		if (ctrl && !e.shiftKey && k === "v") { post({ t: "pasteReq" }); e.preventDefault(); return; }
 		// 모두 고르기 (PowerPoint 와 같다)
-		if (ctrl && k === "a") { flushNudge(); selectAll(); e.preventDefault(); return; }
+		if (ctrl && !e.shiftKey && k === "a") { flushNudge(); selectAll(); e.preventDefault(); return; }
 		if (!sel) return;
-		if (ctrl && k === "c") { command("copy"); e.preventDefault(); }
-		else if (ctrl && k === "x") { command("cut"); e.preventDefault(); }
-		else if (ctrl && k === "d") { command("dup"); e.preventDefault(); }
+		if (ctrl && !e.shiftKey && k === "c") { command("copy"); e.preventDefault(); }
+		else if (ctrl && !e.shiftKey && k === "x") { command("cut"); e.preventDefault(); }
+		else if (ctrl && !e.shiftKey && k === "d") { command("dup"); e.preventDefault(); }
 		// 묶기 · 묶음 풀기 (Ctrl+G · Ctrl+Shift+G)
 		else if (ctrl && k === "g") { flushNudge(); command(e.shiftKey ? "ungroup" : "group"); e.preventDefault(); }
 		else if (ctrl && ["b", "i", "u"].includes(k)) { command("toggle", { b: "bold", i: "italic", u: "underline" }[k]); e.preventDefault(); }
+		else if (ctrl && hotkey(e)) e.preventDefault();
 		// Alt+← → 로 15° 씩 돌린다 (PowerPoint 와 같다)
 		else if (e.altKey && !e.ctrlKey && (e.key === "ArrowLeft" || e.key === "ArrowRight")) { command("rotate", e.key === "ArrowLeft" ? -15 : 15); e.preventDefault(); }
 		else if (e.ctrlKey || e.altKey) return;
