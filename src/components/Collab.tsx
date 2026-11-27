@@ -1,5 +1,6 @@
 // 팀 협업 화면 조각 — 제목 줄 「공유」(공유 창) · 쪽 목록 · 무대의 「보는 사람」 표시 (상태: lib/collab.ts)
 //   2026.11.27 : 쪽 담당 · 권한 — 쪽 목록의 담당 표시(AssignTag) · 쪽 우클릭 「담당」(assignItems) · 공유 창 사람마다 권한 고르기 · 팀원 창 「내 담당」
+import { listen } from "@tauri-apps/api/event";
 import { ask } from "@tauri-apps/plugin-dialog";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { assignedTo, collabKick, collabLimit, collabLinkNew, collabLinkRemove, collabLock, collabRole, collabTools, follow, ROLES, type Role, setShareClaude, setVia, type InviteLink, type TunnelTools, type Member, startHost, stopHost, useCollab, useRole } from "../lib/collab";
@@ -286,13 +287,23 @@ export function SharePanel({ bare }: { bare?: boolean }) {
 	const [hours, setHours] = useState(0);
 	const [tools, setTools] = useState<TunnelTools | null>(null);
 	useEffect(() => { collabTools().then(setTools, () => {}); }, []);
+	// 2026.11.27 : 깔린 연결 도구가 없으면 「웹 · 어디서나」를 처음 켤 때 앱이 cloudflared 를 받는다(tunnel.rs). 55MB 라 비율을 보인다
+	const [fetchPct, setFetchPct] = useState<number | null>(null);
+	useEffect(() => {
+		if (remote) return;
+		const un = listen<number>("collab-tunnel-fetch", (e) => setFetchPct(e.payload));
+		return () => { un.then((f) => f()); };
+	}, []);
 	const run = async (f: () => Promise<unknown>) => {
 		setBusy(true);
-		try { await f(); } catch (e) { notify(String(e), "err"); } finally { setBusy(false); }
+		// 받기가 끝났으면 다음부터는 「받아 둡니다」 안내가 필요 없다. 도구를 다시 찾는다
+		try { await f(); } catch (e) { notify(String(e), "err"); } finally { setBusy(false); setFetchPct(null); collabTools().then(setTools, () => {}); }
 	};
 	const copy = (url: string) => { copyText(url); notify(t("collabCopied"), "ok"); };
 	const setMe = (v: string) => useSettings.getState().set((x) => ({ ...x, me: v }));
-	const noTools = !!tools && !tools.tailscale && !tools.cloudflared;
+	const noTools = !!tools && !tools.tailscale && !tools.cloudflared && !tools.fetch;
+	const willFetch = !!tools && !tools.tailscale && !tools.cloudflared && tools.fetch;
+	const fetching = busy && fetchPct !== null && <p className="note">{t("collabFetching").replace("{pct}", String(fetchPct))}</p>;
 
 	const pick = (
 		<div className="share-via" role="radiogroup" aria-label={t("shareVia")}>
@@ -322,6 +333,8 @@ export function SharePanel({ bare }: { bare?: boolean }) {
 				<p className="note">{deck ? t("shareThisDeck").replace("{title}", deck.title) : t("shareNeedDeck")}</p>
 				{pick}
 				{via === "internet" && noTools && <p className="note">{t("collabNoTools")}</p>}
+				{via === "internet" && willFetch && !fetching && <p className="note">{t("collabFetchNote")}</p>}
+				{fetching}
 				{claude}
 				{!bare && (
 					<label className="share-name">
@@ -364,6 +377,7 @@ export function SharePanel({ bare }: { bare?: boolean }) {
 		<>
 			{other}
 			{pick}
+			{fetching}
 			<section className="share-link">
 				<span className="lbl">{t("shareLink")}</span>
 				{link ? (
