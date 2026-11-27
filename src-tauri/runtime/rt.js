@@ -506,23 +506,37 @@
 		const dy = { top: S.top - r.top, middle: S.top + (S.height - r.height) / 2 - r.top, bottom: S.bottom - r.bottom }[how];
 		setStyle(el, { ...(p.rel ? { position: "relative" } : {}), ...(dx != null ? { left: P(p.l + dx) } : { top: P(p.t + dy) }) });
 	};
+	// 똑똑한 복제 (PowerPoint 와 같다) — 복제한 것을 옮겨 두고 다시 Ctrl+D 를 누르면 그 옮긴 만큼씩 이어서 복제한다. 같은 간격으로 늘어놓을 때 쓴다
+	// 요소가 아니라 길(pathOf)로 기억한다 — 파일에 쓴 뒤 쪽을 다시 읽으면 요소가 새것으로 바뀐다
+	let lastDup = null;
+	const xyOf = (el) => ({ x: parseFloat(css(el).left) || el.offsetLeft, y: parseFloat(css(el).top) || el.offsetTop });
+	const dupStep = (all) => {
+		const L = lastDup, now = all.map((x) => pathOf(x).join());
+		if (L && L.copies.length === now.length && now.every((p) => L.copies.includes(p))) {
+			const a = atPath(L.src0), b = atPath(L.copy0);
+			if (a && b) { const p = xyOf(a), q = xyOf(b); return { dx: q.x - p.x, dy: q.y - p.y }; }
+		}
+		return { dx: 20, dy: 20 };
+	};
+	const rememberDup = (srcs, copies) => { lastDup = { src0: pathOf(srcs[0]), copy0: pathOf(copies[0]), copies: copies.map((x) => pathOf(x).join()) }; };
 	const dup = () => {
-		const el = shapeOf(sel), c = clean(el);
-		if (movable(el)) { c.style.left = P((parseFloat(css(el).left) || el.offsetLeft) + 20); c.style.top = P((parseFloat(css(el).top) || el.offsetTop) + 20); }
+		const el = shapeOf(sel), c = clean(el), { dx, dy } = dupStep([el]);
+		if (movable(el)) { const p = xyOf(el); c.style.left = P(p.x + dx); c.style.top = P(p.y + dy); }
 		const path = pathOf(el);
 		el.after(c);
 		keep(c);
 		post({ t: "after", path, html: c.outerHTML });
 		select(c);
+		rememberDup([el], [c]);
 	};
 	/** 여러 개 복제 — 문서 차례대로 하나씩 바로 뒤에 넣고, 새로 생긴 것들을 고른다 */
 	const dupMany = () => {
 		const all = picks().sort((a, c) => (a.compareDocumentPosition(c) & Node.DOCUMENT_POSITION_FOLLOWING ? -1 : 1));
-		const made = [];
+		const made = [], { dx, dy } = dupStep(all);
 		together(() => {
 			for (const el of all) {
 				const c = clean(el);
-				if (movable(el)) { c.style.left = P((parseFloat(css(el).left) || el.offsetLeft) + 20); c.style.top = P((parseFloat(css(el).top) || el.offsetTop) + 20); }
+				if (movable(el)) { const p = xyOf(el); c.style.left = P(p.x + dx); c.style.top = P(p.y + dy); }
 				post({ t: "after", path: pathOf(el), html: c.outerHTML });
 				el.after(c);
 				made.push(c);
@@ -530,6 +544,7 @@
 		});
 		select(made[0], made.slice(1));
 		keep(made[0]);
+		rememberDup(all, made);
 	};
 	/** 복사 — 다른 쪽에 붙여도 같은 자리 · 크기로 서게 절대 위치로 바꿔 넘긴다 (붙여 넣기는 쪽 맨 위에 놓는다). 여러 개면 이어 붙인 HTML 하나로 */
 	const copy = () => {
@@ -1460,6 +1475,20 @@
 			const all = b.add ? [...picks(), ...got.filter((x) => !picks().some((p) => p === x || p.contains(x) || x.contains(p)))] : got;
 			if (all.length) { select(all[0], all.slice(1)); picked = Date.now(); }
 			return;
+		}
+		// 복제냐 옮기기냐는 놓는 순간의 Ctrl 로 정한다 (PowerPoint 와 같다): 끄는 도중 Ctrl 을 누르면 복제, 놓기 전에 떼면 옮기기
+		if (drag?.moved) {
+			const items = drag.group || [drag];
+			if (drag.copy && !e.ctrlKey) {
+				// 복제본이 선 자리로 원본을 옮기고 복제본은 걷는다
+				for (const it of items) { for (const k of ["left", "top", "position"]) it.src.style[k] = it.el.style[k]; it.el.remove(); it.el = it.src; }
+				drag.copy = false;
+				drag.el = items[0].el;
+			} else if (!drag.copy && e.ctrlKey && items.every((it) => movable(it.el))) {
+				// 옮긴 자리에 복제본을 만들고 원본은 제자리로
+				const group = items.map((it, i) => { const c = clean(it.el), o = drag.orig[i]; it.el.style.left = o.left; it.el.style.top = o.top; it.el.style.position = o.position; return { el: c, src: it.el }; });
+				drag = { el: group[0].el, moved: true, copy: true, group };
+			}
 		}
 		if (drag?.copy) {
 			showGuides(null, null);
