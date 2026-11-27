@@ -46,28 +46,55 @@ fn key_file() -> std::path::PathBuf {
 	crate::control::data_dir().join("p2p.key")
 }
 
-/// 이 앱의 열쇠 — 처음 한 번 만들어 남긴다. 못 남기면(보호 저장이 안 되는 곳) 이번 실행에만 쓴다
-fn secret() -> SecretKey {
+/// 이 앱의 열쇠: 처음 한 번 만들어 남긴다. 못 남기면(보호 저장이 안 되는 곳) 이번 실행에만 쓴다.
+/// 2026.11.27 : 덱의 서명 기록(trust.rs)도 이 열쇠로 서명한다. 그래서
+///   한 실행 안에서는 늘 같은 열쇠다(처음 한 번 읽어 쥔다). 전에는 부를 때마다 읽어, 파일을 못 풀면 부를 때마다 새 열쇠가 나왔다
+///   앱과 앱 밖 CLI 가 처음에 같은 때 만들면 둘이 다른 열쇠를 쥐게 되므로, 새 파일로만 쓰고(create_new) 이미 생겼으면 그것을 읽는다
+///   파일이 있는데 풀리지 않으면(윈도 프로필을 옮겼다 · 깨졌다) 옆에 치워 두고 새로 만든다. 그 덱들의 승인자는 복구 열쇠로 되찾는다
+///   남기지 못한 열쇠면 key_saved() 가 false 라 서명 기록을 쓰지 않는다
+pub(crate) fn secret() -> SecretKey {
+	KEY.get_or_init(load_key).0.clone()
+}
+
+/// 이 실행의 열쇠가 파일에 남아 있나 (시험에서는 trust.rs 가 부르지 않는다)
+#[cfg_attr(test, allow(dead_code))]
+pub(crate) fn key_saved() -> bool {
+	KEY.get_or_init(load_key).1
+}
+
+static KEY: std::sync::OnceLock<(SecretKey, bool)> = std::sync::OnceLock::new();
+
+fn load_key() -> (SecretKey, bool) {
 	let b64 = base64::engine::general_purpose::STANDARD;
-	let saved = std::fs::read_to_string(key_file()).ok().and_then(|t| b64.decode(t.trim()).ok()).and_then(|b| crate::runner::dpapi::unprotect(&b)).and_then(|b| <[u8; 32]>::try_from(b).ok());
-	if let Some(b) = saved {
-		return SecretKey::from_bytes(&b);
+	let saved = || std::fs::read_to_string(key_file()).ok().and_then(|t| b64.decode(t.trim()).ok()).and_then(|b| crate::runner::dpapi::unprotect(&b)).and_then(|b| <[u8; 32]>::try_from(b).ok());
+	if let Some(b) = saved() {
+		return (SecretKey::from_bytes(&b), true);
+	}
+	if key_file().exists() {
+		let t = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+		let _ = std::fs::rename(key_file(), key_file().with_extension(format!("key.bad-{t}")));
 	}
 	let k = SecretKey::generate();
 	if let Some(sealed) = crate::runner::dpapi::protect(&k.to_bytes()) {
 		let _ = std::fs::create_dir_all(crate::control::data_dir());
-		let _ = std::fs::write(key_file(), b64.encode(sealed));
+		let made = std::fs::OpenOptions::new().write(true).create_new(true).open(key_file()).and_then(|mut f| std::io::Write::write_all(&mut f, b64.encode(sealed).as_bytes()));
+		if made.is_ok() {
+			return (k, true);
+		}
+		if let Some(b) = saved() {
+			return (SecretKey::from_bytes(&b), true);
+		}
 	}
-	k
+	(k, false)
 }
 
 /// 이 앱의 iroh 끝점 — 처음 쓸 때 연다(덱 주인으로 공유를 켤 때 · 팀원으로 공유 덱에 들어갈 때). 앱이 꺼질 때까지 둔다
-async fn endpoint(app: &AppHandle) -> Res<Endpoint> {
+pub(crate) async fn endpoint(app: &AppHandle) -> Res<Endpoint> {
 	let p = app.state::<P2p>();
 	let ep = p
 		.ep
 		.get_or_try_init(|| async {
-			let ep = Endpoint::builder(presets::N0).secret_key(secret()).alpns(vec![ALPN.to_vec()]).bind().await.map_err(|e| format!("앱끼리 잇는 길을 열지 못했다: {e}"))?;
+			let ep = Endpoint::builder(presets::N0).secret_key(secret()).alpns(vec![ALPN.to_vec(), crate::peers::ALPN.to_vec()]).bind().await.map_err(|e| format!("앱끼리 잇는 길을 열지 못했다: {e}"))?;
 			let (ep2, app2) = (ep.clone(), app.clone());
 			tauri::async_runtime::spawn(async move { serve(app2, ep2).await });
 			Ok::<_, String>(ep)
@@ -89,6 +116,10 @@ async fn serve(app: AppHandle, ep: Endpoint) {
 		let app = app.clone();
 		tauri::async_runtime::spawn(async move {
 			let Ok(conn) = incoming.await else { return };
+			// 2026.11.27 : 덱 사본 주고받기(peers.rs)도 같은 끝점으로 받는다. 공유를 켜지 않아도 받는다
+			if conn.alpn() == crate::peers::ALPN {
+				return crate::peers::serve(conn).await;
+			}
 			while let Ok((send, recv)) = conn.accept_bi().await {
 				// 협업이 꺼져 있으면 받지 않는다 — 팀원 출입구는 「덱 주인이 공유를 끄셨습니다」를 보인다
 				let Some(port) = crate::collab::serving_port(&app) else {

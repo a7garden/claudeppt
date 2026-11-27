@@ -12,16 +12,20 @@ pub mod cli;
 mod claude;
 mod collab;
 mod control;
+mod deckmerge;
 mod fonts;
 mod fsx;
 mod imagegen;
 mod invite;
 mod metafile;
 mod p2p;
+mod peers;
 mod project;
 mod pptsnap;
 mod runner;
+mod sync;
 mod vcs;
+mod trust;
 mod tunnel;
 mod watch;
 
@@ -126,6 +130,22 @@ pub fn run() {
 			vcs::vcs_log,
 			vcs::vcs_tag,
 			vcs::vcs_restore,
+			trust::trust_state,
+			trust::trust_rename,
+			trust::trust_recovery,
+			trust::trust_recover,
+			trust::trust_cosign,
+			trust::trust_pending_drop,
+			sync::sync_status,
+			sync::sync_export,
+			sync::sync_import,
+			sync::sync_approve,
+			sync::sync_join,
+			sync::sync_admit,
+			sync::sync_mailbox_set,
+			sync::sync_mailbox_run,
+			sync::sync_open,
+			peers::sync_peers_run,
 			claude::claude_detect,
 			claude::claude_run,
 			claude::claude_stop,

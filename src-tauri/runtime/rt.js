@@ -53,8 +53,9 @@
 	// 그러면 Enter 로 마친 뒤 Enter · F2 로 이어 고치지 못한다. 되쓰기 직전에 길을 적어 두고, 다시 뜬 무대 쪽이 edit 모드를 받으면 되살린다.
 	// 쪽 목록 미리보기는 view 모드를 받으므로 되살리지 않는다 (2026.11.25)
 	const KEEP = "deck-keep:" + location.pathname;
+	// 2026.11.27 : 슬라이드가 sandbox(이름 없는 출처)에서 돌아 sessionStorage 가 막히므로 앱 화면에 맡긴다 (frames.ts keep · keepAsk)
 	// 여러 개를 골랐으면 함께 고른 것도 적는다 — 옮긴 뒤 다시 읽은 쪽에서 하나만 남으면 이어서 맞춤 · 채우기를 할 수 없다
-	const keep = (el, others = el === sel ? more : []) => { try { sessionStorage.setItem(KEEP, JSON.stringify({ path: pathOf(el), more: others.filter((x) => x.isConnected).map(pathOf), at: Date.now() })); } catch {} };
+	const keep = (el, others = el === sel ? more : []) => post({ t: "keep", key: KEEP, k: { path: pathOf(el), more: others.filter((x) => x.isConnected).map(pathOf), at: Date.now() } });
 	const label = (el) => {
 		const t = (el.innerText || el.getAttribute("alt") || "").replace(/\s+/g, " ").trim();
 		return t.length > 60 ? t.slice(0, 60) + "…" : t;
@@ -1790,13 +1791,15 @@
 			document.documentElement.toggleAttribute("data-deck-edit", mode === "edit");
 			if (mode !== "edit") { if (place) setPlace(null); select(null); }
 			else {
-				let k = null;
-				try { k = JSON.parse(sessionStorage.getItem(KEEP) || "null"); sessionStorage.removeItem(KEEP); } catch {}
-				const el = k && Date.now() - k.at < 5000 && k.path ? atPath(k.path) : null;
-				if (el && el !== root) { select(el, (k.more || []).map(atPath).filter((x) => x && x !== root)); picked = Date.now(); window.focus(); }
-				// 다시 읽은 쪽이면 띠에 지금 고른 것(없으면 없음)을 알린다 — 띠가 옛 쪽의 고른 것을 들고 있지 않게
-				else announce();
+				post({ t: "keepAsk", key: KEEP });
 			}
+		} else if (m.t === "keepIs") {
+			if (mode !== "edit") return;
+			const k = m.k;
+			const el = k && Date.now() - k.at < 5000 && k.path ? atPath(k.path) : null;
+			if (el && el !== root) { select(el, (k.more || []).map(atPath).filter((x) => x && x !== root)); picked = Date.now(); window.focus(); }
+			// 다시 읽은 쪽이면 띠에 지금 고른 것(없으면 없음)을 알린다: 띠가 옛 쪽의 고른 것을 들고 있지 않게
+			else announce();
 		} else if (m.t === "find") {
 			// 찾기 칠하기 — CSS 강조 표시라 문서를 바꾸지 않는다 (굽기 · 뽑기 · 원본에 섞이지 않는다)
 			try {

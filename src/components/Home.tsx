@@ -8,6 +8,7 @@ import { openUrl } from "@tauri-apps/plugin-opener";
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { api, deckUrl, type LibItem } from "../lib/api";
 import { readDeck, safeName, writeDeck } from "../lib/deck";
+import { SLIDE_SANDBOX } from "../lib/frames";
 import { openAny, startNew } from "../lib/flows";
 import { useT } from "../lib/i18n";
 import { useSettings } from "../lib/settings";
@@ -137,7 +138,7 @@ export default function Home({ onSettings }: { onSettings?: () => void }) {
 		if (typeof p === "string") openAny(p);
 	};
 	const pickDeck = async () => {
-		const p = await open({ filters: [{ name: "ClaudePPT", extensions: ["cppt", "json"] }], defaultPath: s.library });
+		const p = await open({ filters: [{ name: "ClaudePPT", extensions: ["cppt", "cpptb", "json"] }], defaultPath: s.library });
 		if (typeof p === "string") openAny(p);
 	};
 
@@ -310,7 +311,7 @@ function DeckThumb({ item }: { item: LibItem }) {
 	return (
 		<span className="dthumb" ref={ref}>
 			{id && first && width > 0 && (
-				<iframe src={deckUrl(id, first)} title="" tabIndex={-1} width={size.w} height={size.h}
+				<iframe src={deckUrl(id, first)} sandbox={SLIDE_SANDBOX} title="" tabIndex={-1} width={size.w} height={size.h}
 					style={{ transform: `translate(${(width - size.w * k) / 2}px, ${(boxH - size.h * k) / 2}px) scale(${k})` }} />
 			)}
 		</span>

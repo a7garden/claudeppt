@@ -1,14 +1,25 @@
 // 슬라이드 iframe(런타임 rt.js)과 주고받는 말. 슬라이드는 deck:// 의 다른 출처라 postMessage 로만 닿는다.
 import { deckUrl } from "./api";
 
+/** 슬라이드 iframe 의 sandbox: 스크립트만 허락하고 출처는 이름 없는 것으로. 앱 창의 쪽 · 화면 밖 쪽(내보내기 · 썸네일) 모두 같다 (Workspace.tsx SlideFrame) */
+export const SLIDE_SANDBOX = "allow-scripts";
+
 type Msg = { __deck: 1; t: string; req?: string; [k: string]: any };
 const waiting = new Map<string, (m: Msg) => void>();
+const kept = new Map<string, unknown>();
 const subs = new Set<(m: Msg, src: MessageEventSource | null) => void>();
 
 window.addEventListener("message", (e) => {
 	const m = e.data as Msg;
 	if (!m || !m.__deck) return;
 	if (m.t === "menu") return refire(m, e.source);
+	// 고친 요소의 길을 다시 뜬 쪽에 넘긴다 (rt.js keep). 슬라이드는 sandbox 라 sessionStorage 를 못 쓴다
+	if (m.t === "keep") return void kept.set(m.key, m.k);
+	if (m.t === "keepAsk") {
+		const k = kept.get(m.key) ?? null;
+		kept.delete(m.key);
+		return void (e.source as Window | null)?.postMessage({ __deck: 1, t: "keepIs", k }, "*");
+	}
 	if (m.req && waiting.has(m.req)) {
 		waiting.get(m.req)!(m);
 		waiting.delete(m.req);
@@ -61,6 +72,7 @@ export function offscreen(id: string, file: string, w: number, h: number, rev?: 
 				resolve({ win: f.contentWindow!, dispose: () => f.remove() });
 			}
 		});
+		f.setAttribute("sandbox", SLIDE_SANDBOX);
 		f.src = deckUrl(id, file, rev) + "?x=" + Date.now();
 		document.body.appendChild(f);
 	});
