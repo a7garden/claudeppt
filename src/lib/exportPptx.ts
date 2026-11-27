@@ -60,6 +60,7 @@ function toRuns(runs: any[], f: FontCtx) {
 					fontSize: PT(r.size), bold: fc.bold, italic: r.italic, color: r.color, fontFace: fc.face,
 					charSpacing: r.spacing ? PT(r.spacing) : undefined,
 					highlight: r.highlight || undefined,
+					hyperlink: r.link ? { url: r.link } : undefined,
 					underline: r.underline ? { style: "sng" } : undefined, strike: r.strike ? "sngStrike" : undefined,
 					transparency: r.alpha != null && r.alpha < 1 ? Math.round((1 - r.alpha) * 100) : undefined,
 					breakLine: !!next?.br,
@@ -116,6 +117,8 @@ export async function buildPptx(deck: Deck, projectId: string, progress: (i: num
 			.filter((it: any) => it.type === "image" && it.baked === "whole" && !PICTURE_TAGS.has(it.tag))
 			.map((it: any) => ({ x: Math.round(it.x), y: Math.round(it.y), w: Math.round(it.w), h: Math.round(it.h), tag: it.tag })));
 		const slide = pptx.addSlide();
+		// 숨긴 슬라이드 (PowerPoint 「슬라이드 숨기기」)
+		if (ref.skip) (slide as any).hidden = true;
 		if (exact) {
 			const { win, dispose } = await offscreen(projectId, ref.file, deck.size.w, deck.size.h);
 			let snap: any;

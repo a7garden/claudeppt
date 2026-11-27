@@ -27,6 +27,7 @@ import { remote } from "../lib/transport";
 import { useSettings } from "../lib/settings";
 import Talk, { openTalk, useTalkFold } from "./Talk";
 import { NotesPane, SlideShow, StageStatus, startShow, useView, zoomStep } from "./Show";
+import { FindBar, useFind } from "./Find";
 
 /** 담당이 아니라 내용 없이 자리만 받은 쪽 (2026.11.27 collab.rs limit_view) — 쪽 그림 대신. 덱 주인이 「담당 쪽만 보이기」를 켠 사람에게만 생긴다 */
 function LockedSlide({ width, height }: { width: number; height: number }) {
@@ -143,6 +144,15 @@ function toolKey(raw: string): boolean {
 	return true;
 }
 
+/** Ctrl+F 찾기 · Ctrl+H 바꾸기 · Ctrl+K 링크 (PowerPoint 와 같다). 앱 화면에서 누른 것도 슬라이드 창이 넘겨준 것도. 처리했으면 true */
+function barKey(raw: string): boolean {
+	const k = raw.toLowerCase();
+	const mode = k === "f" || k === "find" ? "find" : k === "h" || k === "replace" ? "replace" : k === "k" || k === "link" ? "link" : null;
+	if (!mode) return false;
+	useFind.getState().show(mode);
+	return true;
+}
+
 /** F5 처음부터 · Shift+F5 지금 쪽부터 슬라이드 쇼 (PowerPoint 와 같다). 웹뷰의 새로 고침 대신 */
 function showKey(here: boolean) {
 	startShow(here ? undefined : 0);
@@ -189,6 +199,7 @@ function slideItems(i: number, n: number, t: ReturnType<typeof useT>): MenuItem[
 		{ label: t("insertAbove"), run: () => st.addSlide(i) },
 		{ label: t("insertBelow"), run: () => st.addSlide(i + 1) },
 		{ label: t("duplicate"), run: () => st.duplicateSlide(i) },
+		{ label: t("skipSlide"), checked: !!st.deck?.slides[i]?.skip, run: () => st.toggleSkip(i) },
 		"-",
 		{ label: t("moveUp"), run: () => st.moveSlide(i, i - 1), disabled: i === 0 },
 		{ label: t("moveDown"), run: () => st.moveSlide(i, i + 2), disabled: i >= n - 1 },
@@ -261,6 +272,7 @@ export default function Workspace() {
 		const k = (e: KeyboardEvent) => {
 			const tgt = e.target as Element;
 			if (e.key === "F5") { showKey(e.shiftKey); e.preventDefault(); return; }
+			if (e.ctrlKey && !e.altKey && barKey(e.key)) { e.preventDefault(); return; }
 			if (tgt.closest?.("input, textarea, [contenteditable]") || e.ctrlKey || e.altKey || e.metaKey) return;
 			if (!toolKey(e.key) && !navKey(e.key)) {
 				if (e.key === "Escape") escKey();
@@ -368,13 +380,14 @@ function Rail() {
 				// 판 비교 중이면 고른 판과 다른 쪽에 점선 테두리 · 그 뒤에 생긴 쪽에 「새」 — 바뀐 쪽만 골라 넘겨 볼 수 있게
 				const vs = !preview ? vdiff?.slides[sl.id] : undefined;
 				return (
-					<div key={sl.id} className={"rail-item" + (i === current ? " on" : "") + (dropAt === i ? " drop-before" : "") + (vs ? " drift" : "") + (role === "assigned" && !isMine ? " notmine" : "") + (sl.hidden ? " locked" : "")}
+					<div key={sl.id} className={"rail-item" + (i === current ? " on" : "") + (dropAt === i ? " drop-before" : "") + (vs ? " drift" : "") + (role === "assigned" && !isMine ? " notmine" : "") + (sl.hidden ? " locked" : "") + (sl.skip ? " skip" : "")}
 						onDragOver={(e) => { if (drag != null) { e.preventDefault(); setDropAt(i); } }}
 						onDrop={() => { if (drag != null) move(drag, i); setDrag(null); setDropAt(null); }}
 						// 누른 쪽을 지금 쪽으로 — PowerPoint 처럼 메뉴가 가리키는 쪽이 무대에 보인다
 						onContextMenu={(e) => { setCurrent(i); openMenu(e, preview ? previewItems(t) : [...slideItems(i, live.slides.length, t), ...assignItems(sl.id, t)]); }}>
 						<div className="no">
-							<span>{i + 1}</span>
+							{/* 숨긴 슬라이드는 PowerPoint 처럼 번호에 빗금 */}
+							<span title={sl.skip ? t("skipSlide") : undefined}>{i + 1}</span>
 							{n > 0 && <span className="pins" title={`${t("pins")} ${n}`} />}
 							{vs && <span className="drift">{vs === "added" ? t("vsAdded") : t("vsChangedOne")}</span>}
 							<AssignTag slideId={sl.id} />
@@ -489,7 +502,7 @@ function Stage() {
 			if (scrolls.current && canvas.current) return void canvas.current.scrollBy({ left: m.dx || 0, top: m.dy });
 			return wheel(m.dy);
 		}
-		if (now && m.t === "key") return void (m.key === "Escape" ? escKey() : m.key === "F5" ? showKey(!!m.shift) : navKey(m.key) || toolKey(m.key));
+		if (now && m.t === "key") return void (m.key === "Escape" ? escKey() : m.key === "F5" ? showKey(!!m.shift) : m.bar ? barKey(m.key) : navKey(m.key) || toolKey(m.key));
 		if (now && m.t === "sel") { selNow.current = m.info; return setSelInfo(m.info); }
 		if (now && m.t === "placing") return setPlacing(m.kind);
 		// 고치는 중 띠의 잘라내기 · 복사: 고른 글자를 클립보드에 쓴다. 단추를 누른 직후라 사용자 활성이 남아 있어 쓸 수 있다
@@ -653,6 +666,7 @@ function Stage() {
 				// 이어 보기에서는 띠를 무대 위쪽에 띄워 둔다 — 첫 쪽 위 여백(FLOW_PAD)에 들어가고, 스크롤해도 그 자리에 남는다
 				? <StageTools left={(box.w - flowWidth(box.w, deck)) / 2} top={52} right={(box.w + flowWidth(box.w, deck)) / 2} onUndo={undoMark} canUndo={mine.length > 0} />
 				: <StageTools left={scrolls.current ? 12 : left} top={scrolls.current ? 0 : top} right={scrolls.current ? box.w - 12 : left + deck.size.w * scale} onUndo={undoMark} canUndo={mine.length > 0} onAsk={selInfo && !preview && !compare ? askSelected : undefined} />)}
+			{!preview && !flow && <FindBar win={win} />}
 			{notesOpen && !flow && <NotesPane slideId={slide.id} />}
 			<StageStatus fit={fit} scale={scale} />
 			</div>

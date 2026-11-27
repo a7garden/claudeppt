@@ -160,6 +160,12 @@ interface S {
 	duplicateSlide: (i: number) => Promise<void>;
 	/** 발표자 메모 (deck.json 의 쪽 notes) — 내보내면 PowerPoint 슬라이드 노트가 된다 */
 	setNotes: (slideId: string, notes: string) => Promise<void>;
+	/** 슬라이드 숨기기 — 쇼에서 건너뛰고 PPTX 에서도 숨긴 슬라이드가 된다 */
+	toggleSkip: (i: number) => void;
+	/** 찾기 — 쪽마다 찾은 수 (글자만, 태그 · 속성은 보지 않는다) */
+	findText: (q: string, cs: boolean) => Promise<number[]>;
+	/** 바꾸기 — slideIds 가 없으면 모든 쪽. 바꾼 수. 쪽마다 되돌리기 한 걸음 */
+	replaceText: (q: string, to: string, cs: boolean, slideIds?: string[]) => Promise<number>;
 	moveSlide: (from: number, to: number) => void;
 	removeSlide: (i: number) => void;
 	/** by · id — 협업 브라우저 팀원이 꽂은 핀 (그 사람 이름 · 브라우저가 정한 id) */
@@ -349,6 +355,23 @@ async function step(get: () => S, from: Snap[], to: Snap[], by: string) {
 	if (by === me() && i >= 0 && i !== get().current) get().setCurrent(i);
 	markEditing(get, deck.slides[i]?.id, by);
 	directCommit(dir, get, by);
+}
+
+/** 쪽 HTML(글 또는 문서)의 .slide 안 글 조각 — 찾기 · 바꾸기가 본다. 스크립트 · 스타일 글은 뺀다 */
+function textNodes(src: string | Document): Text[] {
+	const doc = typeof src === "string" ? new DOMParser().parseFromString(src, "text/html") : src;
+	const root = doc.querySelector(".slide") || doc.body;
+	const w = doc.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+	const out: Text[] = [];
+	for (let n = w.nextNode(); n; n = w.nextNode()) if (!n.parentElement?.closest("script, style")) out.push(n as Text);
+	return out;
+}
+function countIn(s: string, q: string, cs: boolean) {
+	if (!q) return 0;
+	const a = cs ? s : s.toLowerCase(), b = cs ? q : q.toLowerCase();
+	let n = 0;
+	for (let i = a.indexOf(b); i >= 0; i = a.indexOf(b, i + b.length)) n++;
+	return n;
 }
 
 /** 쪽 더하기 · 빼기 · 옮기기 · 복제도 Ctrl+Z 로 되돌린다 — 바꾸기 전후의 deck.json 글을 한 걸음으로 쌓는다.
@@ -995,6 +1018,50 @@ export const useDeck = create<S>()((set, get) => ({
 		s.splice(at, 0, { id, file: `slides/${id}.html` });
 		await get().saveDeck({ ...deck, slides: s });
 		get().setCurrent(at);
+	}),
+	toggleSkip: (i) => void deckStep(get, async () => {
+		const deck = get().deck;
+		if (!deck?.slides[i]) return;
+		await get().saveDeck({ ...deck, slides: deck.slides.map((s, k) => (k === i ? { ...s, skip: s.skip ? undefined : true } : s)) });
+	}),
+	findText: async (q, cs) => {
+		const { dir, deck } = get();
+		if (!deck || !q) return deck?.slides.map(() => 0) ?? [];
+		return Promise.all(deck.slides.map(async (s) => {
+			if (!s.file) return 0;
+			const src = await api.readText(dir, s.file).catch(() => "");
+			return textNodes(src).reduce((n, t) => n + countIn(t.nodeValue || "", q, cs), 0);
+		}));
+	},
+	replaceText: (q, to, cs, slideIds) => serial(async () => {
+		const { dir, deck } = get();
+		if (!deck || !q) return 0;
+		const by = me();
+		let total = 0;
+		for (const s of deck.slides) {
+			if (!s.file || (slideIds && !slideIds.includes(s.id))) continue;
+			const before = await api.readText(dir, s.file).catch(() => null);
+			if (before == null) continue;
+			const doc = new DOMParser().parseFromString(before, "text/html");
+			let n = 0;
+			for (const t of textNodes(doc)) {
+				const c = countIn(t.nodeValue || "", q, cs);
+				if (!c) continue;
+				n += c;
+				t.nodeValue = (t.nodeValue || "").replace(new RegExp(q.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), cs ? "g" : "gi"), () => to);
+			}
+			if (!n) continue;
+			const doctype = /^\s*<!doctype[^>]*>/i.exec(before)?.[0] ?? "<!doctype html>";
+			const after = doctype + "\n" + doc.documentElement.outerHTML + "\n";
+			await api.writeText(dir, s.file, after);
+			lastOut.set(s.file, { text: after, by });
+			undoStack.push({ file: s.file, text: before, after, by });
+			if (undoStack.length > UNDO_MAX) undoStack.shift();
+			markEditing(get, s.id, by);
+			total += n;
+		}
+		if (total) { redoStack = redoStack.filter((x) => x.by !== by); syncHist(); directCommit(dir, get, by); }
+		return total;
 	}),
 	setNotes: (slideId, notes) => deckStep(get, async () => {
 		const deck = get().deck;

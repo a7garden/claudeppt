@@ -42,7 +42,8 @@ export function zoomStep(dir: 1 | -1, fit: number) {
 export function startShow(from?: number) {
 	const st = useDeck.getState();
 	if (!st.deck?.slides.length) return;
-	if (from != null) st.setCurrent(from);
+	// 처음부터면 숨기지 않은 첫 쪽부터
+	if (from != null) { let i = from; while (i < st.deck.slides.length - 1 && st.deck.slides[i]?.skip) i++; st.setCurrent(i); }
 	useView.getState().setShow(true);
 	// 창 전체 화면 — 웹뷰가 받지 않으면 앱 창 안을 채우는 것으로 그친다
 	document.documentElement.requestFullscreen?.().catch(() => {});
@@ -116,12 +117,15 @@ export function SlideShow() {
 		setShow(false);
 		if (document.fullscreenElement) document.exitFullscreen().catch(() => {});
 	};
-	// PowerPoint 처럼 마지막 쪽 다음은 검은 「끝」 화면, 그다음에 닫는다
+	// PowerPoint 처럼 마지막 쪽 다음은 검은 「끝」 화면, 그다음에 닫는다. 숨긴 슬라이드는 건너뛴다
 	const go = (d: number) => {
 		const st = useDeck.getState();
 		if (ended) { if (d > 0) close(); else setEnded(false); return; }
-		if (d > 0 && st.current >= n - 1) return setEnded(true);
-		st.setCurrent(st.current + d);
+		const slides = st.deck?.slides || [];
+		let i = st.current + d;
+		while (i >= 0 && i < n && slides[i]?.skip) i += d;
+		if (i >= n) return setEnded(true);
+		if (i >= 0) st.setCurrent(i);
 	};
 	useEffect(() => {
 		const k = (e: KeyboardEvent) => {

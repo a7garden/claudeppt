@@ -34,6 +34,7 @@ import { tell } from "../lib/frames";
 import { type Key, useT } from "../lib/i18n";
 import { useDeck } from "../lib/store";
 import { openMenu } from "./ContextMenu";
+import { useFind } from "./Find";
 
 export interface SelInfo {
 	tag: string;
@@ -344,7 +345,7 @@ function HomeTab({ t, info, send, vars, mark, setMark, onAsk }: Ctx) {
 				<button disabled={noClip} onMouseDown={hold} onClick={() => send("copy")} title={`${t("rbCopy")} (Ctrl+C)`} aria-label={t("rbCopy")}>
 					<Icon><rect x="5" y="5" width="8.5" height="8.5" rx="1" /><path d="M11 3V2.5H2.5V11H3" /></Icon>
 				</button>
-				<button disabled={none} aria-pressed={!!info?.painter} onMouseDown={hold} onClick={() => send("painter")} title={t("rbPainter")} aria-label={t("rbPainter")}>
+				<button disabled={none} aria-pressed={!!info?.painter} onMouseDown={hold} onClick={() => send("painter")} onDoubleClick={() => send("painter", "lock")} title={`${t("rbPainter")}. ${t("rbPainterLock")}`} aria-label={t("rbPainter")}>
 					<Icon d="M3 2.5h8v3.5H3zM11 4.2h2v3.3H7.5V10M6.5 10h2v4h-2z" />
 				</button>
 			</Grp>
@@ -562,6 +563,11 @@ function InsertTab({ t, info, send, insert, placing, win }: Ctx) {
 						</>
 					)}
 				</Pop>
+			</Grp>
+			<Grp label={t("linkInsert")}>
+				<button className="wide" onMouseDown={hold} onClick={() => useFind.getState().show("link")} disabled={!info?.text} title={`${t("linkInsert")} (Ctrl+K)`}>
+					<Icon d="M7 9a3 3 0 0 0 4.2 0l2-2a3 3 0 0 0-4.2-4.2l-.8.8M9 7a3 3 0 0 0-4.2 0l-2 2a3 3 0 0 0 4.2 4.2l.8-.8" />{t("linkInsert")}
+				</button>
 			</Grp>
 			<Grp label={t("rbSymbol")}>
 				{/* 기호는 글이 들어갈 자리가 있을 때만: 고르지 않았거나 글 덩이가 여럿인 상자면 넣을 곳이 없다 */}

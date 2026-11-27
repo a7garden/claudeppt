@@ -93,6 +93,7 @@
 		#deck-ui .guide.v { width: 1.5px !important } #deck-ui .guide.h { height: 1.5px !important }
 		#deck-ui .ghost { position: absolute; box-sizing: border-box; border: 1.5px dashed #e5482d; background: rgba(229,72,45,.06) }
 		#deck-ui .spin { border-radius: 50%; cursor: grab }
+		::highlight(deck-find) { background-color: #ffd84d; color: #111 }
 		#deck-ui .spin:active { cursor: grabbing }`;
 	document.head.appendChild(style);
 	// 손잡이 · 그리는 틀은 .slide 밖(<html> 바로 밑)에 둔다 — 쪽 안에 두면 자식 번호 길이 원본과 어긋나고 굽기 · 뽑기에 섞인다
@@ -817,8 +818,8 @@
 	// ── 서식 복사 · 지우기 ──
 	const PAINT_TEXT = ["font-family", "font-size", "font-weight", "font-style", "text-decoration", "color", "letter-spacing", "text-transform", "line-height"];
 	const PAINT_BOX = ["background-color", "border-top", "border-right", "border-bottom", "border-left", "border-radius", "box-shadow", "opacity"];
-	const startPaint = (el) => {
-		if (painter) painter = null;
+	const startPaint = (el, lock) => {
+		if (painter && !lock) painter = null;
 		else {
 			const b = shapeOf(el), s = css(el), bs = css(b);
 			// 도형(바탕 · 테두리가 있는 것)에서 집었을 때만 상자 서식도 옮긴다: 맨 글에서 집어 도형에 찍으면 도형 바탕이 지워진다
@@ -826,6 +827,8 @@
 			painter = {
 				text: Object.fromEntries(PAINT_TEXT.map((k) => [k, s.getPropertyValue(k)])),
 				box: shape ? Object.fromEntries(PAINT_BOX.map((k) => [k, bs.getPropertyValue(k)])) : null,
+				// 두 번 누르면 계속 찍는다 (PowerPoint 서식 복사 두 번 누르기). Esc · 쪽 바탕 · 붓 단추로 끝낸다
+				lock: !!lock,
 			};
 		}
 		document.documentElement.toggleAttribute("data-deck-paint", !!painter);
@@ -833,11 +836,12 @@
 	};
 	const paintOn = (t) => {
 		const p = painter;
-		painter = null;
-		document.documentElement.removeAttribute("data-deck-paint");
+		if (!p.lock) { painter = null; document.documentElement.removeAttribute("data-deck-paint"); }
 		const box = boxOf(t) || t, tt = textAt(t, null) || (editable(t) ? t : null);
-		if (tt) setStyle(tt, p.text);
-		if (p.box) setStyle(shapeOf(tt || box), p.box);
+		together(() => {
+			if (tt) setStyle(tt, p.text);
+			if (p.box) setStyle(shapeOf(tt || box), p.box);
+		});
 		select(box);
 	};
 	const clearFmt = (el) => {
@@ -858,6 +862,37 @@
 		}
 		document.execCommand("insertText", false, ch);
 		announce();
+	};
+	/** 하이퍼링크 — 고친 중 고른 글자 · 골라 둔 글자(lastRange)에, 없으면 그 글 전체에. 빈 주소면 걷는다.
+	 *  이미 링크 안이면 그 링크의 주소만 바꾼다 (링크 안에 링크를 넣지 않는다) */
+	const putLink = (el, url) => {
+		const live = edit && ranged();
+		const r = live ? { host: edit.el, range: getSelection().getRangeAt(0) } : lastRange?.el.isConnected ? lastRange : null;
+		const host = r ? r.host ?? r.el : edit ? edit.el : textAt(el, null);
+		if (!host) return;
+		let range = r?.range;
+		if (!range) { range = document.createRange(); range.selectNodeContents(host); }
+		const near = [...host.querySelectorAll("a[href]")].filter((a) => range.intersectsNode(a));
+		if (!url) { for (const a of near) a.replaceWith(...a.childNodes); }
+		else {
+			const inA = (n) => (n.nodeType === 1 ? n : n.parentElement)?.closest?.("a[href]");
+			const a0 = inA(range.startContainer);
+			if (a0 && a0 === inA(range.endContainer) && host.contains(a0)) a0.setAttribute("href", url);
+			else for (const sp of wrapRange(host, range, {})) {
+				const old = sp.closest("a[href]");
+				if (old && host.contains(old)) { old.setAttribute("href", url); continue; }
+				const a = document.createElement("a");
+				a.setAttribute("href", url);
+				sp.replaceWith(a);
+				// 서식 없이 감싼 span 은 걷는다
+				if (sp.getAttribute("style")) a.appendChild(sp); else a.append(...sp.childNodes);
+			}
+		}
+		// 아무 서식 없는 빈 span 은 걷는다 (감싸기 · 링크 걷기가 남긴 껍데기)
+		for (const s of [...host.querySelectorAll("span")]) if (!s.attributes.length) s.replaceWith(...s.childNodes);
+		lastRange = null;
+		if (live) return announce();
+		rewrite(host);
 	};
 	const removeSel = () => {
 		// 여러 개면 하나씩 지우며 그때그때 길을 잰다 — 묶음은 같은 차례로 원본에 적용된다 (edits.ts batch)
@@ -1022,10 +1057,11 @@
 		const b = shapeOf(el);
 		if (cmd === "toggle") toggle(v, el, force);
 		else if (cmd === "pos") setPos(b, v);
+		else if (cmd === "link") putLink(el, v);
 		else if (cmd === "rotate") { if (movable(b)) setRot(b, rotOf(b) + v); }
 		else if (cmd === "rotateTo") { if (movable(b)) setRot(b, v); }
 		else if (cmd === "flip") { if (movable(b)) setFlip(b, v); }
-		else if (cmd === "painter") startPaint(el);
+		else if (cmd === "painter") startPaint(el, v === "lock");
 		else if (cmd === "clear") clearFmt(el);
 		else if (cmd === "symbol") putSymbol(v);
 		else if (cmd === "font") textStyle(el, { "font-family": v || "" });
@@ -1304,6 +1340,9 @@
 		const w = edit && wordAt(e.clientX, e.clientY);
 		if (w && tt.contains(w.startContainer)) { const s = getSelection(); s.removeAllRanges(); s.addRange(w); }
 	});
+	// 슬라이드 안 링크를 눌러도 슬라이드 창이 그 주소로 넘어가지 않게 한다 — 넘어가면 무대 · 쪽 그림이 남의 페이지가 되고 편집이 끊긴다.
+	// 링크는 PPTX 로 내보낸 뒤 PowerPoint 에서 쓴다 (2026.11.27)
+	addEventListener("click", (e) => { if (e.target.closest?.("a[href]")) e.preventDefault(); }, true);
 	// 휠 · 쪽 넘김 키는 앱으로 넘긴다 — 슬라이드 창이 받아 버리면 무대 위에서 휠을 굴리거나, 슬라이드를 한 번 누른 뒤 방향키를 눌러도 쪽이 안 넘어간다
 	// Ctrl+휠은 무대 확대/축소다 — 웹뷰가 슬라이드 창만 따로 키우지 않게 막는다
 	addEventListener("wheel", (e) => { if (e.ctrlKey) e.preventDefault(); post({ t: "wheel", dy: e.deltaY, dx: e.deltaX, ctrl: e.ctrlKey }); }, { passive: false });
@@ -1323,6 +1362,8 @@
 		const k = e.key.toLowerCase(), ctrl = e.ctrlKey && !e.altKey;
 		// F5 · Shift+F5 는 슬라이드 쇼 (PowerPoint 와 같다) — 웹뷰가 슬라이드 창을 새로 고치지 않게 앱으로 넘긴다
 		if (e.key === "F5") { if (edit) edit.el.blur(); post({ t: "key", key: "F5", shift: e.shiftKey }); e.preventDefault(); return; }
+		// Ctrl+F 찾기 · Ctrl+H 바꾸기 · Ctrl+K 링크는 앱의 칸이 연다. 글을 고치는 중이면 고른 글자를 기억해 둔다(lastRange) — 칸으로 포커스가 가면 고치기가 끝난다
+		if (ctrl && !e.shiftKey && ["f", "h", "k"].includes(k)) { post({ t: "key", key: { f: "find", h: "replace", k: "link" }[k], bar: true }); e.preventDefault(); return; }
 		// 되돌리기 · 다시 하기는 앱이 한다 (손으로 고친 것을 파일째 되쓴다). 글자를 고치는 중이면 그 글의 되돌리기를 쓴다
 		if (ctrl && ["z", "y"].includes(k) && !document.activeElement?.isContentEditable) {
 			// 아직 파일에 쓰지 않은 방향키 이동이 있으면 먼저 쓴다 — 안 그러면 되돌린 뒤에 늦게 쓰여 되돌림을 덮는다
@@ -1423,6 +1464,21 @@
 				// 다시 읽은 쪽이면 띠에 지금 고른 것(없으면 없음)을 알린다 — 띠가 옛 쪽의 고른 것을 들고 있지 않게
 				else announce();
 			}
+		} else if (m.t === "find") {
+			// 찾기 칠하기 — CSS 강조 표시라 문서를 바꾸지 않는다 (굽기 · 뽑기 · 원본에 섞이지 않는다)
+			try {
+				if (!window.CSS?.highlights) return;
+				const q = String(m.q || "");
+				if (!q) return void CSS.highlights.delete("deck-find");
+				const want = m.cs ? q : q.toLowerCase(), ranges = [];
+				const w = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+				for (let n = w.nextNode(); n; n = w.nextNode()) {
+					if (n.parentElement?.closest("script, style")) continue;
+					const s = m.cs ? n.nodeValue : n.nodeValue.toLowerCase();
+					for (let i = s.indexOf(want); i >= 0; i = s.indexOf(want, i + want.length)) { const r = document.createRange(); r.setStart(n, i); r.setEnd(n, i + want.length); ranges.push(r); }
+				}
+				CSS.highlights.set("deck-find", new Highlight(...ranges));
+			} catch {}
 		} else if (m.t === "cmd") {
 			if (mode === "edit") command(m.cmd, m.v, m);
 		} else if (m.t === "hit") {
@@ -1774,6 +1830,8 @@
 						color: c ? c.hex : "000000", alpha: c ? c.alpha : 1, font: fontOf(s),
 						// 글 조각(인라인)의 바탕색 = PowerPoint 의 글자 강조 표시. 문단 · 상자 바탕은 상자가 따로 그린다
 						highlight: s.display.startsWith("inline") && n.parentElement !== el ? color(s.backgroundColor)?.hex || null : null,
+						// 하이퍼링크 — 그 글 덩이 안의 <a href> (PowerPoint 글 하이퍼링크)
+						link: (() => { const a = n.parentElement.closest("a[href]"); return a && el.contains(a) ? a.href : null; })(),
 					};
 					let start = 0, soft = false;
 					for (let i = 0; i < raw.length; i++) {

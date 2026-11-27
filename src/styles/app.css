@@ -197,6 +197,18 @@ input, textarea, select { font: inherit; color: inherit; }
 .stage-status button[aria-pressed="true"] { color: var(--text); }
 .stage-status button svg { fill: none; stroke: currentColor; stroke-width: 1.5; stroke-linecap: round; stroke-linejoin: round; }
 .stage-status .pct { min-width: 46px; justify-content: center; }
+/* 찾기 · 바꾸기 · 링크 — 무대 오른쪽 위에 뜨는 작은 창 */
+.findbar { position: absolute; z-index: 5; top: 8px; right: 12px; width: 340px; display: flex; flex-direction: column; gap: 6px; padding: 8px; border-radius: var(--r-float); background: var(--raise-2); outline: 1px solid var(--hair-2); box-shadow: var(--shadow); font-size: 12px; }
+.findbar .row { display: flex; align-items: center; gap: 4px; }
+.findbar input:not([type="checkbox"]) { flex: 1; min-width: 0; height: 28px; padding: 0 8px; font-size: 13px; color: var(--text); background: var(--bg); border: 1px solid var(--hair); border-radius: var(--r-ctl); }
+.findbar button { height: 26px; min-width: 26px; padding: 0 6px; border-radius: var(--r-ctl); color: var(--dim); }
+.findbar button:hover:not(:disabled) { color: var(--text); background: var(--hair-2); }
+.findbar button:disabled { opacity: 0.4; }
+.findbar button.wide { padding: 0 10px; outline: 1px solid var(--hair); }
+.findbar button.link { color: var(--accent); }
+.findbar .meta { color: var(--dim); }
+.findbar .meta label { display: inline-flex; align-items: center; gap: 5px; }
+.findbar .grow { flex: 1; }
 /* 발표자 메모 — 슬라이드 아래 칸 (PowerPoint 「메모」) */
 .notes-pane { border-top: 1px solid var(--hair); background: var(--raise); }
 .notes-pane textarea { display: block; width: 100%; height: 96px; padding: 10px 14px; resize: vertical; border: 0; outline: 0; background: transparent; color: var(--text); font: 13px/1.55 inherit; }
@@ -799,6 +811,9 @@ textarea.field { height: auto; padding: 8px 10px; line-height: 1.5; resize: vert
 .assign-tag i.more { color: var(--dim); background: var(--hair); }
 .assign-tag.mine i { box-shadow: 0 0 0 1.5px var(--text); }
 .rail-item.notmine .thumb { opacity: 0.45; }
+/* 숨긴 슬라이드 — 흐리게, 번호에 빗금 */
+.rail-item.skip .thumb { opacity: 0.4; }
+.rail-item.skip .no > span:first-child { text-decoration: line-through; }
 .rail-item.notmine:hover .thumb, .rail-item.notmine.on .thumb { opacity: 0.8; }
 /* 담당 거르기 · 담당표 (2026.11.27) — 쪽 목록 머리. 담당이 있거나 덱 주인이 공유 중일 때만 */
 .rail-filter { display: flex; flex-wrap: wrap; gap: 4px; margin: 0 0 10px 24px; }
