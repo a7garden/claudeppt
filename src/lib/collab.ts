@@ -21,7 +21,8 @@ export interface InviteLink { id: string; app: string | null; url: string; name:
 export interface Device { id: string; name: string; seen: number; online: boolean }
 /** 서버 정보 — bases: 이 서버에 닿는 주소 · links: 초대 링크 · devices: 링크로 들어온 기기 · locked: 회의 잠금 */
 /** app — 앱끼리 잇는 주소(claudeppt://<열쇠>) · lan — 사무실 망에 열었나(브라우저 팀원용) */
-export interface CollabInfo { port: number; app: string | null; lan: boolean; bases: string[]; tunnel: { url: string; kind: "tailscale" | "cloudflare" } | null; links: InviteLink[]; devices: Device[]; locked: boolean; members: Member[] }
+/** deck — 공유한 덱 (2026.11.27). 공유는 켤 때 연 덱 하나에 묶인다 */
+export interface CollabInfo { port: number; app: string | null; lan: boolean; bases: string[]; tunnel: { url: string; kind: "tailscale" | "cloudflare" } | null; links: InviteLink[]; devices: Device[]; locked: boolean; members: Member[]; deck: { dir: string; title: string } }
 export interface TunnelTools { tailscale: string | null; cloudflared: string | null }
 
 interface C {
@@ -38,8 +39,10 @@ interface C {
 	follow: number | null;
 	/** 브라우저: 덱 주인이 자기 Claude · 세션을 함께 쓰게 했나 (settings collab.shareClaude 를 받는다) */
 	shareClaude: boolean;
+	/** 브라우저: 덱 주인이 공유한 덱을 닫았다(다른 덱 · 처음 화면) — 다시 열면 이어진다 */
+	away: boolean;
 }
-export const useCollab = create<C>()(() => ({ info: null, members: [], conn: null, connected: false, ended: false, kicked: false, follow: null, shareClaude: false }));
+export const useCollab = create<C>()(() => ({ info: null, members: [], conn: null, connected: false, ended: false, kicked: false, follow: null, shareClaude: false, away: false }));
 
 /** 이 화면이 보고 쓰는 세션 묶음 (store Session.owner) — 덱 주인 화면은 hostPool, 팀원 화면은 세션 공유면 묶음 없이 · 앱 창이면 내 기기 · 브라우저면 덱 주인 묶음.
  *  덱 주인 쪽 claudeFor 와 같은 규칙이다 — 여기는 보이기만 하고, 정하는 것은 덱 주인이다 */
@@ -101,11 +104,23 @@ let flushTimer: ReturnType<typeof setTimeout> | undefined;
 let unsub: (() => void) | null = null;
 let hostListening: Promise<unknown> | null = null;
 
-/** 바뀐 칸만 모아 올린다. full 이면 통째 (켤 때) */
+/** 공유한 덱 폴더 (collab.rs Hub.dir) — 덱 주인이 이 덱을 열고 있는 동안만 덱 · 대화를 올린다 */
+let sharedDir: string | null = null;
+let away = false;
+/** 덱 주인 화면이 지금 공유한 덱을 보고 있나 */
+const here = () => !!sharedDir && useDeck.getState().dir === sharedDir;
+
+/** 바뀐 칸만 모아 올린다. full 이면 통째 (켤 때 · 공유한 덱으로 돌아왔을 때).
+ *  2026.11.27 : 다른 덱 · 처음 화면에 있으면 「자리 비움」만 한 번 — 전에는 덱 주인이 연 덱을 팀원이 그대로 따라 봤다 */
 function flush(full = false) {
 	flushTimer = undefined;
+	if (!here()) {
+		if (!away) { away = true; lastSet = {}; lastTurns = new Set(); lastOrder = ""; lastShare = undefined; call("collab_publish", { patch: { away: true } }).catch(() => {}); }
+		return;
+	}
+	if (away) { away = false; full = true; }
 	const st = useDeck.getState() as any;
-	const set: Record<string, unknown> = {};
+	const set: Record<string, unknown> = full ? { away: false } : {};
 	for (const k of SHARED) if (full || st[k] !== lastSet[k]) { set[k] = st[k]; lastSet[k] = st[k]; }
 	// 덱 주인의 세션 공유 — 팀원 화면이 세션 목록 · 「내 Claude」 고르기를 이것으로 그린다
 	const share = useSettings.getState().s.collab.shareClaude;
@@ -138,8 +153,12 @@ function hostView(force = false) {
 	call("collab_view", v).catch(() => {});
 }
 
+/** 지금 연 덱을 공유한다. 이미 켜져 있으면(화면을 다시 띄움 · resumeHost) 공유하던 덱 그대로 */
 export async function startHost(): Promise<CollabInfo> {
-	const info = await call<CollabInfo>("collab_start");
+	const d = useDeck.getState();
+	const info = (await call<CollabInfo | null>("collab_info").catch(() => null)) ?? (await call<CollabInfo>("collab_start", { dir: d.dir, title: d.deck?.title ?? "" }));
+	sharedDir = info.deck.dir;
+	away = false;
 	useCollab.setState({ info, members: info.members });
 	hostListening ??= Promise.all([
 		listen<Member[]>("collab-members", (e) => useCollab.setState({ members: e.payload })),
@@ -225,6 +244,8 @@ export async function stopHost() {
 	lastTurns = new Set();
 	lastOrder = "";
 	lastView = "";
+	sharedDir = null;
+	away = false;
 	await call("collab_stop").catch(() => {});
 	useCollab.setState({ info: null, members: [], follow: null });
 }
@@ -238,6 +259,8 @@ async function handleIntent(p: { id: string; from: From; name: string; args: any
 	const fn = handlers[p.name];
 	let reply: any;
 	try {
+		// 덱 주인이 다른 덱을 보고 있으면 받지 않는다 — 그 덱에 팀원 요청 · 편집이 들어가지 않게
+		if (!here()) throw new Error(tNow("collabAway"));
 		reply = fn ? { ok: true, value: (await fn(p.from, p.args ?? {})) ?? null } : { ok: false, error: tNow("collabNotYet") };
 	} catch (e) {
 		reply = { ok: false, error: e instanceof Error ? e.message : String(e) };
@@ -416,6 +439,7 @@ function apply(patch: any, full: boolean) {
 	if (full || patch.reset) turnMap.clear();
 	for (const [k, v] of Object.entries(patch.set ?? {})) {
 		if (k === "shareClaude") { useCollab.setState({ shareClaude: !!v }); continue; }
+		if (k === "away") { useCollab.setState({ away: !!v }); continue; }
 		// 지금 대화는 보는 사람 몫 — 처음 받을 때와, 보던 세션이 없어졌을 때만 호스트 것을 따른다
 		if (k === "talkKey") {
 			const sessions = (patch.set.sessions ?? st.sessions) as { key: string }[];

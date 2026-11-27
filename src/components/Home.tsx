@@ -2,15 +2,18 @@
 // 창에 끌어 놓기는 DropZone(App 에 하나)이 받는다.
 // 2026.11.18 : 최근 목록을 오른쪽 글자 줄에서 화면 대부분을 쓰는 카드로 바꿨다 — 가장 잦은 일이 지난 덱을 여는 것이고, 덱은 모양으로 알아본다.
 // 2026.11.26 : 「공유 덱 열기」 — 팀원이 보낸 초대 링크를 브라우저 대신 이 앱의 새 창으로 연다 (collab.rs collab_join). 들어간 곳은 아래 「공유 덱」에 남는다.
-import { open } from "@tauri-apps/plugin-dialog";
+// 2026.11.27 : 최근 덱 카드에 관리 메뉴(우클릭 · 카드 위 「⋯」) — 이름 바꾸기 · 탐색기 · CPPT 내보내기 · 목록에서 빼기 · 휴지통. 전에는 열기밖에 없어 지우려면 탐색기로 가야 했다.
+import { ask, open, save } from "@tauri-apps/plugin-dialog";
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { api, deckUrl, type LibItem } from "../lib/api";
+import { readDeck, safeName, writeDeck } from "../lib/deck";
 import { openAny, startNew } from "../lib/flows";
 import { useT } from "../lib/i18n";
 import { useSettings } from "../lib/settings";
 import { useDeck } from "../lib/store";
 import { inviteInClip, joinShared } from "../lib/join";
 import { originOf, type RunnerState, setMine, useRunners } from "../lib/runner";
+import { openMenu } from "./ContextMenu";
 
 export default function Home() {
 	const t = useT();
@@ -18,6 +21,11 @@ export default function Home() {
 	const busy = useDeck((x) => x.busy);
 	const [brief, setBrief] = useState("");
 	const [items, setItems] = useState<LibItem[]>([]);
+	// 저장 폴더 안의 덱 — 폴더를 읽어 늘 다시 뜨므로 「목록에서 빼기」를 주지 않는다 (치우려면 휴지통)
+	const [inLib, setInLib] = useState<Set<string>>(new Set());
+	// 이름 바꾸는 중인 덱 폴더 · 목록 다시 읽기 (이름을 바꾸거나 휴지통으로 보낸 뒤)
+	const [renaming, setRenaming] = useState<string | null>(null);
+	const [tick, setTick] = useState(0);
 	const [working, setWorking] = useState(false);
 	// 이번에 만들 덱의 템플릿 — 처음엔 설정의 「새 덱」 템플릿. 여기서 바꿔도 설정은 그대로 둔다
 	const [tpl, setTpl] = useState(s.template);
@@ -46,9 +54,50 @@ export default function Home() {
 				try { extra.push({ dir: d, deck: JSON.parse(await api.readText(d, "deck.json")), modified: 0 }); } catch {}
 			}
 			const rank = (d: string) => { const i = s.recent.findIndex((r) => r.toLowerCase() === d.toLowerCase()); return i < 0 ? 999 : i; };
+			setInLib(new Set(lib.map((l) => l.dir.toLowerCase())));
 			setItems([...lib, ...extra].sort((a, b) => rank(a.dir) - rank(b.dir) || b.modified - a.modified));
 		})();
-	}, [s.library, s.recent]);
+	}, [s.library, s.recent, tick]);
+
+	// 최근 목록에서 뺀다 — 휴지통으로 보낸 덱이 「최근」에 남으면 다음 실행에 없는 폴더를 읽으려 한다
+	const forget = (dir: string) => useSettings.getState().set((v) => ({ ...v, recent: v.recent.filter((d) => d.toLowerCase() !== dir.toLowerCase()) }));
+	const titleOf = (it: LibItem): string => it.deck?.title || it.dir.split(/[\\/]/).pop()!;
+	const rename = async (dir: string, title: string) => {
+		setRenaming(null);
+		try {
+			const d = await readDeck(dir);
+			if (!title || title === d.title) return;
+			await writeDeck(dir, { ...d, title });
+			setTick((n) => n + 1);
+		} catch (e) { useDeck.getState().notify(String(e), "err"); }
+	};
+	const pack = async (it: LibItem) => {
+		const p = await save({ defaultPath: safeName(titleOf(it)) + ".cppt", filters: [{ name: "ClaudePPT", extensions: ["cppt"] }] });
+		if (!p) return;
+		const { notify } = useDeck.getState();
+		// 남은 변경을 판으로 남기고 묶는다 — 제목 줄 「내보내기 › CPPT」와 같다
+		await api.commit(it.dir, t("direct")).catch(() => {});
+		await api.pack(it.dir, p).then(() => notify(p.split(/[\\/]/).pop()!), (e) => notify(String(e), "err"));
+	};
+	const trash = async (it: LibItem) => {
+		if (!(await ask(t("deckTrashAsk").replace("{name}", titleOf(it)), { title: t("deckTrash"), kind: "warning", okLabel: t("deckTrash"), cancelLabel: t("cancel") }))) return;
+		try {
+			await api.trashDeck(it.dir);
+			forget(it.dir);
+			setTick((n) => n + 1);
+			useDeck.getState().notify(t("deckTrashed"));
+		} catch (e) { useDeck.getState().notify(String(e), "err"); }
+	};
+	const menu = (e: React.MouseEvent | MouseEvent, it: LibItem) => openMenu(e, [
+		{ label: t("open"), run: () => openAny(it.dir) },
+		{ label: t("deckRename"), kbd: "F2", run: () => setRenaming(it.dir) },
+		"-",
+		{ label: t("deckReveal"), run: () => api.reveal(it.dir) },
+		{ label: t("deckPack"), run: () => pack(it) },
+		"-",
+		...(inLib.has(it.dir.toLowerCase()) ? [] : [{ label: t("deckForget"), run: () => forget(it.dir) }]),
+		{ label: t("deckTrash"), danger: true, run: () => trash(it) },
+	]);
 
 
 	const go = async () => {
@@ -148,13 +197,35 @@ export default function Home() {
 					<div className="decks-empty">{t("decksEmpty")}</div>
 				) : (
 					<div className="decks">
-						{items.map((it) => (
-							<button key={it.dir} className="deck-card" onClick={() => openAny(it.dir)} title={it.dir}>
-								<DeckThumb item={it} />
-								<span className="t">{it.deck?.title || it.dir.split(/[\\/]/).pop()}</span>
-								<span className="n">{it.deck?.slides?.length ?? 0}{t("slideN") === "쪽" ? "쪽" : " sl"}</span>
-							</button>
-						))}
+						{items.map((it) => {
+							const n = <span className="n">{it.deck?.slides?.length ?? 0}{t("slideN") === "쪽" ? "쪽" : " sl"}</span>;
+							return (
+								<div className="deck-item" key={it.dir} onContextMenu={(e) => menu(e, it)}>
+									{/* 이름 바꾸는 동안은 단추가 아니다 — 단추 안의 입력칸은 누를 때마다 덱을 연다 */}
+									{renaming === it.dir ? (
+										<div className="deck-card">
+											<DeckThumb item={it} />
+											<input className="t field" autoFocus defaultValue={titleOf(it)} aria-label={t("deckRename")} onFocus={(e) => e.target.select()}
+												onKeyDown={(e) => { if (e.key === "Enter") (e.target as HTMLInputElement).blur(); if (e.key === "Escape") { const el = e.target as HTMLInputElement; el.value = titleOf(it); el.blur(); } }}
+												onBlur={(e) => rename(it.dir, e.target.value.trim())} />
+											{n}
+										</div>
+									) : (
+										<button className="deck-card" onClick={() => openAny(it.dir)} title={it.dir}
+											onKeyDown={(e) => { if (e.key === "F2") { e.preventDefault(); setRenaming(it.dir); } }}>
+											<DeckThumb item={it} />
+											<span className="t">{titleOf(it)}</span>
+											{n}
+										</button>
+									)}
+									<button className="more" aria-label={t("deckMenu")} title={t("deckMenu")} onClick={(e) => {
+										// 「⋯」 아래에 편다 — 키보드로 누르면 마우스 자리가 0,0 이다
+										const r = e.currentTarget.getBoundingClientRect();
+										menu({ defaultPrevented: false, preventDefault() {}, clientX: r.right, clientY: r.bottom } as MouseEvent, it);
+									}}>⋯</button>
+								</div>
+							);
+						})}
 					</div>
 				)}
 			</section>

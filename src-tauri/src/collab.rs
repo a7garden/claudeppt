@@ -14,13 +14,18 @@
 //              쓰기는 호스트 한 곳에서만 — 두 화면이 같은 파일 · 대화 기록을 따로 쓰면 하나가 다른 것을 덮는다
 //   접속       누가 붙었고 어느 쪽을 보는지(members). 모든 브라우저와 호스트 화면에 알린다
 //   초대       /j/<링크 열쇠> — 공용 링크는 이름을 한 번 적고, 개인 링크는 정한 이름으로 바로 들어온다. 들어오면 기기 쿠키(HttpOnly)를 받고
-//              그 뒤로는 쿠키로 들어온다. 링크 · 기기 · 잠금은 invite.rs (앱 데이터 collab.json). 내보낸 기기는 그 자리에서 끊긴다.
+//              그 뒤로는 쿠키로 들어온다. 링크 · 기기 · 잠금은 invite.rs (앱 데이터 collab/<덱 지문>.json, 덱마다). 내보낸 기기는 그 자리에서 끊긴다.
 //              그 밖의 모든 요청에 기기 쿠키가 있어야 한다. IP 로 믿지 않는다 — 바깥 길(터널)로 온 요청은 127.0.0.1 로 보인다.
 //              팀원의 이름은 서버가 정한다(기기 이름) — 요청 · 편집 · 판의 보낸 사람이 브라우저가 적어 보낸 이름이 아니다.
 //              /_/ws · /_/rpc 는 같은 출처(Origin)에서 온 것만 — 다른 출처 페이지가 팀원 브라우저의 쿠키로 붙지 못하게
 //   앱끼리     팀원 앱은 iroh 로 이 서버에 닿는다 (p2p.rs) — 덱 주인 앱의 열쇠가 곧 주소라 설치 · 계정 · 같은 망이 없어도 된다.
 //              그 길로 온 요청도 127.0.0.1 에서 온 것으로 보인다 — 여기서 하는 검사(초대 링크 · 기기 쿠키 · 같은 출처)는 그대로다
 //   읽기       /_/rpc 는 허용 목록뿐 — 열려 있는 덱 안 파일 읽기 · 판 목록. 쓰기 · 절대 경로 · 설정 · claude 실행은 없다
+//   덱 하나    2026.11.27 : 공유는 켤 때 연 덱 하나에 묶인다(Hub.dir). 슬라이드 · 읽기 · 사본은 그 덱 폴더만, 장부(링크 · 기기)도 덱마다 따로다.
+//              덱 주인이 다른 덱을 열면 그 덱 · 대화 대신 「자리 비움」만 보낸다 — 전에는 덱 주인이 여는 덱을 팀원이 따라 보고,
+//              이번 실행에서 연 모든 덱(처음 화면 미리보기 카드까지)의 파일을 덱 열쇠로 읽을 수 있었다
+//   대화 나눔  2026.11.27 : 세션 공유가 꺼져 있으면 연결마다 그 사람 세션 묶음의 대화(턴)와 세션만 보낸다(pool_view).
+//              화면에서만 가리면 남의 요청 · 답 글이 팀원 PC 로 그대로 건너간다
 
 use crate::invite::{self, Book, Why};
 use crate::{AppState, Res, err};
@@ -74,10 +79,13 @@ pub struct Hub {
 	public: Mutex<Option<(String, &'static str)>>,
 	/// 연결 → (기기 id, 그 연결에 보내는 길) — 내보낼 때 끊는다
 	conns: Mutex<HashMap<u64, (String, mpsc::UnboundedSender<String>)>>,
-	/// 슬라이드 주소 안의 열쇠 — 열린 덱 파일 읽기만 된다
+	/// 슬라이드 주소 안의 열쇠 — 공유한 덱 파일 읽기만 된다
 	deck_key: String,
+	/// 공유한 덱 폴더 · 제목 — 켤 때 정하고 바꾸지 않는다. 다른 덱을 나누려면 끄고 다시 켠다
+	dir: PathBuf,
+	title: String,
 	port: u16,
-	tx: broadcast::Sender<Arc<str>>,
+	tx: broadcast::Sender<Out>,
 	shared: Mutex<Shared>,
 	members: Mutex<BTreeMap<u64, Member>>,
 	pending: Mutex<HashMap<String, oneshot::Sender<Value>>>,
@@ -101,6 +109,19 @@ struct Shared {
 	turns: HashMap<String, Value>,
 }
 
+/// 모든 연결에 보내는 것
+#[derive(Clone)]
+enum Out {
+	/// 누구에게나 같은 글 (접속 목록 · 끝남)
+	Text(Arc<str>),
+	/// 상태의 바뀐 것 (seq, patch) — 연결마다 볼 세션 묶음만 골라 보낸다
+	State(Arc<(u64, Value)>),
+	/// 볼 것이 통째로 달라졌다(세션 공유를 켜고 껐다) — 연결마다 지금 상태를 다시 보낸다
+	Snap,
+}
+
+/// 연결 하나에 지금 상태를 다시 보내라는 표시 (direct 길) — 앱 · 브라우저를 알려 와 볼 묶음이 정해졌을 때
+const SNAP: &str = "\u{0}snap";
 #[derive(Clone, Serialize)]
 pub struct Member {
 	conn: u64,
@@ -113,8 +134,9 @@ pub struct Member {
 	/// 이 기기가 「내 PC 의 Claude」를 붙여 두었나 — 요청칸이 고르기를 보인다
 	runner: bool,
 	/// 앱의 공유 덱 창으로 들어왔나 (2026.11.27) — 화면이 알려 온 것이라 믿을 것은 아니다. 덱 주인 화면이 Claude · 세션을 고르는 데만 쓴다:
-	/// 앱 팀원은 자기 PC 의 Claude · 자기 세션, 브라우저 팀원은 덱 주인의 것 (collab.ts 「send」). 브라우저인 척해도 얻는 것은 브라우저 팀원 몫뿐이다
-	app: bool,
+	/// 앱 팀원은 자기 PC 의 Claude · 자기 세션, 브라우저 팀원은 덱 주인의 것 (collab.ts 「send」). 브라우저인 척해도 얻는 것은 브라우저 팀원 몫뿐이다.
+	/// 알려 오기 전(None)에는 아무 대화도 보내지 않는다 — 앱 팀원에게 덱 주인 대화가 잠깐 건너가지 않게
+	app: Option<bool>,
 }
 
 #[derive(Serialize, Clone)]
@@ -132,6 +154,14 @@ pub struct Info {
 	devices: Vec<DeviceView>,
 	locked: bool,
 	members: Vec<Member>,
+	/// 공유한 덱 — 덱 주인 화면이 다른 덱을 보고 있으면 「○○ 를 공유하는 중」으로 알린다
+	deck: DeckView,
+}
+
+#[derive(Serialize, Clone)]
+struct DeckView {
+	dir: String,
+	title: String,
 }
 
 #[derive(Serialize, Clone)]
@@ -177,8 +207,11 @@ fn now() -> i64 {
 
 use invite::same;
 
-fn book_file() -> PathBuf {
-	crate::control::data_dir().join("collab.json")
+/// 덱마다 따로 둔 장부 (2026.11.27) — 한 덱에 준 링크 · 들어온 기기가 다른 덱 공유에 들어오지 못하게. 이름은 덱 폴더 경로의 지문.
+/// 옛 collab.json(앱 하나에 하나)은 읽지 않는다 — 어느 덱 것인지 몰라 아무 덱에나 붙이면 지금 고친 구멍 그대로다
+fn book_file(dir: &Path) -> PathBuf {
+	let key = invite::hash(&dir.to_string_lossy().to_lowercase());
+	crate::control::data_dir().join("collab").join(format!("{}.json", &key[..16]))
 }
 
 /// 이 PC 의 사무실 망 주소 — 밖으로 나가는 기본 길의 주소. UDP 는 connect 만으로는 아무것도 보내지 않는다
@@ -214,6 +247,7 @@ impl Hub {
 			tunnel: public.map(|(url, kind)| TunnelView { url, kind }),
 			bases,
 			members,
+			deck: DeckView { dir: self.dir.to_string_lossy().to_string(), title: self.title.clone() },
 		}
 	}
 
@@ -227,17 +261,61 @@ impl Hub {
 		let _ = self.app.emit("collab-info", self.info());
 	}
 
-	/// 새로 붙은 브라우저에 줄 지금 상태 통째
-	fn snapshot(&self) -> String {
+	/// 이 연결이 볼 세션 묶음 — None: 아직 모른다(대화는 하나도 안 보낸다) · Some(None): 세션 공유라 모두 · Some(Some(p)): 그 묶음("" 은 덱 주인 묶음).
+	/// 덱 주인 화면 claudeFor(collab.ts)와 같은 규칙이다
+	fn pool_of(&self, conn: u64) -> Option<Option<String>> {
+		let share = self.shared.lock().unwrap().set.get("shareClaude").and_then(Value::as_bool).unwrap_or(false);
+		if share {
+			return Some(None);
+		}
+		let m = self.members.lock().unwrap();
+		let m = m.get(&conn)?;
+		Some(Some(if m.app? { m.device.clone() } else { String::new() }))
+	}
+
+	/// 그 연결에 줄 지금 상태 통째 — 새로 붙었을 때 · 따라가지 못했을 때 · 볼 묶음이 바뀌었을 때
+	fn snapshot(&self, conn: u64) -> String {
+		let pool = self.pool_of(conn);
 		let s = self.shared.lock().unwrap();
 		let put: Vec<&Value> = s.order.iter().filter_map(|id| s.turns.get(id)).collect();
-		json!({ "t": "state", "seq": s.seq, "full": true, "patch": { "set": s.set, "turns": { "order": s.order, "put": put } } }).to_string()
+		let patch = json!({ "set": s.set, "turns": { "order": s.order, "put": put } });
+		let patch = match &pool {
+			Some(None) => patch,
+			p => pool_view(&patch, p.as_ref().and_then(|x| x.as_deref()), &s),
+		};
+		json!({ "t": "state", "seq": s.seq, "full": true, "patch": patch }).to_string()
+	}
+
+	/// 바뀐 것 하나를 그 연결이 볼 몫으로
+	fn state_for(&self, conn: u64, seq: u64, patch: &Value) -> String {
+		let patch = match self.pool_of(conn) {
+			Some(None) => patch.clone(),
+			p => pool_view(patch, p.as_ref().and_then(|x| x.as_deref()), &self.shared.lock().unwrap()),
+		};
+		json!({ "t": "state", "seq": seq, "patch": patch }).to_string()
 	}
 
 	/// 호스트가 올린 바뀐 것을 쌓고 모두에게 보낸다
 	fn publish(&self, patch: Value) {
+		// 공유한 덱이 아니면 그 덱 · 대화 대신 「자리 비움」만 (덱 주인 화면 flush 가 먼저 막고 여기서 한 번 더)
+		let was_away = self.shared.lock().unwrap().set.get("away").and_then(Value::as_bool) == Some(true);
+		let patch = match patch.pointer("/set/dir").and_then(Value::as_str) {
+			_ if patch.get("away").and_then(Value::as_bool) == Some(true) => away(),
+			Some(d) if Path::new(d) != self.dir => away(),
+			// 자리 비움 뒤에는 공유한 덱을 통째로 다시 올릴 때까지(dir 이 든 것) 받지 않는다 — 다른 덱의 턴 · 핀이 건너가지 않게
+			None if was_away => return,
+			_ => patch,
+		};
 		let msg = {
 			let mut s = self.shared.lock().unwrap();
+			let share_was = s.set.get("shareClaude").cloned();
+			if patch.get("reset").and_then(Value::as_bool) == Some(true) {
+				*s = Shared { seq: s.seq, ..Default::default() };
+				// 자리 비움에도 세션 공유는 그대로 둔다 — 돌아왔을 때 볼 묶음이 흔들리지 않게
+				if let Some(v) = share_was.clone() {
+					s.set.insert("shareClaude".into(), v);
+				}
+			}
 			if patch.get("reset").and_then(Value::as_bool) == Some(true) {
 				*s = Shared { seq: s.seq, ..Default::default() };
 			}
@@ -259,9 +337,11 @@ impl Hub {
 				}
 			}
 			s.seq += 1;
-			json!({ "t": "state", "seq": s.seq, "patch": patch }).to_string()
+			let snap = s.set.get("shareClaude") != share_was.as_ref();
+			(snap, Out::State(Arc::new((s.seq, patch))))
 		};
-		let _ = self.tx.send(msg.into());
+		// 세션 공유를 켜고 끄면 사람마다 볼 대화가 통째로 달라진다 — 바뀐 것 대신 지금 상태를 다시 준다
+		let _ = self.tx.send(if msg.0 { Out::Snap } else { msg.1 });
 	}
 
 	/// 호스트 이름 — 공용 링크로 들어오는 이름이 이것과 겹치지 않게
@@ -271,7 +351,7 @@ impl Hub {
 
 	fn members_changed(&self) {
 		let list: Vec<Member> = self.members.lock().unwrap().values().cloned().collect();
-		let _ = self.tx.send(json!({ "t": "members", "list": list }).to_string().into());
+		let _ = self.tx.send(Out::Text(json!({ "t": "members", "list": list }).to_string().into()));
 		let _ = self.app.emit("collab-members", &list);
 	}
 }
@@ -280,13 +360,50 @@ fn hub(app: &AppHandle) -> Option<Arc<Hub>> {
 	app.state::<Collab>().hub.lock().unwrap().clone()
 }
 
+/// 공유한 덱을 덱 주인이 닫았을 때(다른 덱 · 처음 화면) 보내는 상태 — 덱 · 대화 · 세션 · 판 · 의견을 비운다. 그 덱을 다시 열면 통째로 다시 온다(flush full)
+fn away() -> Value {
+	json!({ "reset": true, "set": { "away": true, "dir": "", "id": "", "deck": null, "rev": {}, "pins": [], "sessions": [], "bind": {}, "talkKey": null, "running": null, "runs": {}, "versions": [], "releases": [], "histBy": {}, "editing": {} }, "turns": { "order": [], "put": [] } })
+}
+
+/// 그 묶음 사람이 볼 몫 — 남의 세션 대화(턴) · 세션을 뺀다. want 가 None 이면(앱인지 브라우저인지 아직 모른다) 대화 · 세션을 모두 뺀다.
+/// 세션 주인은 쌓아 둔 상태(s)에서 읽는다 — 바뀐 것 안에 세션 목록이 없어도 턴이 누구 것인지 안다. 세션이 없는 턴은 덱 주인 묶음이다(store Session.owner)
+fn pool_view(patch: &Value, want: Option<&str>, s: &Shared) -> Value {
+	let owners: HashMap<&str, &str> = s.set.get("sessions").and_then(Value::as_array).into_iter().flatten()
+		.filter_map(|x| Some((x.get("key")?.as_str()?, x.get("owner").and_then(Value::as_str).unwrap_or(""))))
+		.collect();
+	let mine = |session: Option<&str>| want.is_some_and(|w| session.and_then(|k| owners.get(k).copied()).unwrap_or("") == w);
+	let mut p = patch.clone();
+	if let Some(set) = p.get_mut("set").and_then(Value::as_object_mut) {
+		if let Some(Value::Array(list)) = set.get_mut("sessions") {
+			list.retain(|x| want.is_some_and(|w| x.get("owner").and_then(Value::as_str).unwrap_or("") == w));
+		}
+		// 덱 주인이 보고 있는 대화 — 덱 주인 묶음 사람에게만
+		if want != Some("") {
+			set.remove("talkKey");
+		}
+	}
+	if let Some(t) = p.get_mut("turns").and_then(Value::as_object_mut) {
+		if let Some(Value::Array(put)) = t.get_mut("put") {
+			put.retain(|x| mine(x.get("session").and_then(Value::as_str)));
+		}
+		if let Some(Value::Array(order)) = t.get_mut("order") {
+			order.retain(|id| mine(id.as_str().and_then(|id| s.turns.get(id)).and_then(|x| x.get("session")).and_then(Value::as_str)));
+		}
+	}
+	p
+}
+
 // ── 명령 (호스트 화면) ──
 
-/// 켠다. 이미 켜져 있으면 지금 것을 돌려준다
+/// 덱 하나(dir)를 공유한다. 이미 그 덱을 공유하고 있으면 지금 것을 돌려준다 — 다른 덱이면 거절한다(끄고 다시 켠다)
 #[tauri::command]
-pub async fn collab_start(app: AppHandle) -> Res<Info> {
+pub async fn collab_start(app: AppHandle, dir: String, title: String) -> Res<Info> {
+	let dir = PathBuf::from(dir);
 	if let Some(h) = hub(&app) {
-		return Ok(h.info());
+		return if h.dir == dir { Ok(h.info()) } else { Err(format!("「{}」 덱을 공유하고 있다", h.title)) };
+	}
+	if dir.as_os_str().is_empty() || !app.state::<AppState>().projects.lock().unwrap().values().any(|p| *p == dir) {
+		return Err("공유할 덱을 먼저 연다".into());
 	}
 	let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0)).await.map_err(err)?;
 	let port = listener.local_addr().map_err(err)?.port();
@@ -296,17 +413,19 @@ pub async fn collab_start(app: AppHandle) -> Res<Info> {
 	let h = Arc::new(Hub {
 		app: app.clone(),
 		book: Mutex::new({
-			let mut b = Book::load(&book_file());
+			let mut b = Book::load(&book_file(&dir));
 			b.ensure_public(now());
 			b
 		}),
-		book_path: book_file(),
+		book_path: book_file(&dir),
 		app_base,
 		lan: Mutex::new(None),
 		tunnel: tokio::sync::Mutex::new(None),
 		public: Mutex::new(None),
 		conns: Mutex::new(HashMap::new()),
 		deck_key: uuid::Uuid::new_v4().simple().to_string(),
+		dir,
+		title,
 		port,
 		tx,
 		shared: Mutex::new(Shared::default()),
@@ -523,7 +642,7 @@ pub fn collab_stop(state: State<Collab>) {
 		let _ = tx.send(());
 	}
 	if let Some(h) = state.hub.lock().unwrap().take() {
-		let _ = h.tx.send(json!({ "t": "bye" }).to_string().into());
+		let _ = h.tx.send(Out::Text(json!({ "t": "bye" }).to_string().into()));
 		if let Some((_, stop)) = h.lan.lock().unwrap().take() {
 			let _ = stop.send(());
 		}
@@ -579,7 +698,7 @@ pub fn collab_reply(app: AppHandle, id: String, reply: Value) {
 #[tauri::command]
 pub fn collab_view(app: AppHandle, name: String, slide: Option<String>) {
 	if let Some(h) = hub(&app) {
-		h.members.lock().unwrap().insert(0, Member { conn: 0, device: String::new(), name, slide, host: true, since: now(), runner: false, app: true });
+		h.members.lock().unwrap().insert(0, Member { conn: 0, device: String::new(), name, slide, host: true, since: now(), runner: false, app: Some(true) });
 		h.members_changed();
 	}
 }
@@ -745,6 +864,11 @@ async fn deck(Ax(h): Ax<Arc<Hub>>, axum::extract::Path((key, _)): axum::extract:
 		return StatusCode::UNAUTHORIZED.into_response();
 	}
 	let rest = uri.path()["/_/d/".len() + key.len()..].to_string();
+	// 공유한 덱의 id 만 — serve() 는 이 앱이 연 모든 덱(처음 화면 미리보기 카드까지)을 내준다
+	let head = rest.trim_start_matches('/').split('/').next().unwrap_or("");
+	if h.shared_dir(head.split('@').next().unwrap_or("")).is_none() {
+		return StatusCode::NOT_FOUND.into_response();
+	}
 	let r = crate::serve(&h.app, &rest);
 	if r.status() != StatusCode::OK {
 		return r.map(Body::from);
@@ -804,7 +928,7 @@ async fn front(Ax(h): Ax<Arc<Hub>>, uri: Uri) -> Response {
 async fn rpc(Ax(h): Ax<Arc<Hub>>, axum::Json(q): axum::Json<Value>) -> Response {
 	let cmd = q["cmd"].as_str().unwrap_or("");
 	let a = &q["args"];
-	let dir = a["id"].as_str().and_then(|id| h.app.state::<AppState>().projects.lock().unwrap().get(id).cloned());
+	let dir = a["id"].as_str().and_then(|id| h.shared_dir(id));
 	let Some(dir) = dir else { return (StatusCode::NOT_FOUND, "덱이 열려 있지 않다").into_response() };
 	let rel = a["rel"].as_str().unwrap_or("");
 	let r: Res<Value> = match cmd {
@@ -834,10 +958,11 @@ async fn conn(h: Arc<Hub>, who: Who, mut socket: WebSocket) {
 	let (direct, mut inbox) = mpsc::unbounded_channel::<String>();
 	let mut rx = h.tx.subscribe();
 	h.conns.lock().unwrap().insert(id, (who.device.clone(), direct.clone()));
-	h.members.lock().unwrap().insert(id, Member { conn: id, device: who.device.clone(), name: who.name.clone(), slide: None, host: false, since: now(), runner: h.runners.lock().unwrap().contains_key(&who.device), app: false });
+	h.members.lock().unwrap().insert(id, Member { conn: id, device: who.device.clone(), name: who.name.clone(), slide: None, host: false, since: now(), runner: h.runners.lock().unwrap().contains_key(&who.device), app: None });
 	h.members_changed();
 	let hello = json!({ "t": "hello", "conn": id, "deckKey": h.deck_key, "name": who.name }).to_string();
-	if socket.send(Message::Text(hello.into())).await.is_err() || socket.send(Message::Text(h.snapshot().into())).await.is_err() {
+	// 지금 상태는 화면이 앱인지 브라우저인지 알려 온 뒤에 준다(on_message 「hello」 → SNAP) — 볼 세션 묶음이 그것으로 정해진다
+	if socket.send(Message::Text(hello.into())).await.is_err() {
 		return;
 	}
 	let list: Vec<Member> = h.members.lock().unwrap().values().cloned().collect();
@@ -856,14 +981,19 @@ async fn conn(h: Arc<Hub>, who: Who, mut socket: WebSocket) {
 				if heard.elapsed() > BEAT * 3 { break; }
 				if socket.send(Message::Ping(Default::default())).await.is_err() || socket.send(Message::Text(PING.into())).await.is_err() { break; }
 			},
-			b = rx.recv() => match b {
-				Ok(s) => { if socket.send(Message::Text(s.to_string().into())).await.is_err() { break; } }
-				// 따라가지 못했다 — 지금 상태를 통째로 다시 준다
-				Err(broadcast::error::RecvError::Lagged(_)) => { if socket.send(Message::Text(h.snapshot().into())).await.is_err() { break; } }
-				Err(broadcast::error::RecvError::Closed) => break,
+			b = rx.recv() => {
+				let s = match b {
+					Ok(Out::Text(s)) => s.to_string(),
+					Ok(Out::State(p)) => h.state_for(id, p.0, &p.1),
+					// 따라가지 못했다 · 볼 묶음이 바뀌었다 — 지금 상태를 통째로 다시 준다
+					Ok(Out::Snap) | Err(broadcast::error::RecvError::Lagged(_)) => h.snapshot(id),
+					Err(broadcast::error::RecvError::Closed) => break,
+				};
+				if socket.send(Message::Text(s.into())).await.is_err() { break; }
 			},
 			d = inbox.recv() => match d {
 				Some(s) if s == CLOSE => { let _ = socket.send(Message::Close(None)).await; break; }
+				Some(s) if s == SNAP => { if socket.send(Message::Text(h.snapshot(id).into())).await.is_err() { break; } }
 				Some(s) => { if socket.send(Message::Text(s.into())).await.is_err() { break; } }
 				None => break,
 			},
@@ -883,13 +1013,19 @@ fn on_message(h: &Arc<Hub>, conn: u64, direct: &mpsc::UnboundedSender<String>, t
 		// 보는 쪽 — 이름은 서버가 정한 기기 이름 그대로 (브라우저가 보낸 이름은 쓰지 않는다)
 		"hello" | "view" => {
 			let slide = m["slide"].as_str().map(String::from);
+			let mut first = false;
 			if let Some(e) = h.members.lock().unwrap().get_mut(&conn) {
 				e.slide = slide;
-				if m["t"] == "hello" {
-					e.app = m["app"].as_bool().unwrap_or(false);
+				// 처음 알려 온 것만 — 붙은 채 앱 · 브라우저를 바꿔 남의 묶음을 보지 못하게
+				if m["t"] == "hello" && e.app.is_none() {
+					e.app = Some(m["app"].as_bool().unwrap_or(false));
+					first = true;
 				}
 			}
 			h.members_changed();
+			if first {
+				let _ = direct.send(SNAP.into());
+			}
 		}
 		"intent" => {
 			let cid = m["id"].clone();
@@ -974,8 +1110,14 @@ impl Hub {
 			let s = self.shared.lock().unwrap();
 			(s.set.get("dir")?.as_str()?.to_string(), s.set.get("id")?.as_str()?.to_string())
 		};
-		let open = self.app.state::<AppState>().projects.lock().unwrap().get(&id).cloned()?;
+		let open = self.shared_dir(&id)?;
 		(open == PathBuf::from(&dir)).then_some((id, open))
+	}
+
+	/// 덱 id 가 공유한 덱이면 그 폴더 — 다른 덱 id 로는 읽기 · 슬라이드 · 사본이 하나도 안 된다
+	fn shared_dir(&self, id: &str) -> Option<PathBuf> {
+		let open = self.app.state::<AppState>().projects.lock().unwrap().get(id).cloned()?;
+		(open == self.dir).then_some(open)
 	}
 
 	fn set_runner_flag(&self, device: &str, on: bool) {
@@ -1381,5 +1523,44 @@ mod tests {
 		for bad in ["exportTo", "release", "openProject", "settingsSave", "restore", "claudeRun"] {
 			assert!(!INTENTS.contains(&bad));
 		}
+	}
+
+	#[test]
+	fn each_pool_gets_only_its_own_talk() {
+		let mut s = Shared::default();
+		s.set.insert("sessions".into(), json!([{ "key": "s1" }, { "key": "s2", "owner": "dev1" }, { "key": "s3", "owner": "dev2" }]));
+		for (id, k) in [("t1", "s1"), ("t2", "s2"), ("t3", "s3")] {
+			s.turns.insert(id.into(), json!({ "id": id, "session": k, "request": "비밀" }));
+		}
+		let patch = json!({ "set": { "sessions": s.set["sessions"], "talkKey": "s1", "deck": 1 }, "turns": { "order": ["t1", "t2", "t3"], "put": [s.turns["t1"], s.turns["t2"], s.turns["t3"]] } });
+		let ids = |v: &Value| v["turns"]["put"].as_array().unwrap().iter().map(|t| t["id"].as_str().unwrap().to_string()).collect::<Vec<_>>();
+		let app = pool_view(&patch, Some("dev1"), &s);
+		assert_eq!(ids(&app), ["t2"], "앱 팀원은 자기 세션 대화만");
+		assert_eq!(app["turns"]["order"], json!(["t2"]));
+		assert_eq!(app["set"]["sessions"], json!([{ "key": "s2", "owner": "dev1" }]));
+		assert!(app["set"].get("talkKey").is_none(), "덱 주인이 보는 대화도 건너가지 않는다");
+		assert_eq!(app["set"]["deck"], 1, "덱은 모두에게");
+		let web = pool_view(&patch, Some(""), &s);
+		assert_eq!(ids(&web), ["t1"], "브라우저 팀원은 덱 주인 묶음");
+		assert_eq!(web["set"]["talkKey"], "s1");
+		let unknown = pool_view(&patch, None, &s);
+		assert!(ids(&unknown).is_empty() && unknown["set"]["sessions"] == json!([]), "앱인지 모르면 대화를 하나도 안 보낸다");
+		// 바뀐 것 안에 세션 목록이 없어도 쌓아 둔 상태로 가른다
+		let only_turns = json!({ "turns": { "put": [s.turns["t3"]] } });
+		assert!(ids(&pool_view(&only_turns, Some("dev1"), &s)).is_empty());
+	}
+
+	#[test]
+	fn away_empties_the_deck_and_talk() {
+		let a = away();
+		assert_eq!(a["reset"], true);
+		assert_eq!(a["set"]["away"], true);
+		assert!(a["set"]["deck"].is_null() && a["set"]["dir"] == "" && a["turns"]["order"] == json!([]));
+	}
+
+	#[test]
+	fn books_are_per_deck() {
+		assert_ne!(book_file(Path::new("C:/a/덱1")), book_file(Path::new("C:/a/덱2")));
+		assert_eq!(book_file(Path::new("C:/A/덱1")), book_file(Path::new("c:/a/덱1")), "윈도 경로는 대소문자를 가리지 않는다");
 	}
 }

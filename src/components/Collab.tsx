@@ -149,6 +149,7 @@ export function SharePanel({ bare }: { bare?: boolean }) {
 	const via = useSettings((s) => s.s.collab.via);
 	const shareClaude = useSettings((s) => s.s.collab.shareClaude);
 	const deck = useDeck((s) => s.deck);
+	const dir = useDeck((s) => s.dir);
 	const notify = useDeck((s) => s.notify);
 	const [busy, setBusy] = useState(false);
 	const [more, setMore] = useState(false);
@@ -188,6 +189,8 @@ export function SharePanel({ bare }: { bare?: boolean }) {
 			<>
 				{!bare && <b className="share-h">{t("shareTitle")}</b>}
 				<p className="note">{t("shareIntro")}</p>
+				{/* 공유는 덱 하나에 묶인다 (2026.11.27) — 무엇이 나가는지 켜기 전에 보인다 */}
+				<p className="note">{deck ? t("shareThisDeck").replace("{title}", deck.title) : t("shareNeedDeck")}</p>
 				{pick}
 				{via === "internet" && noTools && <p className="note">{t("collabNoTools")}</p>}
 				{claude}
@@ -197,7 +200,7 @@ export function SharePanel({ bare }: { bare?: boolean }) {
 						<input className="field" value={me} placeholder={t("myNamePh")} onChange={(e) => setMe(e.target.value)} />
 					</label>
 				)}
-				<button className="send share-go" disabled={busy} onClick={() => run(async () => {
+				<button className="send share-go" disabled={busy || !deck} onClick={() => run(async () => {
 					// 공유는 팀원 세션(요청 · 판에 보낸 사람)과 함께 간다 — 「설정 › 협업 쓰기」를 같이 켠다
 					useSettings.getState().set((x) => ({ ...x, collab: { ...x.collab, on: true } }));
 					await startHost();
@@ -205,6 +208,14 @@ export function SharePanel({ bare }: { bare?: boolean }) {
 			</>
 		);
 	}
+
+	// 다른 덱을 보고 있다 — 공유한 덱은 그대로 두고(팀원에게는 「자리 비움」), 바꾸려면 끄고 이 덱으로 다시 켠다
+	const other = info.deck.dir !== dir && (
+		<section className="share-other">
+			<p className="note">{t("shareOther").replace("{title}", info.deck.title)}</p>
+			{deck && <button disabled={busy} title={t("shareSwitchNote")} onClick={() => run(async () => { await stopHost(); await startHost(); })}>{t("shareSwitch")}</button>}
+		</section>
+	);
 
 	// 고른 길이 실제로 열려 있나 — 바깥 길이 끊겼거나 여는 중이면 링크 대신 그 까닭
 	const ready = via === "app" ? !!info.app : via === "office" ? info.lan : !!info.tunnel;
@@ -222,6 +233,7 @@ export function SharePanel({ bare }: { bare?: boolean }) {
 		: `${t("shareViaInternetNote")}${info.tunnel?.kind === "cloudflare" ? ` ${t("collabCloudflareNote")}` : ""}`;
 	return (
 		<>
+			{other}
 			{pick}
 			<section className="share-link">
 				<span className="lbl">{t("shareLink")}</span>

@@ -158,6 +158,44 @@ pub fn unpack_deck(file: String, dest: String) -> Res<String> {
 	Ok(target.to_string_lossy().into())
 }
 
+/// 덱 폴더를 휴지통으로 보낸다 (2026.11.27 홈 「최근 덱」 관리). 바로 지우지 않는 것은 잘못 눌러도 휴지통에서 판 이력째 되살리게.
+/// deck.json 이 있는 폴더만 받는다 — 화면이 다른 경로를 넘겨도 아무 폴더나 지우지 못하게
+#[tauri::command(async)]
+pub fn deck_trash(app: AppHandle, dir: String) -> Res<()> {
+	let root = PathBuf::from(&dir);
+	if !root.is_dir() || !root.join("deck.json").is_file() {
+		return Err("deck.json 이 없는 폴더다".into());
+	}
+	// 감시를 먼저 끈다 — 감시가 폴더 핸들을 쥐고 있으면 옮기기가 「사용 중」으로 막힌다 (미리보기 카드가 잠깐 연 덱도 id 는 남는다)
+	let state = app.state::<AppState>();
+	let ids: Vec<String> = state.projects.lock().unwrap().iter().filter(|(_, p)| **p == root).map(|(id, _)| id.clone()).collect();
+	{
+		let mut ws = state.watchers.lock().unwrap();
+		for id in &ids {
+			ws.remove(id);
+		}
+	}
+	trash(&root)
+}
+
+#[cfg(windows)]
+fn trash(root: &Path) -> Res<()> {
+	// 경로는 환경 변수로 넘긴다 — 명령 글에 끼워 넣으면 폴더 이름의 따옴표 · $ 가 PowerShell 글로 읽힌다
+	let ps = "$ErrorActionPreference='Stop'; Add-Type -AssemblyName Microsoft.VisualBasic; [Microsoft.VisualBasic.FileIO.FileSystem]::DeleteDirectory($env:CPPT_TRASH, 'OnlyErrorDialogs', 'SendToRecycleBin')";
+	let mut c = std::process::Command::new("powershell");
+	crate::hidden(&mut c);
+	let out = c.args(["-NoProfile", "-NonInteractive", "-Command", ps]).env("CPPT_TRASH", root).output().map_err(|e| format!("PowerShell 을 띄우지 못했다: {e}"))?;
+	if out.status.success() && !root.exists() {
+		return Ok(());
+	}
+	Err(crate::fonts::decode(&out.stderr).lines().find(|l| !l.trim().is_empty()).unwrap_or("휴지통으로 옮기지 못했다").to_string())
+}
+
+#[cfg(not(windows))]
+fn trash(_root: &Path) -> Res<()> {
+	Err("휴지통 보내기는 Windows 에서만 된다".into())
+}
+
 /// 탐색기에서 폴더를 연다.
 #[tauri::command]
 pub fn reveal(path: String) -> Res<()> {

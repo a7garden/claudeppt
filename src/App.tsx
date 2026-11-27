@@ -125,10 +125,10 @@ function Toasts() {
 /** 협업 브라우저 — 호스트가 덱을 열기 전 · 연결이 끊긴 동안 */
 function RemoteWaiting() {
 	const t = useT();
-	const { connected, ended, kicked } = useCollab();
+	const { connected, ended, kicked, away } = useCollab();
 	return (
 		<main className="remote-wait">
-			<p>{kicked ? t("collabKicked") : ended ? t("collabEnded") : connected ? t("collabWaiting") : t("collabOffline")}</p>
+			<p>{kicked ? t("collabKicked") : ended ? t("collabEnded") : !connected ? t("collabOffline") : away ? t("collabAway") : t("collabWaiting")}</p>
 		</main>
 	);
 }
