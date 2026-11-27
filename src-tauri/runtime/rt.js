@@ -310,9 +310,11 @@
 		for (const m of el.querySelectorAll("[data-bu]")) m.contentEditable = "false";
 		el.focus();
 		const s = getSelection();
+		// all: true 면 글 전체를 고르고, "end" 면 글 끝에 커서
 		const r = at ? document.caretRangeFromPoint(at.x, at.y) : all ? document.createRange() : null;
 		if (r) {
 			if (all) r.selectNodeContents(el);
+			if (all === "end") r.collapse(false);
 			s.removeAllRanges();
 			s.addRange(r);
 		}
@@ -1599,7 +1601,7 @@
 		// Alt+← → 로 15° 씩 돌린다 (PowerPoint 와 같다)
 		else if (e.altKey && !e.ctrlKey && (e.key === "ArrowLeft" || e.key === "ArrowRight")) { command("rotate", e.key === "ArrowLeft" ? -15 : 15); e.preventDefault(); }
 		// Ctrl+방향키 — 1px 씩 조금 옮기기 (PowerPoint 의 미세 이동)
-		else if (ctrl && !e.shiftKey && e.key.startsWith("Arrow") && picks().every(canMove)) nudgeBy(e, 1);
+		else if (ctrl && e.key.startsWith("Arrow") && picks().every(canMove)) nudgeBy(e, 1);
 		else if (e.ctrlKey || e.altKey) return;
 		else if ((e.key === "Enter" || e.key === "F2") && !more.length && textAt(sel, null)) {
 			startEdit(textAt(sel, null), null, true);
@@ -1609,13 +1611,33 @@
 			flushNudge();
 			removeSel();
 			e.preventDefault();
-		} else if (e.key.startsWith("Arrow") && picks().every(canMove)) nudgeBy(e, e.shiftKey ? 10 : 1);
+		} else if (e.key.startsWith("Arrow") && picks().every(canMove)) nudgeBy(e, NUDGE);
 		else if (e.key === "Escape") select(null);
+		// 고른 것이 하나고 글을 품었으면 글자 키로 바로 글 끝에 이어 쓴다 (PowerPoint 와 같다: 바꿔 쓰지 않고 끝에 붙는다).
+		// 한글은 첫 키가 조합 중(Process)으로 온다 — 그때도 고치기를 열어 두면 조합이 그 글로 들어간다
+		else if (!more.length && (e.key.length === 1 || e.key === "Process") && textAt(sel, null)) {
+			flushNudge();
+			startEdit(textAt(sel, null), null, "end");
+		}
 	});
-	/** 고른 것을 방향키 쪽으로 d px 민다 — 마지막 키 뒤 잠깐 있다가 묶음 하나로 쓴다 */
+	// 방향키 한 번에 미는 거리 — PowerPoint 기본 격자(1/12인치)와 같다. Ctrl 이면 1px.
+	// 2026.11.27 : 1px(Shift 10px) → 8px. PowerPoint 에서 Shift+방향키는 이동이 아니라 크기 바꾸기다
+	const NUDGE = 8;
+	/** 고른 것을 방향키 쪽으로 d px 민다 — 마지막 키 뒤 잠깐 있다가 묶음 하나로 쓴다.
+	 *  Shift 면 옮기지 않고 크기를 바꾼다: → 넓게 · ← 좁게 · ↑ 높게 · ↓ 낮게, 왼쪽 위는 그대로 (PowerPoint 와 같다) */
 	function nudgeBy(e, d) {
-			const all = picks();
+			const all = picks(), grow = e.shiftKey, keys = grow ? ["width", "height"] : ["left", "top"];
 			for (const el of all) {
+				if (grow) {
+					const w = el.offsetWidth, h = el.offsetHeight, img = el.tagName === "IMG";
+					const dw = e.key === "ArrowRight" ? d : e.key === "ArrowLeft" ? -d : 0, dh = e.key === "ArrowUp" ? d : e.key === "ArrowDown" ? -d : 0;
+					// 그림은 비율을 지킨다 (손잡이로 끌 때와 같다)
+					const nw = Math.max(8, img && dh ? w * (h + dh) / h : w + dw), nh = Math.max(8, img && dw ? h * (w + dw) / w : h + dh);
+					el.style.width = P(nw);
+					el.style.height = P(nh);
+					for (const [k, v] of Object.entries(reshape(el))) el.style.setProperty(k, v);
+					continue;
+				}
 				const { l, t, rel } = posOf(el);
 				if (rel) el.style.position = "relative";
 				if (e.key === "ArrowLeft") el.style.left = l - d + "px";
@@ -1628,9 +1650,9 @@
 			// 다른 것을 밀던 중이면 그것을 먼저 쓴다 — 타이머를 갈아 끼우면 앞의 이동이 파일에 안 남는다
 			if (nudge && (nudge.all.length !== all.length || nudge.all.some((x, i) => x !== all[i]))) flushNudge();
 			if (nudge) clearTimeout(nudge.timer);
-			const first = sel;
-			const fn = () => { keep(first, all.slice(1)); together(() => { for (const el of all) if (el.isConnected) post({ t: "patch", path: pathOf(el), style: posPatch(el, ["left", "top"]) }); }); };
-			nudge = { fn, all, timer: setTimeout(() => { nudge = null; fn(); }, 400) };
+			const first = sel, props = new Set([...(nudge?.props || []), ...keys]);
+			const fn = () => { keep(first, all.slice(1)); together(() => { for (const el of all) if (el.isConnected) post({ t: "patch", path: pathOf(el), style: { ...posPatch(el, [...props]), ...(props.has("width") ? reshape(el) : {}) } }); }); };
+			nudge = { fn, all, props, timer: setTimeout(() => { nudge = null; fn(); }, 400) };
 			e.preventDefault();
 	}
 
