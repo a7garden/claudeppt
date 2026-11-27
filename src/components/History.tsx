@@ -13,6 +13,7 @@ import { useT } from "../lib/i18n";
 import { useDeck } from "../lib/store";
 import { remote } from "../lib/transport";
 import { openMenu } from "./ContextMenu";
+import { TrustLine } from "./Trust";
 
 const ROW = 30;
 const COL = 14;
@@ -155,6 +156,7 @@ export function History({ onClose }: { onClose: () => void }) {
 				{!remote && <button className="more" disabled={busy} onClick={more} aria-label={t("forkMenu")} title={t("forkMenu")}>⋯</button>}
 			</div>
 
+			{!remote && !line?.sian && main && <TrustLine dir={main} />}
 			{line?.sian && (
 				<section className="hist-sian">
 					<p><b>{t("sianNow").replace("{name}", line.name ?? line.sian)}</b> {sian ? t("sianCounts").replace("{a}", String(sian.ahead)).replace("{b}", String(sian.behind)) : ""}</p>

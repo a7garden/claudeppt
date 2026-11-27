@@ -83,6 +83,10 @@ pub fn wants(args: &[String]) -> bool {
 
 pub fn main(args: Vec<String>) -> i32 {
 	let cmd = args[0].as_str();
+	// git 이 부르는 deck.json 합치기 드라이버 (deckmerge.rs): JSON 을 찍지 않고 종료 코드로만 답한다
+	if cmd == "merge-deck" {
+		return crate::deckmerge::driver(&args[1..]);
+	}
 	if matches!(cmd, "help" | "--help" | "-h") {
 		print!("{HELP}");
 		return 0;
@@ -525,8 +529,11 @@ fn slide_list(deck: &mut Value) -> R<&mut Vec<Value>> {
 
 /// deck.ts writeDeck(JSON.stringify(deck, null, 2))과 같은 꼴로 쓴다.
 /// 키 순서를 지켜야(serde_json preserve_order) 판 비교에 키 순서만 바뀐 군더더기 줄이 생기지 않는다
+/// 2026.11.27 : 고친 시각(updated)은 더 쓰지 않는다: 저장할 때마다 같은 줄이 바뀌어 두 사람의 변경이 늘 겹쳤다 (deckmerge.rs)
 fn write_deck(dir: &Path, deck: &mut Value) -> R<()> {
-	deck["updated"] = json!(chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true));
+	if let Some(o) = deck.as_object_mut() {
+		o.shift_remove("updated");
+	}
 	let text = serde_json::to_string_pretty(deck).map_err(|e| e.to_string())? + "\n";
 	std::fs::write(dir.join("deck.json"), text).map_err(|e| e.to_string())
 }

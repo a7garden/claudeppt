@@ -12,6 +12,7 @@ import { holdsUpdate, useUpdate } from "../lib/updater";
 import { CollabChip } from "./Collab";
 import DeckActions from "./DeckActions";
 import { History } from "./History";
+import { unsentOk } from "./Trust";
 
 export const Mark = () => (
 	<svg className="mark" viewBox="0 0 16 16" aria-hidden>
@@ -41,12 +42,14 @@ export default function TitleBar({ onSettings, settingsOpen }: { onSettings: () 
 	const saveDeck = useDeck((s) => s.saveDeck);
 	// 협업 브라우저에는 창이 없다 — 창 단추 · 끌기는 호스트 앱만
 	const win = remote ? null : getCurrentWindow();
-	// 창 닫기(× · Alt+F4) — 처음 화면 단추와 같이 묻는다. 묻는 동안 창은 그대로다
+	// 창 닫기(× · Alt+F4) — 처음 화면 단추와 같이 묻는다. 묻는 동안 창은 그대로다.
+	// 이 PC 에만 있는 변경이 있으면 그것도 묻는다(Trust.tsx unsentOk). 처리기를 둘 두면 먼저 끝난 쪽이 창을 닫아 버려 한 처리기에서 차례로 묻는다
 	useEffect(() => {
 		if (!win) return;
-		const un = win.onCloseRequested(async (e) => { if (!(await leaveOk("quit"))) e.preventDefault(); });
+		const un = win.onCloseRequested(async (e) => { if (!(await leaveOk("quit")) || !(await unsentOk())) e.preventDefault(); });
 		return () => { un.then((f) => f()); };
 	}, []);
+
 	const [max, setMax] = useState(false);
 	const [list, setList] = useState(false);
 	useEffect(() => {

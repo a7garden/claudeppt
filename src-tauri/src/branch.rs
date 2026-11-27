@@ -80,6 +80,9 @@ pub struct Sian {
 	behind: u32,
 	/// 열어 둔 작업 폴더 — 없으면 아직 열지 않았다(사본에서 보내 온 가지)
 	path: Option<String>,
+	/// 사본에서 가져온 때만: 사본의 서명 기록이 이 덱의 것과 어떤 사이인가 (trust.rs compare_copy)
+	#[serde(skip_serializing_if = "Option::is_none")]
+	chain: Option<&'static str>,
 }
 
 /// 갈래 → 그 갈래를 쥔 작업 폴더 (git worktree list)
@@ -112,6 +115,7 @@ fn sian_of(main: &Path, id: &str, wt: &[(String, String)]) -> Res<Sian> {
 		ahead,
 		behind,
 		path: wt.iter().find(|(x, _)| *x == b).map(|(_, p)| p.clone()),
+		chain: None,
 	})
 }
 
@@ -173,10 +177,10 @@ pub fn vcs_sian_open(dir: String, id: String) -> Res<String> {
 #[derive(Serialize)]
 pub struct Merged {
 	/// 합쳤다 (겹치지 않았다)
-	ok: bool,
+	pub(crate) ok: bool,
 	/// 새로 생긴 변경 — 이미 다 들어가 있었으면 없다
-	commit: Option<Commit>,
-	conflicts: Vec<String>,
+	pub(crate) commit: Option<Commit>,
+	pub(crate) conflicts: Vec<String>,
 }
 
 /// 겹친 곳을 어느 쪽 것으로 — "ours"(받는 쪽) · "theirs"(들어오는 쪽). 사람이 겹친 것을 보고 고른 때만 준다
@@ -191,7 +195,7 @@ fn prefer_arg(prefer: Option<&str>) -> Res<Option<&'static str>> {
 
 /// other 를 into 작업 폴더에 합친다. 겹치면 into 는 그대로 두고 겹친 파일을 돌려준다.
 /// prefer 를 주면 겹친 곳만 그쪽 것으로 하고 합친다 — 겹치지 않은 곳은 양쪽이 다 남는다
-fn merge_into(into: &Path, other: &str, message: &str, author: Option<&str>, prefer: Option<&str>) -> Res<Merged> {
+pub(crate) fn merge_into(into: &Path, other: &str, message: &str, author: Option<&str>, prefer: Option<&str>) -> Res<Merged> {
 	let x = prefer_arg(prefer)?;
 	let _l = lock(into)?;
 	commit_all(into, "남아 있던 변경", None)?;
@@ -203,6 +207,8 @@ fn merge_into(into: &Path, other: &str, message: &str, author: Option<&str>, pre
 	c.args(["merge", "--no-ff", "--no-edit", "-m", message]);
 	if let Some(x) = x {
 		c.arg(x);
+		// deck.json 합치기 드라이버에도 고른 쪽을 알린다 (-X 는 드라이버에 닿지 않는다)
+		c.env(crate::deckmerge::PREFER_ENV, if x == "-Xours" { "ours" } else { "theirs" });
 	}
 	let o = c.arg(other).output().map_err(err)?;
 	if o.status.success() {
@@ -227,7 +233,10 @@ pub fn vcs_sian_merge(dir: String, id: String, message: String, author: Option<S
 		let _l = lock(p)?;
 		commit_all(p, "가지에 남아 있던 변경", None)?;
 	}
-	merge_into(d, &b, &message, author.as_deref(), prefer.as_deref())
+	let r = merge_into(d, &b, &message, author.as_deref(), prefer.as_deref());
+	// 덱 폴더(내 줄)에 넣었으니 봉한다. 제안 승인(sync.rs)은 제안을 적어 봉해야 해서 merge_into 안에서 봉하지 않는다
+	let _l = lock(d)?;
+	crate::vcs::sealed(d, r)
 }
 
 /// 줄기의 변경을 가지에 받는다
@@ -353,6 +362,8 @@ pub fn vcs_fork(dir: String, dest: String) -> Res<()> {
 	let src = src.strip_prefix(r"\\?\").unwrap_or(&src).to_string();
 	let parent = to.parent().ok_or("사본 자리가 맞지 않다")?;
 	std::fs::create_dir_all(parent).map_err(err)?;
+	// 서명 기록은 따라가지 않는다(clone 은 refs/cppt 를 받지 않는다) : 사본은 첫 판에서 이 PC 를 승인자로 둔 새 기록을 시작하는 다른 덱이다.
+	// 2026.11.27 : 잠깐 기록을 함께 떼어 갔다. 사본도 같은 열쇠로 승인자라 원본과 따로 봉해 늘 「갈라짐」이 되고, 덱 id 가 같아 팀원에게 사본을 내줄 수 있었다
 	run(parent, &["clone", "-q", "--no-hardlinks", &src, &to.to_string_lossy()]).map(|_| ())
 }
 
@@ -401,7 +412,9 @@ pub fn vcs_fork_fetch(dir: String, from: String, name: String, by: Option<String
 		return Err("이 덱과 이력이 이어지지 않은 덱이다 — 이 덱에서 떼어 간 사본만 가져온다".into());
 	}
 	name_sian(d, &b, &name, by.as_deref(), &id)?;
-	sian_of(d, &id, &worktrees(d))
+	let mut s = sian_of(d, &id, &worktrees(d))?;
+	s.chain = Some(crate::trust::compare_copy(d, f, &id));
+	Ok(s)
 }
 
 #[cfg(test)]

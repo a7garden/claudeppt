@@ -1296,7 +1296,10 @@ export const useDeck = create<S>()((set, get) => ({
 	}),
 	fetchFork: (from, name) => lineAction(get, async (main) => {
 		const s = await api.forkFetch(main, from, name, me());
-		get().notify(tNow("forkFetched").replace("{name}", s.name), "ok");
+		// 서명 기록이 맞지 않는 사본은 가지로는 들이되 알린다: 넣기 전에 사람이 살펴보게.
+		// 사본은 저마다 새 기록을 시작하는 다른 덱이라(branch.rs vcs_fork) 「다른 덱」은 흔한 일이다 : 알리지 않는다
+		const warn = s.chain === "diverged" ? "chainDiverged" : s.chain === "invalid" ? "chainInvalid" : null;
+		get().notify(tNow("forkFetched").replace("{name}", s.name) + (warn ? ". " + tNow(warn) : ""), warn ? "err" : "ok", warn ? { sticky: true } : {});
 	}),
 
 	setPreview: (c) => set({ preview: c && c.hash === get().versions[0]?.hash ? null : c, ...(c ? { vdiff: null } : {}) }),
