@@ -3,11 +3,12 @@
 // 2026.11.18 : 가운데의 보기 · 핀 · 편집 모드를 걷었다 — 무대 도구 띠(고르기 · 펜 · 화살표 · 범위) 하나로 합쳤다.
 //              무대 아래 판 줄기(눈금 띠)도 걷고 판 번호를 누르면 여는 판 목록으로 옮겼다 — 눈금이 거의 안 보이면서 자리만 먹었다.
 import { getCurrentWindow } from "@tauri-apps/api/window";
+import { ask } from "@tauri-apps/plugin-dialog";
 import { useEffect, useRef, useState } from "react";
-import { useT } from "../lib/i18n";
+import { tNow, useT } from "../lib/i18n";
 import { useDeck } from "../lib/store";
 import { remote } from "../lib/transport";
-import { useUpdate } from "../lib/updater";
+import { holdsUpdate, useUpdate } from "../lib/updater";
 import { CollabChip } from "./Collab";
 import DeckActions from "./DeckActions";
 import { History } from "./History";
@@ -18,6 +19,16 @@ export const Mark = () => (
 		<circle cx="12.6" cy="4.2" r="2.6" fill="var(--accent)" />
 	</svg>
 );
+
+/** 덱을 닫기 전에(처음 화면으로 · 창 닫기) — 끝나지 않은 작업 · 보내지 않은 요청 글 · 들어와 있는 팀원이 있으면 묻는다. 닫아도 되면 true.
+ *  2026.11.27 : 전에는 묻지 않고 돌던 Claude 요청을 멈추고, 쓰던 요청 글을 버렸다 */
+async function leaveOk(to: "home" | "quit"): Promise<boolean> {
+	const why = holdsUpdate();
+	const msg = why === "work" ? tNow("leaveWork") : why === "draft" ? tNow("leaveDraft") : why === "members" ? tNow("leaveMembers") : null;
+	if (!msg) return true;
+	const label = to === "home" ? tNow("leaveHome") : tNow("quit");
+	return ask(msg, { title: label, kind: "warning", okLabel: label, cancelLabel: tNow("cancel") }).catch(() => true);
+}
 
 export default function TitleBar({ onSettings, settingsOpen }: { onSettings: () => void; settingsOpen: boolean }) {
 	const t = useT();
@@ -30,6 +41,12 @@ export default function TitleBar({ onSettings, settingsOpen }: { onSettings: () 
 	const saveDeck = useDeck((s) => s.saveDeck);
 	// 협업 브라우저에는 창이 없다 — 창 단추 · 끌기는 호스트 앱만
 	const win = remote ? null : getCurrentWindow();
+	// 창 닫기(× · Alt+F4) — 처음 화면 단추와 같이 묻는다. 묻는 동안 창은 그대로다
+	useEffect(() => {
+		if (!win) return;
+		const un = win.onCloseRequested(async (e) => { if (!(await leaveOk("quit"))) e.preventDefault(); });
+		return () => { un.then((f) => f()); };
+	}, []);
 	const [max, setMax] = useState(false);
 	const [list, setList] = useState(false);
 	useEffect(() => {
@@ -51,7 +68,7 @@ export default function TitleBar({ onSettings, settingsOpen }: { onSettings: () 
 				<div className="crumb">
 					{deck ? (
 						<>
-							{!remote && <><button className="crumb-home" onClick={close}>{t("home")}</button><span className="dim">/</span></>}
+							{!remote && <><button className="crumb-home" onClick={async () => { if (await leaveOk("home")) close(); }}>{t("home")}</button><span className="dim">/</span></>}
 							<input
 								ref={titleRef}
 								className="title"
