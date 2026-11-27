@@ -445,13 +445,16 @@
 		else if (kind === "line") t.innerHTML = r.h > r.w
 			? `<div style="${at}width:0;height:${P(r.h)};border-left:var(--stroke, 2px) solid var(--ink, #222)"></div>`
 			: `<div style="${at}width:${P(r.w)};height:0;border-top:var(--stroke, 2px) solid var(--ink, #222)"></div>`;
-		else t.innerHTML = `<div style="${at}width:${P(r.w)};height:${P(r.h)};${SHAPE}${kind === "round" ? ";border-radius:16px" : kind === "ellipse" ? ";border-radius:50%" : ""}"><p style="margin:0;width:100%"></p></div>`;
+		// border-box: 안쪽 여백이 크기에 더해지지 않게 — 2026.11.27 : 빠져 있어 끌어 그린 네모보다 가로 32 · 세로 24px 크게 들어갔다
+		else t.innerHTML = `<div style="${at}width:${P(r.w)};height:${P(r.h)};box-sizing:border-box;${SHAPE}${kind === "round" ? ";border-radius:16px" : kind === "ellipse" ? ";border-radius:50%" : ""}"><p style="margin:0;width:100%"></p></div>`;
 		return t.content.firstElementChild;
 	};
 	const finishPlace = (e) => {
 		const p = place;
 		let r = placeRect(e);
-		const D = { text: [360, 0], line: [240, 0], arrow: [240, 0], rect: [200, 120], round: [200, 120], ellipse: [160, 160], triangle: [160, 140], rtTriangle: [160, 140], diamond: [160, 160], hexagon: [180, 150], upArrow: [100, 180], downArrow: [100, 180] }[p.kind] || [200, 120];
+		// 누르기만 했을 때의 크기 — PowerPoint 기본값: 1인치(96px) 정사각형, 몇 도형만 제 비율(삼각형 · 육각형 1060704 EMU 너비 등). 선은 1인치.
+		// 2026.11.27 : 200×120 등 종류별 크기 → PowerPoint 와 같게. 글상자는 글에 따라 자라는 폭이 없어 그대로 둔다
+		const D = { text: [360, 0], line: [96, 0], arrow: [96, 0], triangle: [111, 96], hexagon: [111, 96], parallelogram: [128, 96], trapezoid: [96, 128] }[p.kind] || [96, 96];
 		// 누르기만 했다 — 누른 자리를 왼쪽 위로 기본 크기
 		if (r.w < 6 && r.h < 6) r = { x: p.x0, y: p.y0, w: D[0], h: D[1], dx: D[0], dy: D[1] };
 		else if (p.kind === "text") r.w = Math.max(r.w, 40);
