@@ -28,6 +28,9 @@ use std::path::Path;
 use std::process::Stdio;
 
 pub const CHAIN: &str = "refs/cppt/chain";
+/// 승인된 줄기 끝 (사슬 상태의 head): 사슬이 바뀔 때마다 맞춘다. 덱 폴더의 main 은 「내 줄」이라
+/// 승인자가 아닌 사람의 main 은 이것보다 앞서 있을 수 있다(아직 승인받지 않은 내 변경 = 내 제안)
+pub const TRUNK: &str = "refs/cppt/trunk";
 /// 서명할 바이트의 머리: 같은 열쇠로 한 다른 서명(앞으로의 묶음 파일 · 수신 확인)과 섞이지 않게
 const DOMAIN: &str = "claudeppt/chain/1\n";
 const FILE: &str = "entry.json";
@@ -74,10 +77,10 @@ pub struct Roster {
 }
 
 impl Roster {
-	fn person_of(&self, key: &str) -> Option<&Person> {
+	pub(crate) fn person_of(&self, key: &str) -> Option<&Person> {
 		self.people.iter().find(|p| p.keys.iter().any(|k| k == key))
 	}
-	fn approvers(&self) -> impl Iterator<Item = &Person> {
+	pub(crate) fn approvers(&self) -> impl Iterator<Item = &Person> {
 		self.people.iter().filter(|p| p.role == Role::Approve)
 	}
 	fn approver_keys(&self) -> Vec<&str> {
@@ -146,7 +149,7 @@ pub struct State {
 
 /// 정규 JSON: 객체 키를 정렬하고 빈칸을 넣지 않는다. 같은 내용이면 누가 만들어도 같은 바이트가 되어야 서명이 맞는다.
 /// serde_json 은 이 앱에서 preserve_order 라 키 순서가 넣은 순서다: 그래서 직접 정렬한다
-fn canon(v: &Value, out: &mut String) {
+pub(crate) fn canon(v: &Value, out: &mut String) {
 	match v {
 		Value::Object(m) => {
 			let mut keys: Vec<&String> = m.keys().collect();
@@ -220,7 +223,7 @@ fn signers(e: &Entry) -> Result<Vec<&str>, String> {
 	Ok(out)
 }
 
-fn short(k: &str) -> &str {
+pub(crate) fn short(k: &str) -> &str {
 	k.get(..8).unwrap_or(k)
 }
 
@@ -451,7 +454,7 @@ pub fn relate(mine: &[Entry], theirs: &[Entry], repo: &dyn Repo) -> Relation {
 
 // ── 저장 ──
 
-fn git_in(d: &Path, args: &[&str], input: &[u8]) -> Res<String> {
+pub(crate) fn git_in(d: &Path, args: &[&str], input: &[u8]) -> Res<String> {
 	let mut c = vcs::git(d);
 	c.args(args).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped());
 	let mut ch = c.spawn().map_err(err)?;
@@ -547,13 +550,17 @@ pub fn load(d: &Path) -> Res<Option<State>> {
 	}
 	let st = v.state;
 	if let Some(s) = &st {
-		let _ = std::fs::write(cache_file(d), serde_json::to_string(&Cache { commit, state: s.clone() }).map_err(err)?);
+		remember(d, commit, s);
 	}
 	Ok(st)
 }
 
-fn remember(d: &Path, commit: String, st: &State) {
+/// 캐시와 승인된 줄기 ref 를 사슬 상태에 맞춘다
+pub(crate) fn remember(d: &Path, commit: String, st: &State) {
 	let _ = std::fs::write(cache_file(d), serde_json::to_string(&Cache { commit, state: st.clone() }).unwrap_or_default());
+	if !st.head.is_empty() {
+		let _ = vcs::run(d, &["update-ref", TRUNK, &st.head]);
+	}
 }
 
 /// 칸 하나를 검증하고 붙인다: 내 앱이 만든 칸도 받는 칸과 같은 검증을 지난다
@@ -564,7 +571,7 @@ fn push(d: &Path, st: Option<&State>, e: &Entry) -> Res<State> {
 	Ok(next)
 }
 
-fn now() -> String {
+pub(crate) fn now() -> String {
 	chrono::Local::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, false)
 }
 
@@ -628,7 +635,7 @@ fn my_name() -> String {
 }
 
 /// 덱의 본 작업 폴더인가: 가지 · 작업 사본(worktree)은 .git 이 파일이다. 그 폴더들의 판은 줄기가 아니라 봉하지 않는다
-fn is_main_checkout(d: &Path) -> bool {
+pub(crate) fn is_main_checkout(d: &Path) -> bool {
 	d.join(".git").is_dir()
 }
 
@@ -647,12 +654,13 @@ fn genesis(d: &Path, head: &str, k: &SecretKey) -> Res<State> {
 /// 사슬이 없는 덱은 여기서 창세를 만든다: 지금 쓰는 덱이 처음 판을 남길 때 저절로 옮겨진다.
 /// 실패해도 판 남기기는 그대로 둔다: 봉하지 못한 줄기는 다음 판에서 함께 봉한다
 pub fn seal(d: &Path) {
-	if let Err(e) = try_seal(d) {
+	if let Err(e) = seal_with(d, None) {
 		eprintln!("서명 기록을 남기지 못했다: {e}");
 	}
 }
 
-fn try_seal(d: &Path) -> Res<()> {
+/// 봉한다. proposal 을 주면 그 제안을 승인한 기록으로 남긴다(담당 쪽 범위 · 「다른 승인자 확인 받기」가 제안한 사람으로 따져진다)
+pub(crate) fn seal_with(d: &Path, proposal: Option<Proposal>) -> Res<()> {
 	if !is_main_checkout(d) {
 		return Ok(());
 	}
@@ -676,9 +684,13 @@ fn try_seal(d: &Path) -> Res<()> {
 			// 승인자가 아니거나 다른 승인자의 확인을 받아야 한다: 줄기 밖 변경으로 남는다 (2단계에서 제안이 된다)
 			return Ok(());
 		}
-		let rewind = !Git(d).is_ancestor(&st.head, &head);
+		// 내 줄이 승인된 줄기를 품지 않았다(남이 승인한 줄기를 받았는데 아직 합치지 못했다): 봉하면 남의 승인을 되돌리게 되므로 하지 않는다.
+		// 2026.11.27 : 처음에는 rewind 를 붙여 봉했다. 줄기를 받는 길이 생기며 막았다: 합친 뒤 다음 판에서 봉한다
+		if !Git(d).is_ancestor(&st.head, &head) {
+			return Ok(());
+		}
 		let tree = Git(d).tree(&head).ok_or("줄기 커밋의 트리를 읽지 못했다")?;
-		let mut e = Entry { v: 1, deck: st.deck.clone(), n: st.n + 1, prev: Some(st.tip.clone()), at: now(), body: Body::Approve { base: st.head.clone(), head: head.clone(), tree, proposal: None, rewind }, sigs: vec![] };
+		let mut e = Entry { v: 1, deck: st.deck.clone(), n: st.n + 1, prev: Some(st.tip.clone()), at: now(), body: Body::Approve { base: st.head.clone(), head: head.clone(), tree, proposal: proposal.clone(), rewind: false }, sigs: vec![] };
 		sign(&mut e, &k);
 		match push(d, Some(&st), &e) {
 			Ok(_) => return Ok(()),
@@ -689,7 +701,7 @@ fn try_seal(d: &Path) -> Res<()> {
 }
 
 /// 명부를 바꾸는 판 하나를 내 열쇠(signer)로 서명해 붙인다
-fn change(d: &Path, signer: &SecretKey, f: impl FnOnce(&mut Roster) -> Res<()>) -> Res<State> {
+pub(crate) fn change(d: &Path, signer: &SecretKey, f: impl FnOnce(&mut Roster) -> Res<()>) -> Res<State> {
 	let _l = vcs::lock(d)?;
 	seal(d);
 	let st = load(d)?.ok_or("이 덱에는 아직 서명 기록이 없다: 판을 하나 남기면 생긴다")?;

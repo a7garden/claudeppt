@@ -22,6 +22,7 @@ mod p2p;
 mod project;
 mod pptsnap;
 mod runner;
+mod sync;
 mod vcs;
 mod trust;
 mod tunnel;
@@ -132,6 +133,15 @@ pub fn run() {
 			trust::trust_rename,
 			trust::trust_recovery,
 			trust::trust_recover,
+			sync::sync_status,
+			sync::sync_export,
+			sync::sync_import,
+			sync::sync_approve,
+			sync::sync_join,
+			sync::sync_admit,
+			sync::sync_mailbox_set,
+			sync::sync_mailbox_run,
+			sync::sync_open,
 			claude::claude_detect,
 			claude::claude_run,
 			claude::claude_stop,

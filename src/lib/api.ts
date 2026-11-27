@@ -12,7 +12,17 @@ export interface Sian { id: string; name: string; by: string; hash: string; date
 /** 사본에서 가져올 때 사본의 서명 기록이 이 덱의 것과 어떤 사이인가 (trust.rs compare_copy) */
 export type ChainRelation = "none" | "same" | "ahead" | "behind" | "diverged" | "foreign" | "invalid";
 /** 명부 · 승인 기록 (trust.rs View) */
-export interface TrustPerson { id: string; name: string; role: "approve" | "edit" | "assigned" | "comment" | "view"; keys: number; slides: string[]; me: boolean }
+export type TrustRole = "approve" | "edit" | "assigned" | "comment" | "view";
+export interface TrustPerson { id: string; name: string; role: TrustRole; keys: number; slides: string[]; me: boolean }
+/** 주고받기 상태 (sync.rs Status) */
+export interface SyncStatus {
+	member: boolean; approver: boolean; unsent: boolean; sent_at: string | null; sent_to: string | null; behind: boolean; pending: number;
+	props: { key: string; id: string; name: string; at: string; ahead: number; mine: boolean }[];
+	joins: { key: string; name: string; at: string }[];
+	mailbox: string | null;
+}
+export interface SyncImported { chain: ChainRelation; adopted: boolean; props: number; joins: number; conflicts: string[] }
+export interface SyncRan { sent: string | null; received: number; waiting: number; errors: string[]; conflicts: string[] }
 export interface TrustView { deck: string; n: number; sealed: boolean; people: TrustPerson[]; review: boolean; me: string; approver: boolean; fragile: boolean }
 /** 이 폴더는 어느 덱의 어느 줄인가 — sian 이 있으면 가지 폴더, main 은 본 덱 폴더 */
 export interface Where { main: string; sian: string | null; name: string | null; origin: string | null }
@@ -87,6 +97,15 @@ export const api = {
 	trustRename: (dir: string, name: string) => invoke<TrustView>("trust_rename", { dir, name }),
 	trustRecovery: (dir: string) => invoke<string>("trust_recovery", { dir }),
 	trustRecover: (dir: string, secret: string) => invoke<TrustView>("trust_recover", { dir, secret }),
+	syncStatus: (dir: string) => invoke<SyncStatus | null>("sync_status", { dir }),
+	syncExport: (dir: string, out: string, full: boolean) => invoke<string | null>("sync_export", { dir, out, full }),
+	syncImport: (dir: string, file: string) => invoke<SyncImported>("sync_import", { dir, file }),
+	syncApprove: (dir: string, key: string, id: string) => invoke<string[]>("sync_approve", { dir, key, id }),
+	syncJoin: (dir: string, name: string) => invoke<void>("sync_join", { dir, name }),
+	syncAdmit: (dir: string, key: string, role: TrustRole) => invoke<void>("sync_admit", { dir, key, role }),
+	syncMailboxSet: (dir: string, folder: string | null) => invoke<void>("sync_mailbox_set", { dir, folder }),
+	syncMailboxRun: (dir: string) => invoke<SyncRan>("sync_mailbox_run", { dir }),
+	syncOpen: (file: string, dest: string) => invoke<string>("sync_open", { file, dest }),
 	log: (dir: string, limit?: number) => invoke<Commit[]>("vcs_log", { dir, limit }),
 	tag: (dir: string, name: string) => invoke<void>("vcs_tag", { dir, name }),
 	restore: (dir: string, hash: string, message: string, author?: string) => invoke<Commit | null>("vcs_restore", { dir, hash, message, author: author || null }),

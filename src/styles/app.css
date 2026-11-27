@@ -139,6 +139,13 @@ input, textarea, select { font: inherit; color: inherit; }
 .hist-trust form { display: grid; gap: 6px; }
 .hist-trust .acts { display: flex; flex-wrap: wrap; gap: 6px; }
 .hist-trust .acts button { height: 26px; padding: 0 10px; border-radius: var(--r-ctl); outline: 1px solid var(--hair); outline-offset: -1px; }
+.hist-trust .badge { font-style: normal; padding: 0 6px; border-radius: 999px; background: var(--accent); color: var(--on-accent, #fff); }
+.hist-trust .group { display: grid; gap: 6px; padding-top: 8px; border-top: 1px solid var(--hair); }
+.hist-trust h4 { margin: 0; font-size: 12px; font-weight: 600; color: var(--text); }
+.hist-trust .row { display: flex; align-items: center; gap: 6px; }
+.hist-trust .row > span { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.hist-trust .row button { height: 26px; padding: 0 10px; border-radius: var(--r-ctl); outline: 1px solid var(--hair); outline-offset: -1px; }
+.hist-trust select { height: 26px; }
 .hist-body { overflow-y: auto; min-height: 120px; margin: 0 -4px; }
 .hist-rows { position: relative; }
 .hist-graph { position: absolute; left: 4px; top: 0; pointer-events: none; z-index: 1; }

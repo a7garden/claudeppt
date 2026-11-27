@@ -25,6 +25,7 @@ import { CheckBar, CheckMarks, PageGuides } from "./CheckMarks";
 import { remote } from "../lib/transport";
 import { useSettings } from "../lib/settings";
 import Talk, { openTalk, useTalkFold } from "./Talk";
+import { useMailbox } from "./Trust";
 
 /** 담당이 아니라 내용 없이 자리만 받은 쪽 (2026.11.27 collab.rs limit_view) — 쪽 그림 대신. 덱 주인이 「담당 쪽만 보이기」를 켠 사람에게만 생긴다 */
 function LockedSlide({ width, height }: { width: number; height: number }) {
@@ -239,6 +240,10 @@ function Splitter({ side, at, set, label }: { side: "left" | "right"; at: number
 
 export default function Workspace() {
 	const setTool = useDeck((s) => s.setTool);
+	// 공유 폴더 우편함을 정한 덱이면 열려 있는 동안 주고받는다 (sync.rs). 공유 덱 창(팀원)은 덱 주인의 것이라 하지 않는다
+	const line = useDeck((s) => s.line);
+	const deckDir = useDeck((s) => s.dir);
+	useMailbox(remote || line?.sian ? null : deckDir);
 	const setCurrent = useDeck((s) => s.setCurrent);
 	useEffect(() => {
 		const k = (e: KeyboardEvent) => {

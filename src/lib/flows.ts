@@ -87,6 +87,11 @@ export async function openAny(path: string) {
 	const st = useDeck.getState();
 	try {
 		if (/\.pptx$/i.test(path)) return await importFile(path);
+		// 묶음 파일 (sync.rs) : 팀원이 보낸 덱을 처음 받는다. 승인 기록을 검증한 뒤 연다
+		if (/\.cpptb$/i.test(path)) {
+			const name = path.split(/[\\/]/).pop()!.replace(/\.cpptb$/i, "");
+			return await st.openProject(await api.syncOpen(path, await freeDir(name)));
+		}
 		if (/\.cppt$/i.test(path)) {
 			const name = path.split(/[\\/]/).pop()!.replace(/\.cppt$/i, "");
 			const dir = await api.unpack(path, await freeDir(name));

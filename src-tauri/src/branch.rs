@@ -177,10 +177,10 @@ pub fn vcs_sian_open(dir: String, id: String) -> Res<String> {
 #[derive(Serialize)]
 pub struct Merged {
 	/// 합쳤다 (겹치지 않았다)
-	ok: bool,
+	pub(crate) ok: bool,
 	/// 새로 생긴 변경 — 이미 다 들어가 있었으면 없다
-	commit: Option<Commit>,
-	conflicts: Vec<String>,
+	pub(crate) commit: Option<Commit>,
+	pub(crate) conflicts: Vec<String>,
 }
 
 /// 겹친 곳을 어느 쪽 것으로 — "ours"(받는 쪽) · "theirs"(들어오는 쪽). 사람이 겹친 것을 보고 고른 때만 준다
@@ -195,7 +195,7 @@ fn prefer_arg(prefer: Option<&str>) -> Res<Option<&'static str>> {
 
 /// other 를 into 작업 폴더에 합친다. 겹치면 into 는 그대로 두고 겹친 파일을 돌려준다.
 /// prefer 를 주면 겹친 곳만 그쪽 것으로 하고 합친다 — 겹치지 않은 곳은 양쪽이 다 남는다
-fn merge_into(into: &Path, other: &str, message: &str, author: Option<&str>, prefer: Option<&str>) -> Res<Merged> {
+pub(crate) fn merge_into(into: &Path, other: &str, message: &str, author: Option<&str>, prefer: Option<&str>) -> Res<Merged> {
 	let x = prefer_arg(prefer)?;
 	let _l = lock(into)?;
 	commit_all(into, "남아 있던 변경", None)?;
@@ -211,8 +211,6 @@ fn merge_into(into: &Path, other: &str, message: &str, author: Option<&str>, pre
 	let o = c.arg(other).output().map_err(err)?;
 	if o.status.success() {
 		let changed = run(into, &["rev-parse", "HEAD"])? != before;
-		// 덱 폴더(줄기)에 넣었으면 봉한다: 가지 폴더로 받은 것(줄기 받기)은 seal 이 본 작업 폴더가 아니라며 넘긴다
-		crate::trust::seal(into);
 		return Ok(Merged { ok: true, commit: if changed { head(into).ok() } else { None }, conflicts: vec![] });
 	}
 	let conflicts: Vec<String> = run(into, &["diff", "--name-only", "--diff-filter=U"]).unwrap_or_default().lines().map(String::from).collect();
@@ -233,7 +231,10 @@ pub fn vcs_sian_merge(dir: String, id: String, message: String, author: Option<S
 		let _l = lock(p)?;
 		commit_all(p, "가지에 남아 있던 변경", None)?;
 	}
-	merge_into(d, &b, &message, author.as_deref(), prefer.as_deref())
+	let r = merge_into(d, &b, &message, author.as_deref(), prefer.as_deref());
+	// 덱 폴더(내 줄)에 넣었으니 봉한다. 제안 승인(sync.rs)은 제안을 적어 봉해야 해서 merge_into 안에서 봉하지 않는다
+	let _l = lock(d)?;
+	crate::vcs::sealed(d, r)
 }
 
 /// 줄기의 변경을 가지에 받는다

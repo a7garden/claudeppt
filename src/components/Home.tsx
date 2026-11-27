@@ -129,7 +129,7 @@ export default function Home() {
 		if (typeof p === "string") openAny(p);
 	};
 	const pickDeck = async () => {
-		const p = await open({ filters: [{ name: "ClaudePPT", extensions: ["cppt", "json"] }], defaultPath: s.library });
+		const p = await open({ filters: [{ name: "ClaudePPT", extensions: ["cppt", "cpptb", "json"] }], defaultPath: s.library });
 		if (typeof p === "string") openAny(p);
 	};
 
