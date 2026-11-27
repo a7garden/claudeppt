@@ -29,7 +29,7 @@ export interface Device { id: string; name: string; seen: number; online: boolea
 /** app — 앱끼리 잇는 주소(claudeppt://<열쇠>) · lan — 사무실 망에 열었나(브라우저 팀원용) */
 /** deck — 공유한 덱 (2026.11.27). 공유는 켤 때 연 덱 하나에 묶인다 */
 export interface CollabInfo { port: number; app: string | null; lan: boolean; bases: string[]; tunnel: { url: string; kind: "tailscale" | "cloudflare" } | null; links: InviteLink[]; devices: Device[]; locked: boolean; members: Member[]; deck: { dir: string; title: string } }
-export interface TunnelTools { tailscale: string | null; cloudflared: string | null }
+export interface TunnelTools { tailscale: string | null; cloudflared: string | null; fetch: boolean }
 
 interface C {
 	/** 호스트: 서버가 켜져 있으면 그 정보 */

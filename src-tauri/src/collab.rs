@@ -693,6 +693,7 @@ pub async fn collab_lan(app: AppHandle, on: bool) -> Res<Info> {
 }
 
 /// 바깥 길을 열거나 닫는다 — 깔린 Tailscale(Funnel) · cloudflared 를 쓴다 (tunnel.rs)
+/// 둘 다 없으면 cloudflared 를 처음 한 번 받는다. 받는 동안 받은 비율을 collab-tunnel-fetch 로 알린다
 #[tauri::command]
 pub async fn collab_tunnel(app: AppHandle, on: bool) -> Res<Info> {
 	let h = hub(&app).ok_or("협업이 꺼져 있다")?;
@@ -702,7 +703,11 @@ pub async fn collab_tunnel(app: AppHandle, on: bool) -> Res<Info> {
 	}
 	*h.public.lock().unwrap() = None;
 	if on {
-		let t = crate::tunnel::start(h.port).await?;
+		let a = app.clone();
+		let t = crate::tunnel::start(h.port, &move |p: u8| {
+			let _ = a.emit("collab-tunnel-fetch", p);
+		})
+		.await?;
 		*h.public.lock().unwrap() = Some((t.url.clone(), t.kind));
 		*slot = Some(t);
 	}
@@ -793,7 +798,7 @@ pub fn join_links_take(state: State<JoinLinks>) -> Vec<String> {
 /// 바깥 길에 쓸 수 있는 도구 — 화면이 안내 글을 고른다
 #[tauri::command]
 pub async fn collab_tools() -> crate::tunnel::Tools {
-	tokio::task::spawn_blocking(crate::tunnel::detect).await.unwrap_or(crate::tunnel::Tools { tailscale: None, cloudflared: None })
+	tokio::task::spawn_blocking(crate::tunnel::detect).await.unwrap_or(crate::tunnel::Tools { tailscale: None, cloudflared: None, fetch: false })
 }
 
 /// 연결 안에서만 쓰는 「끊어라」 표시 — 서버가 보내는 말과 겹치지 않는 글
