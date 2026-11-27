@@ -348,6 +348,24 @@ async function step(get: () => S, from: Snap[], to: Snap[], by: string) {
 	directCommit(dir, get, by);
 }
 
+/** 쪽 더하기 · 빼기 · 옮기기 · 복제도 Ctrl+Z 로 되돌린다 — 바꾸기 전후의 deck.json 글을 한 걸음으로 쌓는다.
+ *  뺀 쪽의 HTML 파일은 남으므로 deck.json 만 되쓰면 되살아난다. 되쓴 deck.json 은 감시가 목차로 다시 읽는다.
+ *  2026.11.27 : 전에는 쪽을 지우면 되돌릴 길이 비교(C)의 「빠진 쪽」뿐이었고, Ctrl+Z 는 다른 쪽의 예전 손 편집을 되돌렸다 */
+function deckStep(get: () => S, change: () => Promise<void>) {
+	return serial(async () => {
+		const dir = get().dir;
+		const before = await api.readText(dir, "deck.json").catch(() => null);
+		await change();
+		const after = await api.readText(dir, "deck.json").catch(() => null);
+		if (before == null || after == null || before === after) return;
+		const by = me();
+		undoStack.push({ file: "deck.json", text: before, after, by });
+		if (undoStack.length > UNDO_MAX) undoStack.shift();
+		redoStack = redoStack.filter((x) => x.by !== by);
+		syncHist();
+	});
+}
+
 /** 이 쪽을 지금 손으로 고친 사람 — 협업 화면이 「○○ 님이 고치는 중」을 보인다 */
 function markEditing(get: () => S, slideId: string | undefined, by: string) {
 	if (!slideId) return;
@@ -959,7 +977,7 @@ export const useDeck = create<S>()((set, get) => ({
 	refill: (text) => set({ insertReq: { text, whole: true, k: Date.now() } }),
 
 	// 쪽을 빼도 HTML 파일은 남긴다 — 지난 판 미리 보기 · 되돌리기가 그 파일을 읽는다
-	addSlide: async (at) => {
+	addSlide: (at) => deckStep(get, async () => {
 		const { dir, deck } = get();
 		if (!deck) return;
 		const id = newId();
@@ -968,8 +986,8 @@ export const useDeck = create<S>()((set, get) => ({
 		s.splice(at, 0, { id, file: `slides/${id}.html` });
 		await get().saveDeck({ ...deck, slides: s });
 		get().setCurrent(at);
-	},
-	duplicateSlide: async (i) => {
+	}),
+	duplicateSlide: (i) => deckStep(get, async () => {
 		const { dir, deck } = get();
 		const src = deck?.slides[i];
 		if (!deck || !src) return;
@@ -980,23 +998,23 @@ export const useDeck = create<S>()((set, get) => ({
 		s.splice(i + 1, 0, { ...src, id, file: `slides/${id}.html` });
 		await get().saveDeck({ ...deck, slides: s });
 		get().setCurrent(i + 1);
-	},
+	}),
 	/** to 는 「이 자리 앞에」 — 끌어 놓기가 주는 값 그대로다 */
-	moveSlide: (from, to) => {
+	moveSlide: (from, to) => void deckStep(get, async () => {
 		const deck = get().deck;
 		if (!deck || from === to || from + 1 === to) return;
 		const s = [...deck.slides];
 		const [x] = s.splice(from, 1);
 		s.splice(to > from ? to - 1 : to, 0, x);
-		get().saveDeck({ ...deck, slides: s });
 		get().setCurrent(to > from ? to - 1 : to);
-	},
-	removeSlide: (i) => {
+		await get().saveDeck({ ...deck, slides: s });
+	}),
+	removeSlide: (i) => void deckStep(get, async () => {
 		const deck = get().deck;
 		if (!deck || deck.slides.length < 2) return;
-		get().saveDeck({ ...deck, slides: deck.slides.filter((_, k) => k !== i) });
 		get().setCurrent(Math.min(get().current > i ? get().current - 1 : get().current, deck.slides.length - 2));
-	},
+		await get().saveDeck({ ...deck, slides: deck.slides.filter((_, k) => k !== i) });
+	}),
 
 	addPin: (p, by = me(), id) => {
 		const pin: Pin = { ...p, id: id && /^[a-z0-9]{4,16}$/.test(id) && !get().pins.some((x) => x.id === id) ? id : Math.random().toString(36).slice(2, 9), at: Date.now(), by: by || undefined };
