@@ -22,9 +22,9 @@ export function setReport(dir: string, report: AuditReport) {
 	useCheck.setState({ dir, report, revs: { ...useDeck.getState().rev }, active: null, show: true });
 }
 
-/** 덱 전체의 항목을 한 줄로 — ◀ ▶ 차례 */
+/** 덱 전체의 항목을 한 줄로 — ◀ ▶ 차례. Claude 검토가 의도한 것으로 본 것(ok)은 건너뛴다 */
 export function flat(r: AuditReport | null) {
-	return (r?.slides || []).flatMap((s) => s.findings.map((f, i) => ({ slide: s.id, no: s.no, i, f })));
+	return (r?.slides || []).flatMap((s) => s.findings.map((f, i) => ({ slide: s.id, no: s.no, i, f })).filter((x) => !x.f.ok));
 }
 
 /** 그 항목으로 — 그 쪽으로 가고 걸린 요소를 강조한다 */
@@ -47,7 +47,7 @@ export function stepCheck(by: 1 | -1) {
 export const hideCheck = () => useCheck.setState({ show: false, active: null });
 
 /** 점검을 돌린다 — 점검 상자의 「점검 시작」 · 「다시 점검」과 무대 띠의 「다시 점검」이 같은 길이다. kinds 를 주지 않으면 지난번 갈래 */
-export async function runCheck(step: (i: number, n: number) => void, kinds?: AuditKind[]) {
+export async function runCheck(step: (i: number, n: number, note?: string) => void, kinds?: AuditKind[]) {
 	const { deck, dir, id } = useDeck.getState();
 	if (!deck) return null;
 	const { runAudit } = await import("./audit");

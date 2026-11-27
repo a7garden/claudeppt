@@ -574,7 +574,7 @@ async fn run(app: AppHandle, host: Host, mirror: Arc<tokio::sync::Mutex<Mirror>>
 		effort: c["effort"].as_str().unwrap_or(""),
 		resume: resume.as_deref(),
 		session_id: v["sessionId"].as_str(),
-		fonts: false,
+		mode: crate::claude::Mode::Edit,
 	};
 	let (out2, turn2, turn3, pids2, cancel2) = (out.clone(), turn.clone(), turn.clone(), pids.clone(), cancel.clone());
 	// 줄을 보내기 전에 쓴 파일부터 — 「고쳤다」는 줄이 화면에 닿을 때 덱에도 그 파일이 있게

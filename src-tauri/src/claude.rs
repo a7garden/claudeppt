@@ -8,6 +8,7 @@
 //   --tools                  파일 읽기 · 쓰기만. 셸 · 웹은 주지 않는다 — 프로젝트 폴더 밖을 건드릴 길을 막는다
 //                            단 「글꼴 찾기」(mode = "fonts")는 거꾸로 웹 찾기 · 웹 읽기만 주고 파일은 못 건드린다.
 //                            받아서 까는 일은 Claude 가 아니라 앱(fonts::font_install)이 한다 — 받은 것이 글꼴인지 앱이 가린다
+//                            「Claude 검토」(mode = "review")는 읽기 · 찾기만 준다. 검토는 짚기만 하고, 고치기는 사람이 「Claude 에게 고치기」로 따로 맡긴다
 //   --permission-prompts none 물어볼 일이 생기면 기다리지 않고 거절한다 (헤드리스라 답할 사람이 없다)
 // 구독 로그인(OAuth)은 그대로 쓴다. --bare 는 API 키만 받아 쓰지 않는다.
 
@@ -20,6 +21,7 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
 const TOOLS: &str = "Read,Edit,Write,Glob,Grep";
 const FONT_TOOLS: &str = "WebSearch,WebFetch";
+const REVIEW_TOOLS: &str = "Read,Glob,Grep";
 
 #[derive(Serialize)]
 pub struct Detected {
@@ -173,7 +175,7 @@ pub struct RunSpec {
 	resume: Option<String>,
 	/// 새 세션의 id — 앱이 정해 --session-id 로 준다. 그래야 턴이 멈춰 init 사건을 못 받아도 그 세션의 기록을 찾아 남긴다
 	session_id: Option<String>,
-	/// None 이면 쪽 고치기. "fonts" 면 글꼴 찾기 (위 머리말)
+	/// None 이면 쪽 고치기. "fonts" 면 글꼴 찾기 · "review" 면 점검의 Claude 검토 (위 머리말)
 	mode: Option<String>,
 }
 
@@ -311,7 +313,15 @@ pub struct Job<'a> {
 	pub effort: &'a str,
 	pub resume: Option<&'a str>,
 	pub session_id: Option<&'a str>,
-	pub fonts: bool,
+	pub mode: Mode,
+}
+
+/// 무엇을 하러 띄우는가 — 줄 도구가 갈린다 (머리말)
+#[derive(Clone, Copy, PartialEq)]
+pub enum Mode {
+	Edit,
+	Fonts,
+	Review,
 }
 
 /// 끝난 claude — 종료 코드 · 오류 출력 끝부분 · 이 턴이 쓴 세션 id
@@ -333,12 +343,12 @@ pub async fn execute(job: Job<'_>, mut on_line: impl FnMut(String) + Send, on_pi
 		"-p", "--output-format", "stream-json", "--verbose", "--include-partial-messages",
 		"--safe-mode", "--setting-sources", "",
 		"--strict-mcp-config", "--disable-slash-commands",
-		"--tools", if job.fonts { FONT_TOOLS } else { TOOLS },
+		"--tools", match job.mode { Mode::Edit => TOOLS, Mode::Fonts => FONT_TOOLS, Mode::Review => REVIEW_TOOLS },
 		"--permission-mode", "acceptEdits", "--permission-prompts", "none",
 	]
 	.map(String::from)
 	.to_vec();
-	if job.fonts {
+	if job.mode == Mode::Fonts {
 		// 웹 도구는 acceptEdits 로 허락되지 않는다 — 물어볼 사람이 없으니 미리 허락해 둔다
 		args.extend(["--allowedTools".into(), FONT_TOOLS.into()]);
 	}
@@ -419,7 +429,7 @@ pub async fn claude_run(app: AppHandle, state: State<'_, AppState>, spec: RunSpe
 		effort: &spec.effort,
 		resume,
 		session_id: spec.session_id.as_deref(),
-		fonts: spec.mode.as_deref() == Some("fonts"),
+		mode: match spec.mode.as_deref() { Some("fonts") => Mode::Fonts, Some("review") => Mode::Review, _ => Mode::Edit },
 	};
 	let ended = execute(job, move |line| { let _ = app2.emit("claude", Line { turn: turn2.clone(), line }); }, |pid| { runs.lock().unwrap().insert(turn.clone(), pid); }).await;
 	state.runs.lock().unwrap().remove(&turn);

@@ -2,11 +2,12 @@
 // 2026.11.18 : 내보내기의 「비교」는 무대 도구 띠 오른쪽으로 옮겼다 — 내보내는 일이 아니라 무대에서 보는 일이다.
 // 2026.11.26 : 「점검」(처음 이름은 감사)을 더했다 — 서식 · 배치 · 표현 규칙에 걸린 곳을 쪽마다 짚고, 고르면 Claude 에게 고치게 한다 (audit.ts).
 //              「쪽 설정」을 더했다 — 덱의 쪽 여백을 네 변으로 정한다.
+// 2026.11.27 : 점검에 「Claude 검토」 갈래를 더했다 — 규칙 점검이 잰 것과 쪽 그림을 함께 넘겨, 규칙이 못 보는 것을 짚고 규칙 결과 가운데 의도한 것을 가린다 (review.ts).
 import { save } from "@tauri-apps/plugin-dialog";
 import { useEffect, useRef, useState } from "react";
 import { api, join } from "../lib/api";
 import { type Margins, repageCss, safeName } from "../lib/deck";
-import type { AuditKind } from "../lib/audit";
+import { AUDIT_KINDS, type AuditKind } from "../lib/audit";
 import { focus, hideCheck, runCheck, useCheck, useGuides } from "../lib/checkView";
 import { type Key, useT } from "../lib/i18n";
 import { deckTemplate, pageMargins } from "../lib/prompt";
@@ -138,13 +139,17 @@ const KINDS: { k: AuditKind; label: Key; hint: Key }[] = [
 	{ k: "template", label: "auditKindTemplate", hint: "auditKindTemplateHint" },
 	{ k: "layout", label: "auditKindLayout", hint: "auditKindLayoutHint" },
 	{ k: "slop", label: "auditKindSlop", hint: "auditKindSlopHint" },
+	{ k: "review", label: "auditKindReview", hint: "auditKindReviewHint" },
 ];
+/** 고를 수 있는 갈래 — 공유 덱 창(브라우저)에서는 이 PC 의 Claude 를 띄울 수 없어 Claude 검토를 뺀다 */
+const PICKABLE = KINDS.filter((x) => !remote || x.k !== "review");
 const kindLabel = (k: AuditKind): Key => KINDS.find((x) => x.k === k)!.label;
 /** 고른 갈래 — 이 PC 에 기억한다 */
 const KINDS_KEY = "cppt.checkKinds";
 const savedKinds = (): AuditKind[] => {
-	try { const v = JSON.parse(localStorage.getItem(KINDS_KEY) || "null"); if (Array.isArray(v) && v.length) return v; } catch {}
-	return KINDS.map((x) => x.k);
+	try { const v = JSON.parse(localStorage.getItem(KINDS_KEY) || "null"); if (Array.isArray(v)) { const ok = v.filter((k) => PICKABLE.some((x) => x.k === k)); if (ok.length) return ok; } } catch {}
+	// 처음에는 규칙 갈래만 — Claude 검토는 몇 분 걸리고 사용량을 쓴다
+	return AUDIT_KINDS;
 };
 
 /** 점검 — 누르면 먼저 무엇을 볼지(갈래 · 추가 지시)를 정하고 「점검 시작」. 결과의 항목을 누르면 그 쪽으로 가서 걸린 요소를 무대에 표시한다.
@@ -159,7 +164,7 @@ function AuditPop({ onDone }: { onDone: () => void }) {
 	const [note, setNote] = useState<string | null>(null);
 	const loaded = useRef("");
 	useEffect(() => { import("../lib/audit").then((a) => a.readAuditNote(dir)).then((n) => { loaded.current = n; setNote(n); }); }, [dir]);
-	const [step, setStep] = useState<[number, number] | null>(null);
+	const [step, setStep] = useState<[number, number, string?] | null>(null);
 	const [kind, setKind] = useState<AuditKind | "all">("all");
 	const run = async (ks?: AuditKind[]) => {
 		const { deck, notify } = useDeck.getState();
@@ -172,7 +177,7 @@ function AuditPop({ onDone }: { onDone: () => void }) {
 				await writeAuditNote(dir, note);
 				loaded.current = note.trim();
 			}
-			await runCheck((i, n) => setStep([i, n]), ks);
+			await runCheck((i, n, msg) => setStep([i, n, msg]), ks);
 			setKind("all");
 			setSetup(false);
 		} catch (e) { notify(String(e), "err"); }
@@ -181,9 +186,21 @@ function AuditPop({ onDone }: { onDone: () => void }) {
 	const toggle = (k: AuditKind) => setKinds((v) => (v.includes(k) ? v.filter((x) => x !== k) : KINDS.map((x) => x.k).filter((x) => x === k || v.includes(x))));
 
 	if (step) {
+		// 둘째 단계(Claude 검토)는 쪽 수로 잴 수 없어 막대 대신 지금 보는 쪽을 한 줄로 보이고, 멈출 수 있게 한다
+		const claude = step[2] !== undefined;
 		return (
 			<div className="pop audit">
-				<div className="head"><b>{t("auditRunning")}</b><span className="mono">{step[0]}/{step[1]}</span><div className="audit-bar"><i style={{ width: `${step[1] ? (step[0] / step[1]) * 100 : 0}%` }} /></div></div>
+				<div className="head">
+					<b>{claude ? t("reviewRunning") : t("auditRunning")}</b>
+					<span className={claude ? "" : "mono"}>{claude ? step[2] : `${step[0]}/${step[1]}`}</span>
+					<div className={"audit-bar" + (claude ? " wait" : "")}><i style={{ width: claude ? "100%" : `${step[1] ? (step[0] / step[1]) * 100 : 0}%` }} /></div>
+				</div>
+				{claude && (
+					<div className="acts">
+						<span className="dim">{t("reviewStopHint")}</span>
+						<button className="ghost" onClick={() => import("../lib/review").then((r) => r.stopReview())}>{t("reviewStop")}</button>
+					</div>
+				)}
 			</div>
 		);
 	}
@@ -193,7 +210,7 @@ function AuditPop({ onDone }: { onDone: () => void }) {
 			<div className="pop audit">
 				<div className="head"><b>{t("audit")}</b><span>{t("auditIntro")}</span></div>
 				<div className="audit-pick" role="group" aria-label={t("auditWhat")}>
-					{KINDS.map((x) => (
+					{PICKABLE.map((x) => (
 						<label key={x.k} className="check">
 							<input type="checkbox" checked={kinds.includes(x.k)} onChange={() => toggle(x.k)} />
 							<span><b>{t(x.label)}</b><span className="dim">{t(x.hint)}</span></span>
@@ -215,7 +232,9 @@ function AuditPop({ onDone }: { onDone: () => void }) {
 
 	const pick = (k: AuditKind | "all") => report.slides.map((s) => ({ ...s, findings: s.findings.map((f, i) => ({ f, i })).filter((x) => k === "all" || x.f.kind === k) })).filter((s) => s.findings.length);
 	const shown = pick(kind);
-	const count = (k: AuditKind | "all") => pick(k).reduce((n, s) => n + s.findings.length, 0);
+	// 건수에서는 Claude 검토가 의도한 것으로 본 것을 뺀다 (목록에는 흐리게 남는다)
+	const count = (k: AuditKind | "all") => pick(k).reduce((n, s) => n + s.findings.filter((x) => !x.f.ok).length, 0);
+	const live = (k: AuditKind | "all") => pick(k).filter((s) => s.findings.some((x) => !x.f.ok));
 	const fix = async () => {
 		const { auditFixPrompt } = await import("../lib/audit");
 		const text = auditFixPrompt(report, kind === "all" ? undefined : [kind]);
@@ -228,9 +247,10 @@ function AuditPop({ onDone }: { onDone: () => void }) {
 	return (
 		<div className="pop audit">
 			<div className="head">
-				<b>{count("all") ? t("auditSummary").replace("{s}", String(pick("all").length)).replace("{n}", String(count("all"))) : t("auditClean")}</b>
+				<b>{count("all") ? t("auditSummary").replace("{s}", String(live("all").length)).replace("{n}", String(count("all"))) : t("auditClean")}</b>
 				<span>{[report.template ? t("auditOf").replace("{v}", report.template) : t("auditNoTemplate"), report.kinds.map((k) => t(kindLabel(k))).join(" · ")].join(" · ")}</span>
 				{report.note && <span className="audit-noted" title={report.note}>{t("auditNote")}: {report.note.replace(/\s+/g, " ")}</span>}
+				{report.reviewError && <span className="audit-err" title={report.reviewError}>{t("reviewFailed")}: {report.reviewError}</span>}
 			</div>
 			{count("all") > 0 && report.kinds.length > 1 && (
 				<div className="seg audit-kinds" role="group">
@@ -242,14 +262,19 @@ function AuditPop({ onDone }: { onDone: () => void }) {
 				<div className="audit-list">
 					{shown.map((s) => (
 						<section key={s.id}>
-							<button className="slide-row" onClick={() => { focus(s.id, s.findings[0].i); onDone(); }} title={s.title}>
+							<button className="slide-row" onClick={() => { focus(s.id, (s.findings.find((x) => !x.f.ok) ?? s.findings[0]).i); onDone(); }} title={s.title}>
 								<span className="mono">{s.no}</span><span className="t">{s.title || t("untitled")}</span>
 							</button>
 							<ul>
-								{s.findings.map(({ f, i }) => (
+								{s.findings.map(({ f, i }) => f.ok ? (
+									// Claude 검토가 의도한 것으로 본 규칙 결과 — 왜 그렇게 봤는지만 흐리게. 고치기에는 실리지 않는다
+									<li key={i} className="ok">
+										<span><span className={"k k-" + f.kind}>{t(kindLabel(f.kind))}</span><span><s>{f.msg}</s> <span className="why">{t("reviewIntended")}: {f.ok}</span></span></span>
+									</li>
+								) : (
 									<li key={i}>
 										<button onClick={() => { focus(s.id, i); onDone(); }} title={t("auditShow")}>
-											<span className={"k k-" + f.kind}>{t(kindLabel(f.kind))}</span><span>{f.msg}</span>
+											<span className={"k k-" + f.kind}>{t(kindLabel(f.kind))}</span><span>{f.sev === "high" && <em className="sev">{t("reviewHigh")}</em>}{f.msg}</span>
 										</button>
 									</li>
 								))}

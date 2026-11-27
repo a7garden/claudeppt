@@ -83,7 +83,7 @@ export const api = {
 	restore: (dir: string, hash: string, message: string, author?: string) => invoke<Commit | null>("vcs_restore", { dir, hash, message, author: author || null }),
 
 	claudeDetect: (path: string) => invoke<{ path: string; version: string } | null>("claude_detect", { path }),
-	claudeRun: (spec: { turn: string; dir: string; cwd?: string; prompt: string; system: string; claudePath: string; model: string; effort: string; resume?: string | null; sessionId?: string | null; mode?: "fonts" }) => invoke<{ code: number; stderr: string }>("claude_run", { spec }),
+	claudeRun: (spec: { turn: string; dir: string; cwd?: string; prompt: string; system: string; claudePath: string; model: string; effort: string; resume?: string | null; sessionId?: string | null; mode?: "fonts" | "review" }) => invoke<{ code: number; stderr: string }>("claude_run", { spec }),
 	claudeStop: (turn: string) => invoke<void>("claude_stop", { turn }),
 	/** 팀원 PC 의 Claude 로 돌린다 (collab.rs claude_run_remote) — claudeRun 과 같은 답 */
 	claudeRunRemote: (spec: { turn: string; dir: string; work?: string; device: string; prompt: string; system: string; resume?: string | null; sessionId?: string | null }) => invoke<{ code: number; stderr: string }>("claude_run_remote", { spec }),
