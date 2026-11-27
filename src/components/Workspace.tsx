@@ -856,6 +856,8 @@ function PinMark({ pin, n, scale, flip, open, onOpen, onClose }: { pin: Pin; n: 
 	const [text, setText] = useState(pin.text);
 	useEffect(() => setText(pin.text), [pin.text]);
 	const commit = () => { if (text !== pin.text) update(pin.id, text); };
+	// 바로 고치기 (2026.11.27) — 적은 말을 이 핀 하나만 실어 바로 Claude 에게. 전에는 Enter 가 적어 두기뿐이라 요청칸에서 따로 보내야 했다
+	const run = () => { commit(); onClose(); useDeck.getState().sendPin(pin.id); };
 	return (
 		<div className={"pinmark" + (pin.text ? "" : " draft")} style={{ left: pin.x * scale, top: pin.y * scale }} onClick={(e) => e.stopPropagation()}>
 			<button className="dot" onClick={onOpen} aria-label={`${t("pin")} ${n}`}><span>{n}</span></button>
@@ -863,6 +865,7 @@ function PinMark({ pin, n, scale, flip, open, onOpen, onClose }: { pin: Pin; n: 
 				<div className="pin-note" style={flip ? { left: "auto", right: 16 } : undefined}>
 					<textarea autoFocus value={text} placeholder={t("pinPlaceholder")} onChange={(e) => setText(e.target.value)} onBlur={commit}
 						onKeyDown={(e) => {
+							if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) { e.preventDefault(); run(); return; }
 							if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); commit(); onClose(); }
 							if (e.key === "Escape") { e.stopPropagation(); commit(); onClose(); }
 						}} />
@@ -870,6 +873,7 @@ function PinMark({ pin, n, scale, flip, open, onOpen, onClose }: { pin: Pin; n: 
 						{/* 가리킨 자리의 글 — 좌표 · 태그 이름은 Claude 에게만 간다 */}
 						<span className="at" title={pin.target?.text || undefined}>{pin.target?.text || ""}</span>
 						<button onClick={() => { remove(pin.id); onClose(); }}>{t("delete")}</button>
+						<button className="send" onClick={run} disabled={!text.trim() && !pin.shape} title={t("pinRunHint")}>{t("pinRunNow")}</button>
 					</div>
 				</div>
 			)}

@@ -223,6 +223,9 @@ input, textarea, select { font: inherit; color: inherit; }
 .pin-note .row .at { flex: 1 1 auto; min-width: 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
 .pin-note .row button { flex: none; white-space: nowrap; color: var(--dim); }
 .pin-note .row button:hover { color: var(--text); }
+/* 바로 고치기 — 말풍선에서 하나만 채운 단추. 글자색은 .send 그대로(줄의 흐린 글자색을 덮는다) */
+.pin-note .row .send, .pin-note .row .send:hover { color: var(--bg); height: 24px; padding: 0 8px; }
+.pin-note .row .send[disabled] { opacity: 0.4; }
 
 /* 판 비교 렌즈 — 아래가 지금(무대 iframe), 위가 고른 판. 가름선 왼쪽이 고른 판이다.
    이름표는 슬라이드 안 아래 모서리에 — 위 여백은 도구 띠 · 비교 단추가 쓴다 */

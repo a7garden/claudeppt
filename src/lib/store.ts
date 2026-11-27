@@ -21,7 +21,7 @@ import { listen } from "@tauri-apps/api/event";
 import { create } from "zustand";
 import { api, type Commit, type Hold, type Landed, type Sian, type Where } from "./api";
 import { type Deck, newId, readDeck, slideHtml, writeDeck } from "./deck";
-import { applyOp, type Op } from "./edits";
+import { applyOp, locate, type Op } from "./edits";
 // 내보내기 · 검사(pptxgenjs · jszip)는 쓸 때 불러온다 — 시작 청크를 가볍게
 import type { Built } from "./exportPptx";
 import type { Report } from "./check";
@@ -660,6 +660,16 @@ async function sendTurn(get: () => S, set: (p: Partial<S>) => void, text: string
 				patch((t) => ({ ...t, phase: tNow("marking") }));
 				attachments = [...attachments, ...(await markedPictures(dir, get().id, deck, notes).catch(() => []))];
 				patch((t) => ({ ...t, phase: undefined }));
+			}
+			// 핀이 가리킨 요소를 사본의 쪽 파일에서 찾아 CSS 경로 · HTML 조각을 붙인다 (2026.11.27) — 태그 · 글만 주면 Claude 가 쪽 전체를 보고 짐작했다
+			for (const n of notes) {
+				const file = deck.slides.find((x) => x.id === n.slide)?.file;
+				if (!file) continue;
+				n.file = file;
+				if (!n.target?.path?.length || n.shape) continue;
+				const src = await api.readText(work, file).catch(() => null);
+				const at = src ? locate(src, n.target.path, n.target.text) : null;
+				if (at) n.target = { ...n.target, ...at };
 			}
 			// 첨부 · 표시 그림은 덱의 .claudeppt 에 있다 — 판에 들지 않아 사본에 없으므로 옮긴다
 			if (attachments.length) await api.workBring(dir, key, attachments);

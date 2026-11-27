@@ -13,6 +13,37 @@ export type Op =
 	| { t: "after"; html: string }
 	| { t: "order"; to: number };
 
+/** 글 줄 안에 드는 꾸밈 요소 — 핀이 낱말 하나에 꽂혀도 그 낱말을 감싼 것이 아니라 그 문단 · 제목을 가리키게 */
+const INLINE = new Set(["SPAN", "B", "STRONG", "I", "EM", "U", "A", "BR", "SUP", "SUB", "CODE", "SMALL", "MARK", "S", "DEL", "INS", "LABEL", "ABBR", "Q"]);
+
+/**
+ * 핀이 가리킨 요소를 원본 HTML 에서 찾아 Claude 가 바로 찾아갈 꼴로 — CSS 경로(nth-child)와 그 요소의 HTML 조각 (2026.11.27).
+ * 전에는 「<div> "글"」만 넘겨, 같은 글이 여럿이거나 글 없는 요소(그림 · 도형 · 상자)면 Claude 가 쪽 전체를 보고 짐작했다.
+ * label 은 핀을 꽂을 때 그 요소의 글 — 그 뒤 쪽이 바뀌어 같은 길이 다른 요소를 가리키면(글이 안 맞으면) 돌려주지 않는다
+ */
+export function locate(src: string, path: number[] | null, label = ""): { css: string; html: string } | null {
+	if (!path?.length) return null;
+	const doc = new DOMParser().parseFromString(src, "text/html");
+	const root = doc.querySelector(".slide") || doc.body;
+	const chain: Element[] = [];
+	let el: Element | null = root;
+	for (const i of path) {
+		el = el?.children[i] ?? null;
+		if (!el) return null;
+		chain.push(el);
+	}
+	// 핀의 글은 화면에 보인 글(innerText · 대문자 꾸밈) 또는 그림의 alt, 60자에서 잘린다 — 앞부분만 대소문자 없이 견준다
+	const want = label.replace(/\s+/g, " ").replace(/…$/, "").trim().slice(0, 24).toLowerCase();
+	const have = `${el!.textContent ?? ""} ${el!.getAttribute("alt") ?? ""}`.replace(/\s+/g, " ").toLowerCase();
+	if (want && !have.includes(want)) return null;
+	// 낱말을 감싼 꾸밈 요소면 그것을 담은 덩어리까지 올라간다
+	while (chain.length > 1 && INLINE.has(chain[chain.length - 1].tagName)) chain.pop();
+	const head = root.tagName.toLowerCase() + (root.classList[0] ? `.${root.classList[0]}` : "");
+	const css = [head, ...chain.map((e) => `${e.tagName.toLowerCase()}:nth-child(${[...e.parentElement!.children].indexOf(e) + 1})`)].join(" > ");
+	const html = chain[chain.length - 1].outerHTML.replace(/\s+/g, " ");
+	return { css, html: html.length > 700 ? html.slice(0, 700) + " …" : html };
+}
+
 export async function applyOp(dir: string, file: string, p: number[] | null, op: Op) {
 	if (!p) return false;
 	const src = await api.readText(dir, file);

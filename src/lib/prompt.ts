@@ -124,11 +124,16 @@ export function systemPrompt(s: Settings, deck: Deck) {
 }
 
 /** by — 의견을 남긴 팀원 (협업). 보낸 사람과 다르면 Claude 에게 누구의 의견인지 알린다 */
-export interface PinNote { n: number; slide: string; slideNo: number; x: number; y: number; text: string; target?: { tag: string; text: string; path: number[] | null }; shape?: Shape; by?: string }
+/** target.css · target.html — 보낼 때 원본에서 찾은 그 요소의 CSS 경로와 HTML 조각 (edits.ts locate). 없으면 태그 · 글로만 가리킨다. file — 그 쪽 파일 */
+export interface PinNote { n: number; slide: string; slideNo: number; x: number; y: number; text: string; target?: { tag: string; text: string; path: number[] | null; css?: string; html?: string }; shape?: Shape; by?: string; file?: string }
 
 /** 핀 하나를 Claude 가 읽을 글로 — 앱 안 턴의 요청문과 바깥 CLI 의 pins 가 같은 글이다 */
+// 2026.11.27 : 요소를 찾았으면(target.css) 그 요소만 고치라 이른다 — 쪽 전체로 받아 다른 곳까지 고치던 것을 막는다
 export const pinLine = (p: PinNote) =>
-	`${p.n}. slide ${p.slideNo} (slides/${p.slide}.html) ` + (p.shape ? describe(p.shape) : `at (${Math.round(p.x)}, ${Math.round(p.y)})`) + (p.target ? ` on <${p.target.tag}>${p.target.text ? ` "${p.target.text}"` : ""}` : "") + (p.by ? ` (comment by ${p.by})` : "") + `\n   ${p.text.trim() || (p.shape ? "(no comment — look at what this mark shows)" : "(no comment — look at this spot)")}`;
+	`${p.n}. slide ${p.slideNo} (${p.file ?? `slides/${p.slide}.html`}) ` + (p.shape ? describe(p.shape) : `at (${Math.round(p.x)}, ${Math.round(p.y)})`) +
+	(p.target?.css ? ` on the element \`${p.target.css}\`` : p.target ? ` on <${p.target.tag}>${p.target.text ? ` "${p.target.text}"` : ""}` : "") +
+	(p.by ? ` (comment by ${p.by})` : "") + `\n   ${p.text.trim() || (p.shape ? "(no comment — look at what this mark shows)" : "(no comment — look at this spot)")}` +
+	(p.target?.html ? `\n   That element now: ${p.target.html}\n   This comment is about that element: change it (and what is inside it) only, and leave the rest of the slide as it is unless the comment clearly asks for more.` : "");
 
 /** 덱의 지금 모습 — 제목과 쪽 목록(번호 · 파일 · 제목). 쪽을 더하고 빼도 시스템 프롬프트가 바뀌지 않게 요청마다 싣는다.
  *  목록이 있으면 Claude 가 deck.json 을 읽으러 오가는 일도 준다. 아주 긴 덱은 앞 80쪽만 */
