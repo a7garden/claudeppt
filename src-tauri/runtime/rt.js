@@ -1305,7 +1305,8 @@
 		if (w && tt.contains(w.startContainer)) { const s = getSelection(); s.removeAllRanges(); s.addRange(w); }
 	});
 	// 휠 · 쪽 넘김 키는 앱으로 넘긴다 — 슬라이드 창이 받아 버리면 무대 위에서 휠을 굴리거나, 슬라이드를 한 번 누른 뒤 방향키를 눌러도 쪽이 안 넘어간다
-	addEventListener("wheel", (e) => post({ t: "wheel", dy: e.deltaY }), { passive: true });
+	// Ctrl+휠은 무대 확대/축소다 — 웹뷰가 슬라이드 창만 따로 키우지 않게 막는다
+	addEventListener("wheel", (e) => { if (e.ctrlKey) e.preventDefault(); post({ t: "wheel", dy: e.deltaY, dx: e.deltaX, ctrl: e.ctrlKey }); }, { passive: false });
 	// 우클릭도 앱으로 넘긴다 — 웹뷰 기본 메뉴(뒤로 · 새로 고침)는 슬라이드 창을 엉뚱한 곳으로 보낸다.
 	// 글자를 고치는 중이면 기본 메뉴(붙여 넣기 · 맞춤법)를 그대로 쓴다
 	addEventListener("contextmenu", (e) => {
@@ -1320,6 +1321,8 @@
 	const flushNudge = () => { if (nudge) { clearTimeout(nudge.timer); const f = nudge.fn; nudge = null; f(); } };
 	addEventListener("keydown", (e) => {
 		const k = e.key.toLowerCase(), ctrl = e.ctrlKey && !e.altKey;
+		// F5 · Shift+F5 는 슬라이드 쇼 (PowerPoint 와 같다) — 웹뷰가 슬라이드 창을 새로 고치지 않게 앱으로 넘긴다
+		if (e.key === "F5") { if (edit) edit.el.blur(); post({ t: "key", key: "F5", shift: e.shiftKey }); e.preventDefault(); return; }
 		// 되돌리기 · 다시 하기는 앱이 한다 (손으로 고친 것을 파일째 되쓴다). 글자를 고치는 중이면 그 글의 되돌리기를 쓴다
 		if (ctrl && ["z", "y"].includes(k) && !document.activeElement?.isContentEditable) {
 			// 아직 파일에 쓰지 않은 방향키 이동이 있으면 먼저 쓴다 — 안 그러면 되돌린 뒤에 늦게 쓰여 되돌림을 덮는다

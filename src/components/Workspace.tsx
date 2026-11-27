@@ -26,6 +26,7 @@ import { CheckBar, CheckMarks, PageGuides } from "./CheckMarks";
 import { remote } from "../lib/transport";
 import { useSettings } from "../lib/settings";
 import Talk, { openTalk, useTalkFold } from "./Talk";
+import { NotesPane, SlideShow, StageStatus, startShow, useView, zoomStep } from "./Show";
 
 /** 담당이 아니라 내용 없이 자리만 받은 쪽 (2026.11.27 collab.rs limit_view) — 쪽 그림 대신. 덱 주인이 「담당 쪽만 보이기」를 켠 사람에게만 생긴다 */
 function LockedSlide({ width, height }: { width: number; height: number }) {
@@ -142,6 +143,11 @@ function toolKey(raw: string): boolean {
 	return true;
 }
 
+/** F5 처음부터 · Shift+F5 지금 쪽부터 슬라이드 쇼 (PowerPoint 와 같다). 웹뷰의 새로 고침 대신 */
+function showKey(here: boolean) {
+	startShow(here ? undefined : 0);
+}
+
 /** Esc — 비교를 닫고, 지난 판을 보는 중이면 지금으로 돌아오고, 아니면 고르기 도구로. 앱 화면에서 누른 것도 슬라이드 창이 넘겨준 것도 */
 function escKey() {
 	const st = useDeck.getState();
@@ -254,6 +260,7 @@ export default function Workspace() {
 	useEffect(() => {
 		const k = (e: KeyboardEvent) => {
 			const tgt = e.target as Element;
+			if (e.key === "F5") { showKey(e.shiftKey); e.preventDefault(); return; }
 			if (tgt.closest?.("input, textarea, [contenteditable]") || e.ctrlKey || e.altKey || e.metaKey) return;
 			if (!toolKey(e.key) && !navKey(e.key)) {
 				if (e.key === "Escape") escKey();
@@ -270,8 +277,10 @@ export default function Workspace() {
 	// 대화를 접으면 등뼈 폭만 남는다 — 무대가 그만큼 넓어진다. 펼 때는 접기 전 너비로
 	const folded = useTalkFold((s) => s.folded);
 	const sideW = folded ? 44 : talkW;
+	const show = useView((s) => s.show);
 	return (
 		<main className="work" style={{ gridTemplateColumns: `${railW}px minmax(0, 1fr) ${sideW}px` }}>
+			{show && <SlideShow />}
 			<Rail />
 			<Stage />
 			<Talk />
@@ -444,6 +453,7 @@ function Stage() {
 	selNow.current = selInfo;
 	const [placing, setPlacing] = useState<string | null>(null);
 	const ribbon = useRibbon((s) => s.shown);
+	const notesOpen = useView((s) => s.notes);
 	const slide = deck.slides[Math.min(current, deck.slides.length - 1)];
 
 	useLayoutEffect(() => {
@@ -453,8 +463,17 @@ function Stage() {
 		return () => ro.disconnect();
 	}, []);
 	const pad = 36;
-	const scale = Math.max(0.05, Math.min((box.w - pad * 2) / deck.size.w, (box.h - pad * 2) / deck.size.h));
-	const left = (box.w - deck.size.w * scale) / 2, top = (box.h - deck.size.h * scale) / 2;
+	// 맞춤 배율 · 지금 배율. 확대해서 쪽이 무대보다 크면 무대를 굴려 본다 (scrolls)
+	const fit = Math.max(0.05, Math.min((box.w - pad * 2) / deck.size.w, (box.h - pad * 2) / deck.size.h));
+	const zoom = useView((s) => s.zoom);
+	const scale = flow ? fit : zoom ?? fit;
+	const fitRef = useRef(fit);
+	fitRef.current = fit;
+	const W = deck.size.w * scale, H = deck.size.h * scale;
+	const scrollX = W + pad * 2 > box.w, scrollY = H + pad * 2 > box.h;
+	const scrolls = useRef(false);
+	scrolls.current = !flow && (scrollX || scrollY);
+	const left = scrollX ? pad : (box.w - W) / 2, top = scrollY ? pad : (box.h - H) / 2;
 
 	// 직접 편집 — 무대 iframe 이 보낸 것만 받는다
 	useEffect(() => onFrame((m, src) => {
@@ -464,8 +483,13 @@ function Stage() {
 		const edit = (path: number[] | null, op: Parameters<typeof applyDirect>[2]) => applyDirect(sid, path, op, undefined, seen.rev);
 		const now = src === win.current;
 		// 슬라이드 창 위에서 굴린 휠 · 누른 넘김 키 (rt.js 가 넘겨준다) · 고른 것의 서식 · 넣는 중인 것
-		if (now && m.t === "wheel") return wheel(m.dy);
-		if (now && m.t === "key") return void (m.key === "Escape" ? escKey() : navKey(m.key) || toolKey(m.key));
+		// 휠: Ctrl 이면 확대/축소, 확대해서 쪽이 무대보다 크면 무대를 굴린다, 아니면 쪽 넘기기
+		if (now && m.t === "wheel") {
+			if (m.ctrl) return zoomStep(m.dy < 0 ? 1 : -1, fitRef.current);
+			if (scrolls.current && canvas.current) return void canvas.current.scrollBy({ left: m.dx || 0, top: m.dy });
+			return wheel(m.dy);
+		}
+		if (now && m.t === "key") return void (m.key === "Escape" ? escKey() : m.key === "F5" ? showKey(!!m.shift) : navKey(m.key) || toolKey(m.key));
 		if (now && m.t === "sel") { selNow.current = m.info; return setSelInfo(m.info); }
 		if (now && m.t === "placing") return setPlacing(m.kind);
 		// 고치는 중 띠의 잘라내기 · 복사: 고른 글자를 클립보드에 쓴다. 단추를 누른 직후라 사용자 활성이 남아 있어 쓸 수 있다
@@ -603,7 +627,10 @@ function Stage() {
 					</div>
 				)}
 			</div>
-			<div className="canvas" ref={canvas} onWheel={flow ? undefined : (e) => wheel(e.deltaY)} onContextMenu={stageMenu}>
+			<div className="canvas" ref={canvas} style={scrolls.current ? { overflow: "auto" } : undefined} onContextMenu={stageMenu}
+				onWheel={flow ? undefined : (e) => { if (e.ctrlKey) zoomStep(e.deltaY < 0 ? 1 : -1, fit); else if (!scrolls.current) wheel(e.deltaY); }}>
+				{/* 굴려 볼 때 오른쪽 · 아래 여백까지 닿게 하는 자리 */}
+				{scrolls.current && <div aria-hidden style={{ position: "absolute", left: 0, top: 0, width: W + pad * 2, height: H + pad * 2, pointerEvents: "none" }} />}
 				{flow ? <Flow deck={deck} revHash={preview?.hash} /> : box.w > 0 && (
 					<div className="sheet" style={{ left, top, width: deck.size.w * scale, height: deck.size.h * scale }}>
 						<div style={{ width: deck.size.w * scale, height: deck.size.h * scale, overflow: "hidden", position: "relative" }}>
@@ -625,7 +652,9 @@ function Stage() {
 			{!preview && box.w > 0 && (flow
 				// 이어 보기에서는 띠를 무대 위쪽에 띄워 둔다 — 첫 쪽 위 여백(FLOW_PAD)에 들어가고, 스크롤해도 그 자리에 남는다
 				? <StageTools left={(box.w - flowWidth(box.w, deck)) / 2} top={52} right={(box.w + flowWidth(box.w, deck)) / 2} onUndo={undoMark} canUndo={mine.length > 0} />
-				: <StageTools left={left} top={top} right={left + deck.size.w * scale} onUndo={undoMark} canUndo={mine.length > 0} onAsk={selInfo && !preview && !compare ? askSelected : undefined} />)}
+				: <StageTools left={scrolls.current ? 12 : left} top={scrolls.current ? 0 : top} right={scrolls.current ? box.w - 12 : left + deck.size.w * scale} onUndo={undoMark} canUndo={mine.length > 0} onAsk={selInfo && !preview && !compare ? askSelected : undefined} />)}
+			{notesOpen && !flow && <NotesPane slideId={slide.id} />}
+			<StageStatus fit={fit} scale={scale} />
 			</div>
 		</section>
 	);

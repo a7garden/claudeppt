@@ -158,6 +158,8 @@ interface S {
 	refill: (text: string) => void;
 	addSlide: (at: number) => Promise<void>;
 	duplicateSlide: (i: number) => Promise<void>;
+	/** 발표자 메모 (deck.json 의 쪽 notes) — 내보내면 PowerPoint 슬라이드 노트가 된다 */
+	setNotes: (slideId: string, notes: string) => Promise<void>;
 	moveSlide: (from: number, to: number) => void;
 	removeSlide: (i: number) => void;
 	/** by · id — 협업 브라우저 팀원이 꽂은 핀 (그 사람 이름 · 브라우저가 정한 id) */
@@ -993,6 +995,13 @@ export const useDeck = create<S>()((set, get) => ({
 		s.splice(at, 0, { id, file: `slides/${id}.html` });
 		await get().saveDeck({ ...deck, slides: s });
 		get().setCurrent(at);
+	}),
+	setNotes: (slideId, notes) => deckStep(get, async () => {
+		const deck = get().deck;
+		const ref = deck?.slides.find((s) => s.id === slideId);
+		const v = notes.replace(/\s+$/, "");
+		if (!deck || !ref || (ref.notes || "") === v) return;
+		await get().saveDeck({ ...deck, slides: deck.slides.map((s) => (s.id === slideId ? { ...s, notes: v || undefined } : s)) });
 	}),
 	duplicateSlide: (i) => deckStep(get, async () => {
 		const { dir, deck } = get();
