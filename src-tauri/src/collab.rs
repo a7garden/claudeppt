@@ -137,6 +137,8 @@ pub struct Member {
 	/// 앱 팀원은 자기 PC 의 Claude · 자기 세션, 브라우저 팀원은 덱 주인의 것 (collab.ts 「send」). 브라우저인 척해도 얻는 것은 브라우저 팀원 몫뿐이다.
 	/// 알려 오기 전(None)에는 아무 대화도 보내지 않는다 — 앱 팀원에게 덱 주인 대화가 잠깐 건너가지 않게
 	app: Option<bool>,
+	/// 덱 주인이 정한 권한 (invite.rs Role) — 팀원 화면이 단추를 감추고 「내 담당」을 보이는 데 쓴다. 막는 것은 서버(on_message) · 덱 주인 화면
+	role: invite::Role,
 }
 
 #[derive(Serialize, Clone)]
@@ -188,6 +190,7 @@ struct DeviceView {
 	name: String,
 	seen: i64,
 	online: bool,
+	role: invite::Role,
 }
 
 /// 요청을 보낸 기기 — auth 가 쿠키(또는 「내 Claude」 열쇠)로 찾아 요청에 붙인다. key 면 열쇠로 들어왔다
@@ -242,7 +245,7 @@ impl Hub {
 			app: self.app_base.clone(),
 			lan: lan.is_some(),
 			links: b.links.iter().map(|l| LinkView { id: l.id.clone(), app: self.app_base.as_ref().map(|a| format!("{a}/j/{}", l.token)), url: format!("{}/j/{}", bases[0], l.token), name: l.name.clone(), expires: l.expires, expired: l.expires.is_some_and(|e| e <= t) }).collect(),
-			devices: b.devices.iter().rev().map(|d| DeviceView { id: d.id.clone(), name: d.name.clone(), seen: d.seen, online: members.iter().any(|m| m.device == d.id) }).collect(),
+			devices: b.devices.iter().rev().map(|d| DeviceView { id: d.id.clone(), name: d.name.clone(), seen: d.seen, online: members.iter().any(|m| m.device == d.id), role: d.role }).collect(),
 			locked: b.locked,
 			tunnel: public.map(|(url, kind)| TunnelView { url, kind }),
 			bases,
@@ -496,6 +499,23 @@ pub fn collab_kick(app: AppHandle, device: String) -> Res<Info> {
 	})
 }
 
+/// 팀원 권한을 바꾼다 (2026.11.27) — 그 사람(같은 이름의 기기 모두)에게. 붙어 있는 화면에도 바로 알린다(접속 목록의 role)
+#[tauri::command]
+pub fn collab_role(app: AppHandle, device: String, role: invite::Role) -> Res<Info> {
+	let h = hub(&app).ok_or("협업이 꺼져 있다")?;
+	if !h.book.lock().unwrap().set_role(&device, role) {
+		return Err("그 기기가 장부에 없다".into());
+	}
+	// 장부를 먼저 읽고 놓은 뒤 접속 목록을 잡는다 — 두 자물쇠를 함께 쥐면 다른 곳의 잡는 차례와 엇갈려 멈출 수 있다
+	let roles: HashMap<String, invite::Role> = h.book.lock().unwrap().devices.iter().map(|d| (d.id.clone(), d.role)).collect();
+	for m in h.members.lock().unwrap().values_mut().filter(|m| !m.host) {
+		m.role = roles.get(&m.device).copied().unwrap_or_default();
+	}
+	h.members_changed();
+	h.book_changed();
+	Ok(h.info())
+}
+
 /// 회의 잠금 — 켜면 새 기기가 들어오지 못한다
 #[tauri::command]
 pub fn collab_lock(app: AppHandle, on: bool) -> Res<Info> {
@@ -698,7 +718,7 @@ pub fn collab_reply(app: AppHandle, id: String, reply: Value) {
 #[tauri::command]
 pub fn collab_view(app: AppHandle, name: String, slide: Option<String>) {
 	if let Some(h) = hub(&app) {
-		h.members.lock().unwrap().insert(0, Member { conn: 0, device: String::new(), name, slide, host: true, since: now(), runner: false, app: Some(true) });
+		h.members.lock().unwrap().insert(0, Member { conn: 0, device: String::new(), name, slide, host: true, since: now(), runner: false, app: Some(true), role: invite::Role::Edit });
 		h.members_changed();
 	}
 }
@@ -958,7 +978,8 @@ async fn conn(h: Arc<Hub>, who: Who, mut socket: WebSocket) {
 	let (direct, mut inbox) = mpsc::unbounded_channel::<String>();
 	let mut rx = h.tx.subscribe();
 	h.conns.lock().unwrap().insert(id, (who.device.clone(), direct.clone()));
-	h.members.lock().unwrap().insert(id, Member { conn: id, device: who.device.clone(), name: who.name.clone(), slide: None, host: false, since: now(), runner: h.runners.lock().unwrap().contains_key(&who.device), app: None });
+	let role = h.book.lock().unwrap().role_of(&who.device);
+	h.members.lock().unwrap().insert(id, Member { conn: id, device: who.device.clone(), name: who.name.clone(), slide: None, host: false, since: now(), runner: h.runners.lock().unwrap().contains_key(&who.device), app: None, role });
 	h.members_changed();
 	let hello = json!({ "t": "hello", "conn": id, "deckKey": h.deck_key, "name": who.name }).to_string();
 	// 지금 상태는 화면이 앱인지 브라우저인지 알려 온 뒤에 준다(on_message 「hello」 → SNAP) — 볼 세션 묶음이 그것으로 정해진다
@@ -1035,10 +1056,16 @@ fn on_message(h: &Arc<Hub>, conn: u64, direct: &mpsc::UnboundedSender<String>, t
 				return;
 			}
 			let (who, device) = h.members.lock().unwrap().get(&conn).map(|x| (x.name.clone(), x.device.clone())).unwrap_or_default();
+			// 권한은 장부에서 그때 읽는다 — 덱 주인이 방금 바꿨으면 바로 따른다 (접속 목록의 role 은 화면에 보이는 몫)
+			let role = h.book.lock().unwrap().role_of(&device);
+			if !role.allows(&name) {
+				let _ = direct.send(json!({ "t": "reply", "id": cid, "ok": false, "error": "denied" }).to_string());
+				return;
+			}
 			let key = uuid::Uuid::new_v4().simple().to_string();
 			let (tx, rx) = oneshot::channel();
 			h.pending.lock().unwrap().insert(key.clone(), tx);
-			let sent = h.app.emit("collab-intent", json!({ "id": key, "from": { "conn": conn, "name": who, "device": device }, "name": name, "args": m["args"] }));
+			let sent = h.app.emit("collab-intent", json!({ "id": key, "from": { "conn": conn, "name": who, "device": device, "role": role }, "name": name, "args": m["args"] }));
 			let (h2, direct) = (h.clone(), direct.clone());
 			tauri::async_runtime::spawn(async move {
 				let reply = if sent.is_err() { json!({ "ok": false, "error": "host" }) } else {

@@ -1,11 +1,12 @@
 // 팀 협업 화면 조각 — 제목 줄 「공유」(공유 창) · 쪽 목록 · 무대의 「보는 사람」 표시 (상태: lib/collab.ts)
+//   2026.11.27 : 쪽 담당 · 권한 — 쪽 목록의 담당 표시(AssignTag) · 쪽 우클릭 「담당」(assignItems) · 공유 창 사람마다 권한 고르기 · 팀원 창 「내 담당」
 import { useEffect, useRef, useState } from "react";
-import { collabKick, collabLinkNew, collabLinkRemove, collabLock, collabTools, follow, setShareClaude, setVia, type InviteLink, type TunnelTools, type Member, startHost, stopHost, useCollab } from "../lib/collab";
+import { assignedTo, collabKick, collabLinkNew, collabLinkRemove, collabLock, collabRole, collabTools, follow, ROLES, type Role, setShareClaude, setVia, type InviteLink, type TunnelTools, type Member, startHost, stopHost, useCollab, useRole } from "../lib/collab";
 import { useT } from "../lib/i18n";
 import { useSettings } from "../lib/settings";
 import { useDeck } from "../lib/store";
 import { remote } from "../lib/transport";
-import { copyText } from "./ContextMenu";
+import { copyText, type MenuItem } from "./ContextMenu";
 
 /** 사람 머리글자 — 한글 이름은 앞 글자, 영어는 첫 글자 대문자 */
 const initial = (name: string) => (name.trim()[0] || "?").toUpperCase();
@@ -38,6 +39,57 @@ export function SlideFaces({ slideId }: { slideId: string }) {
 		<span className="faces">
 			{others.slice(0, 3).map((m) => <Face key={m.conn} m={m} small />)}
 			{others.length > 3 && <i className="face sm more">+{others.length - 3}</i>}
+		</span>
+	);
+}
+
+/** 쪽 목록 번호 옆 — 이 쪽을 맡은 사람 머리글자 (보는 사람 얼굴과 달리 네모). 내가 맡은 쪽이면 진하게 */
+export function AssignTag({ slideId }: { slideId: string }) {
+	const t = useT();
+	const names = useDeck((s) => s.assign[slideId]);
+	const me = useSettings((s) => s.s.me.trim());
+	if (!names?.length) return null;
+	return (
+		<span className={"assign-tag" + (names.includes(me) ? " mine" : "")} title={`${t("assignBy")} · ${names.join(", ")}`}>
+			{names.slice(0, 2).map((n) => <i key={n} style={{ "--h": hue(n) } as React.CSSProperties}>{initial(n)}</i>)}
+			{names.length > 2 && <i className="more">+{names.length - 2}</i>}
+		</span>
+	);
+}
+
+/** 쪽 우클릭 「담당」 — 덱 주인이 공유 중일 때, 들어온 적 있는 사람마다 한 줄(누르면 맡기기 · 풀기). 같은 이름의 기기는 한 사람이다 */
+export function assignItems(slideId: string, t: ReturnType<typeof useT>): MenuItem[] {
+	const info = useCollab.getState().info;
+	if (remote || !info) return [];
+	const st = useDeck.getState();
+	const cur = st.assign[slideId] ?? [];
+	const names = [...new Set(info.devices.map((d) => d.name))];
+	if (!names.length) return [];
+	return [
+		"-",
+		...names.map((n): MenuItem => ({ label: `${t("assignBy")} · ${n}`, checked: cur.includes(n), run: () => st.setAssign(slideId, cur.includes(n) ? cur.filter((x) => x !== n) : [...cur, n]) })),
+		...(cur.length ? [{ label: t("assignClear"), run: () => st.setAssign(slideId, []) }] : []),
+	];
+}
+
+/** 권한 이름 — 고르기 · 팀원 창 */
+const roleKey = (r: Role) => ({ edit: "roleEdit", assigned: "roleAssigned", comment: "roleComment", view: "roleView" } as const)[r];
+
+/** 맡은 쪽 번호 단추들 — 누르면 그 쪽으로 */
+function AssignedSlides({ name }: { name: string }) {
+	const t = useT();
+	const deck = useDeck((s) => s.deck);
+	useDeck((s) => s.assign);
+	const setCurrent = useDeck((s) => s.setCurrent);
+	const ids = assignedTo(name);
+	if (!deck) return null;
+	if (!ids.length) return <span className="dim">{t("assignNone")}</span>;
+	return (
+		<span className="assigned">
+			{ids.map((id) => {
+				const i = deck.slides.findIndex((s) => s.id === id);
+				return <button key={id} className="mono" onClick={() => setCurrent(i)} title={deck.slides[i]?.title || undefined}>{i + 1}</button>;
+			})}
 		</span>
 	);
 }
@@ -117,13 +169,20 @@ export function CollabChip() {
 	);
 }
 
-/** 공유 덱 창 — 누가 어디를 보는지 */
+/** 공유 덱 창 — 내 권한 · 내가 맡은 쪽, 그리고 누가 어디를 보는지 */
 function MembersPop() {
 	const t = useT();
 	const { members } = useCollab();
 	const deck = useDeck((s) => s.deck);
+	const role = useRole();
+	const me = useSettings((s) => s.s.me.trim());
 	return (
 		<div className="pop collab-pop" role="dialog" aria-label={t("collabMembers")}>
+			<section className="my-role">
+				<div className="row"><span className="lbl">{t("roleMine")}</span><b>{t(roleKey(role))}</b></div>
+				<p className="note">{t((roleKey(role) + "Note") as "roleEditNote")}</p>
+				<div className="row"><span className="lbl">{t("assignMineH")}</span><AssignedSlides name={me} /></div>
+			</section>
 			{members.length === 0 && <p className="dim">{t("collabNobody")}</p>}
 			{members.map((m) => {
 				const no = deck ? deck.slides.findIndex((s) => s.id === m.slide) + 1 : 0;
@@ -260,9 +319,18 @@ export function SharePanel({ bare }: { bare?: boolean }) {
 							<span className="nm">{d.name}{m?.runner && <em title={t("runnerUseHint")}> · {t("runnerMine")}</em>}</span>
 							<span className={"st" + (m ? " on" : "")}>{m ? (no > 0 ? `${t("collabOnline")} · ${no}${t("slideN") === "쪽" ? "쪽" : ""}` : t("collabOnline")) : new Date(d.seen).toLocaleDateString()}</span>
 							<button className="rm" disabled={busy} onClick={() => run(() => collabKick(d.id))} title={t("collabKickHint")}>{t("collabKick")}</button>
+							{/* 권한 · 맡은 쪽 (2026.11.27) — 담당은 쪽 목록에서 쪽을 우클릭해 정한다 */}
+							<div className="perm">
+								<select className="field" value={d.role} disabled={busy} aria-label={`${d.name} · ${t("roleH")}`} title={t((roleKey(d.role) + "Note") as "roleEditNote")}
+									onChange={(e) => run(() => collabRole(d.id, e.target.value as Role))}>
+									{ROLES.map((r) => <option key={r} value={r}>{t(roleKey(r))}</option>)}
+								</select>
+								{deck && <AssignedSlides name={d.name} />}
+							</div>
 						</div>
 					);
 				})}
+				{people.length > 0 && <p className="note">{t("assignHowTo")}</p>}
 				<label className="check" title={t("collabLockNote")}>
 					<input type="checkbox" checked={info.locked} disabled={busy} onChange={() => run(() => collabLock(!info.locked))} />
 					<span>{t("collabLock")}</span>

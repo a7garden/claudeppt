@@ -4,6 +4,7 @@
 //   열기 · 닫기          openProject · closeProject (폴더 감시와 deck:// 등록은 Rust)
 //   핫 리로드            onFs — deck.json 이면 목차를, 쪽 HTML 이면 그 쪽만, CSS 면 CSS 만 다시 읽힌다
 //   핀                   addPin · updatePin · removePin → .claudeppt/pins.json
+//   담당                 setAssign → .claudeppt/assign.json — 공유 덱에서 쪽마다 맡은 팀원. 권한으로 막는 것은 collab.ts · 담당 밖 쓰기 되돌리기는 send 의 fence
 //   무대 보기            setFlow — 한 쪽 보기 ↔ 이어 보기(모든 쪽을 세로로 스크롤)
 //   요청칸 채우기        mentionSlide — 요청칸에 @쪽 넣기 · refill — 지난 요청을 다시 쓰기 (우클릭 메뉴 · 쪽 목록에서)
 //   쪽 손보기            addSlide · duplicateSlide · moveSlide · removeSlide — 쪽 목록 · 우클릭 메뉴가 같이 쓴다
@@ -77,7 +78,9 @@ export interface SendFrom { by: string; current: string | null; talkKey: string 
 	/** 보낸 팀원의 PC 에서 Claude 를 돌린다 — 그 기기 id (collab.ts 가 그 기기가 붙어 있는지 본다) */
 	runner?: string;
 	/** 세션 묶음 (Session.owner) — "" 은 덱 주인 묶음, 없으면 묶음 없이(세션 공유). 정하는 곳은 collab.ts claudeFor */
-	pool?: string }
+	pool?: string;
+	/** 이 사람이 고쳐도 되는 쪽 파일 (2026.11.27 「담당 쪽만」 권한) — 있으면 Claude 에게 그 쪽만 고치라 이르고, 턴이 그 밖을 고쳤으면 턴 앞 내용으로 되돌린다 */
+	scope?: string[] }
 /** 화면 뒤에서 도는 긴 일(PPTX 가져오기) 하나. n 이 0 이면 아직 전체 양을 모른다 */
 export interface Job { id: string; label: string; i: number; n: number; note?: string }
 export interface Release { name: string; tag: string; n: number; hash: string; file: string; notes: string; at: string }
@@ -98,6 +101,8 @@ interface S {
 	/** 요청칸에 넣어 달라는 글 — 커서 자리에 끼우거나(whole 아님) 칸 전체를 바꾼다. k 는 같은 글을 거듭 보내도 다시 넣게 하는 표식 */
 	insertReq: { text: string; whole?: boolean; k: number } | null;
 	pins: Pin[];
+	/** 쪽 담당 — 쪽 id → 맡은 팀원 이름들 (2026.11.27). 판에 넣지 않는다(.claudeppt) — 담당을 바꿨다고 판이 생기면 판 목록이 흐려진다 */
+	assign: Record<string, string[]>;
 	turns: Turn[];
 	sessions: Session[];
 	/** 쪽 id → 그 쪽을 처음 고친 세션 key */
@@ -147,8 +152,10 @@ interface S {
 	removePin: (id: string) => void;
 	/** 의견 해결 · 다시 열기 */
 	resolvePin: (id: string, done: boolean) => void;
+	/** 쪽 담당을 정한다 — 덱 주인만 (공유 덱 창에서는 막힌다) */
+	setAssign: (slideId: string, names: string[]) => void;
 	/** 의견 하나를 그 쪽의 세션에 보낸다 — 「○○ 님 의견을 반영해 줘」. from 이 없으면 이 기기 사람이 보낸다 */
-	sendPin: (id: string, from?: { by: string; talkKey: string | null; runner?: string; pool?: string }) => Promise<void>;
+	sendPin: (id: string, from?: { by: string; talkKey: string | null; runner?: string; pool?: string; scope?: string[] }) => Promise<void>;
 	/** force — 앱 밖 Claude Code 가 방금 이 덱을 다뤘어도 보낸다 (알림의 「그래도 보내기」).
 	 *  from — 협업 브라우저 팀원이 보낸 요청 (collab.ts). 보낸 사람 · 그 사람이 보던 쪽 · 그 사람의 지금 대화로 처리하고, 호스트 화면(보는 대화 · 핀)은 건드리지 않는다 */
 	send: (text: string, attachments?: string[], force?: boolean, from?: SendFrom) => Promise<void>;
@@ -462,6 +469,36 @@ function pump(get: () => S, set: (p: Partial<S>) => void) {
 	}
 }
 
+/** 「담당 쪽만」 팀원의 턴이 고치면 안 되는 파일의 지금 내용 — 덱 목차 · 테마 · 담당 밖 쪽. 없는 파일은 넣지 않는다(새로 만든 파일은 막지 않는다) */
+async function fenceOf(dir: string, deck: Deck, scope: string[]): Promise<Map<string, string>> {
+	const keep = new Set(scope);
+	const files = ["deck.json", "theme.css", ...deck.slides.map((s) => s.file).filter((f) => !keep.has(f))];
+	const m = new Map<string, string>();
+	for (const f of files) {
+		const t = await api.readText(dir, f).catch(() => null);
+		if (t != null) m.set(f, t);
+	}
+	return m;
+}
+
+/** 턴이 고친 담당 밖 파일을 턴 앞 내용으로 — 되돌린 파일 이름을 돌려준다. 고쳤다는 도구가 없는 파일은 건드리지 않는다(함께 돈 다른 턴의 것일 수 있다) */
+async function unfence(dir: string, fence: Map<string, string>, tools: ToolUse[]): Promise<string[]> {
+	const touched = new Set(tools.filter((x) => EDIT_TOOLS.includes(x.name)).map((x) => x.file).filter((x): x is string => !!x));
+	const undone: string[] = [];
+	for (const [f, before] of fence) {
+		if (!touched.has(f)) continue;
+		const now = await api.readText(dir, f).catch(() => null);
+		if (now === before) continue;
+		await api.writeText(dir, f, before).catch(() => {});
+		undone.push(f);
+	}
+	return undone;
+}
+
+/** Claude 에게 담당 쪽만 고치라 이른다 */
+const scopeNote = (scope: string[]) =>
+	`This teammate may change only these slide files: ${scope.join(", ")}. Do not edit deck.json, theme.css or any other slide — such edits are undone after the turn. If the request needs changes elsewhere, say so in the reply instead.\n\n`;
+
 /** 요청 한 턴을 세운다 — 세션 고르기 · 턴 만들기. 바로 돌거나 기다린다. 돌려주는 약속은 그 턴이 끝날 때 풀린다 */
 async function sendTurn(get: () => S, set: (p: Partial<S>) => void, text: string, attachments: string[], force: boolean, from?: SendFrom): Promise<{ done: Promise<void> } | undefined> {
 	const { dir, deck } = get();
@@ -537,6 +574,8 @@ async function sendTurn(get: () => S, set: (p: Partial<S>) => void, text: string
 		const session = get().sessions.find((x) => x.key === key)!;
 		const deck = get().deck ?? deck0;
 		try {
+			// 「담당 쪽만」 — 담당 밖 파일을 턴 앞에 떠 둔다. 이르는 것만으로는 Claude 가 덱 목차 · 다른 쪽을 고칠 수 있다
+			const fence = from?.scope ? await fenceOf(dir, deck, from.scope) : null;
 			// 표시가 있으면 그 쪽 그림 위에 그려 붙인다. 못 만들어도 좌표 글은 가므로 턴은 그대로 돈다
 			if (notes.some((n) => n.shape)) {
 				patch((t) => ({ ...t, phase: tNow("marking") }));
@@ -550,7 +589,7 @@ async function sendTurn(get: () => S, set: (p: Partial<S>) => void, text: string
 				vlines.push(c ? await versionContext(dir, get().id, deck, c).catch((e) => `- @v${v.n}: could not be read (${e})`) : `- @v${v.n}: not found`);
 			}
 			// 협업을 켜면 한 세션을 여러 팀원이 이어 쓰므로 누가 시킨 것인지 알린다 — 「아까 말한 것」이 누구 말인지 가린다
-			const prompt = (by ? `Request from teammate: ${by}\n\n` : "") + turnPrompt(text, notes, cur ? { id: cur.id, no: current + 1 } : null, attachments, mentions, vlines, deck);
+			const prompt = (by ? `Request from teammate: ${by}\n\n` : "") + (fence ? scopeNote(from!.scope!) : "") + turnPrompt(text, notes, cur ? { id: cur.id, no: current + 1 } : null, attachments, mentions, vlines, deck);
 			// 새 세션은 앱이 id 를 정한다 — 턴이 멈춰도 그 세션의 기록을 찾아 덱에 남긴다 (claude.rs)
 			// 팀원 PC 의 Claude 로 보낸 턴이면 claude 만 그 PC 에서 돈다 — 줄 · 파일은 이 PC 로 와서 이 PC 에서 돈 턴과 똑같이 그려지고 판에 남는다.
 			// 모델 · 생각 깊이 · claude 경로는 그 PC 의 설정을 쓴다 (runner.rs)
@@ -573,6 +612,11 @@ async function sendTurn(get: () => S, set: (p: Partial<S>) => void, text: string
 			const t0 = get().turns.find((t) => t.id === turn.id)!;
 			let status: Turn["status"] = t0.status === "stopped" ? "stopped" : r.code === 0 && !t0.error ? "done" : "failed";
 			if (status === "failed" && !t0.error) patch((t) => ({ ...t, error: r.stderr.trim().split("\n").slice(-3).join("\n") || `exit ${r.code}` }));
+			// 담당 밖을 고쳤으면 턴 앞 내용으로 되돌리고 알린다
+			if (fence) {
+				const undone = await unfence(dir, fence, get().turns.find((t) => t.id === turn.id)!.tools);
+				if (undone.length) patch((t) => ({ ...t, error: [t.error, tNow("scopeUndone").replace("{files}", undone.join(", "))].filter(Boolean).join("\n") }));
+			}
 			// 그림 자리 채우기
 			const fresh = await readDeck(dir).catch(() => get().deck!);
 			set({ deck: fresh });
@@ -617,6 +661,7 @@ export const useDeck = create<S>()((set, get) => ({
 	tool: "select",
 	insertReq: null,
 	pins: [],
+	assign: {},
 	turns: [],
 	sessions: [],
 	bind: {},
@@ -643,6 +688,7 @@ export const useDeck = create<S>()((set, get) => ({
 		const id = await api.open(dir);
 		await api.vcsInit(dir);
 		const pins = await readJson<Pin[]>(dir, ".claudeppt/pins.json", []);
+		const assign = await readJson<Record<string, string[]>>(dir, ".claudeppt/assign.json", {});
 		const talk = await readJson<TalkFile>(dir, ".claudeppt/talk.json", { turns: [] });
 		// 2026.11.25 전 talk.json 은 세션 하나(sessionId)뿐이었다 — 그 세션을 세션 1 로 옮기고 지난 턴을 그 세션에 단다.
 		// 쪽 확정(bind)은 비워 둔다 — 그 쪽들은 다음에 고칠 때 지금 대화(= 세션 1)로 가서 확정된다
@@ -651,7 +697,7 @@ export const useDeck = create<S>()((set, get) => ({
 		const talkKey = talk.talkKey ?? sessions.at(-1)?.key ?? null;
 		const releases = await readJson<Release[]>(dir, "releases/releases.json", []);
 		clearUndo();
-		set({ dir, id, deck, rev: {}, current: 0, mode: "edit", tool: "select", pins, turns, sessions, bind: talk.bind ?? {}, talkKey, versions: [], releases, preview: null, vdiff: null });
+		set({ dir, id, deck, rev: {}, current: 0, mode: "edit", tool: "select", pins, assign, turns, sessions, bind: talk.bind ?? {}, talkKey, versions: [], releases, preview: null, vdiff: null });
 		useSettings.getState().remember(dir);
 		// 처음 여는 프로젝트(가져오기 직후)면 첫 판을 남긴다
 		const log = await api.log(dir, 1);
@@ -738,7 +784,7 @@ export const useDeck = create<S>()((set, get) => ({
 		clearTimeout(directTimer);
 		const { id } = get();
 		if (id) await api.close(id).catch(() => {});
-		set({ dir: "", id: "", deck: null, turns: [], sessions: [], bind: {}, talkKey: null, pins: [], versions: [], preview: null, running: null, runs: {}, vdiff: null });
+		set({ dir: "", id: "", deck: null, turns: [], sessions: [], bind: {}, talkKey: null, pins: [], assign: {}, versions: [], preview: null, running: null, runs: {}, vdiff: null });
 		// 닫은 덱의 슬라이드 창은 더 말을 받지 않는다 — 남은 것을 비운다
 		get().frames.clear();
 	},
@@ -823,11 +869,20 @@ export const useDeck = create<S>()((set, get) => ({
 		set({ pins });
 		persistPins(get().dir, pins);
 	},
+	setAssign: (slideId, names) => {
+		const { dir } = get();
+		const assign = { ...get().assign };
+		const clean = [...new Set(names.map((n) => n.trim()).filter(Boolean))];
+		if (clean.length) assign[slideId] = clean;
+		else delete assign[slideId];
+		set({ assign });
+		api.writeText(dir, ".claudeppt/assign.json", JSON.stringify(assign, null, 1)).catch(() => {});
+	},
 	sendPin: async (id, from) => {
 		const p = get().pins.find((x) => x.id === id);
 		if (!p) return;
 		const by = from?.by ?? me();
-		await get().send(tNow("pinSendText").replace("{name}", p.by || by), [], true, { by, current: p.slide, talkKey: from ? from.talkKey : get().talkKey, pins: [p], runner: from?.runner, pool: from ? from.pool : hostPool() });
+		await get().send(tNow("pinSendText").replace("{name}", p.by || by), [], true, { by, current: p.slide, talkKey: from ? from.talkKey : get().talkKey, pins: [p], runner: from?.runner, pool: from ? from.pool : hostPool(), scope: from?.scope });
 	},
 
 	send: async (text, attachments = [], force = false, from) => {

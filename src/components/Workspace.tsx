@@ -2,7 +2,7 @@
 //
 // 목차
 //   SlideFrame    슬라이드 iframe 하나. 크기를 맞춰 줄이고, 다시 그릴 표식(rev)이 바뀌면 새로 읽는다
-//   Rail          쪽 목록 — 끌어서 순서 바꾸기 · Delete 로 빼기 · 쪽 사이 + 로 빈 쪽 · 판 비교 중이면 바뀐 쪽 · 새 쪽 표시
+//   Rail          쪽 목록 — 끌어서 순서 바꾸기 · Delete 로 빼기 · 쪽 사이 + 로 빈 쪽 · 판 비교 중이면 바뀐 쪽 · 새 쪽 표시 · 쪽 담당(우클릭으로 맡기기 · 「내 담당만」)
 //   Stage         무대 — 도구(고르기 · 펜 · 화살표 · 상자) · 직접 편집 메시지 받기 · 지난 판 미리 보기 · 휠로 쪽 넘기기 · 판 비교 (VersionLens.tsx)
 //                 서식 띠(Ribbon.tsx) — 접어 두었다가 「서식」(F)으로 펼친다. 띠의 명령은 슬라이드 창이 받아 고친 뒤 편집 메시지로 돌려보낸다
 //   MarkLayer     표시 층 — 그어 놓은 표시를 그리고, 긋는 도구일 때 긋기를 받는다 · StageTools 도구 띠
@@ -19,7 +19,8 @@ import { type MenuItem, openMenu } from "./ContextMenu";
 import { VersionBar, VersionLens } from "./VersionLens";
 import { Ribbon, type SelInfo, useRibbon } from "./Ribbon";
 import { SketchBoard } from "./Sketch";
-import { EditingNote, SlideFaces, StageFaces } from "./Collab";
+import { AssignTag, EditingNote, SlideFaces, StageFaces, assignItems } from "./Collab";
+import { useFrameMode, useRole } from "../lib/collab";
 import { CheckBar, CheckMarks, PageGuides } from "./CheckMarks";
 import { remote } from "../lib/transport";
 import { useSettings } from "../lib/settings";
@@ -28,12 +29,15 @@ import Talk, { useTalkFold } from "./Talk";
 export function SlideFrame({ file, rev, width, height, w, h, onWin, revHash }: { file: string; rev: number; width: number; height?: number; w: number; h: number; onWin?: (win: Window | null) => void; revHash?: string }) {
 	const id = useDeck((s) => s.id);
 	const frames = useDeck((s) => s.frames);
-	const mode = useDeck((s) => s.mode);
+	// 공유 덱 창에서는 권한 · 담당에 맞춘 모드 (collab.ts useFrameMode) — 덱 주인 앱은 그대로
+	const mode = useFrameMode(file, useDeck((s) => s.mode));
 	const ref = useRef<HTMLIFrameElement>(null);
 	// 읽힌 창 — 떼어 낼 때는 iframe.contentWindow 가 이미 null 이라 그것으로는 frames 에서 지우지 못하고 쌓였다
 	const winRef = useRef<Window | null>(null);
 	const s = width / w;
 	const src = deckUrl(id, file, revHash) + `?v=${rev}`;
+	// 모드가 바뀌면 다시 알린다 — store 의 도구 고르기는 모든 창에 덱 모드를 그대로 보내므로, 권한으로 좁힌 모드를 그 뒤에 덮어 쓴다
+	useEffect(() => { if (onWin && winRef.current) winRef.current.postMessage({ __deck: 1, t: "mode", mode }, "*"); }, [mode]);
 	useEffect(() => {
 		const f = ref.current;
 		return () => {
@@ -289,28 +293,43 @@ function Rail() {
 	const [dropAt, setDropAt] = useState<number | null>(null);
 	const lastFiles = useMemo(() => new Set(lastTools?.map((x) => x.file).filter(Boolean)), [lastTools]);
 	const listRef = useRef<HTMLDivElement>(null);
-	useEffect(() => { listRef.current?.querySelectorAll(".rail-item")[current]?.scrollIntoView({ block: "nearest" }); }, [current]);
+	useEffect(() => { listRef.current?.querySelectorAll(".rail-item.on")[0]?.scrollIntoView({ block: "nearest" }); }, [current]);
+	// 쪽 담당 (2026.11.27) — 공유 덱 창에서 내가 맡은 쪽. 「담당 쪽만」 권한이면 맡지 않은 쪽을 흐리게, 「내 담당만」을 켜면 맡은 쪽만 늘어놓는다
+	const assign = useDeck((s) => s.assign);
+	const me = useSettings((s) => s.s.me.trim());
+	const role = useRole();
+	const mine = remote ? deck.slides.filter((sl) => assign[sl.id]?.includes(me)).length : 0;
+	const [onlyMine, setOnlyMine] = useState(false);
+	const only = onlyMine && mine > 0;
 
 	return (
 		<nav className="rail" ref={listRef} aria-label={t("slides")}
 			onKeyDown={(e) => {
 				if (e.key === "Delete" && !preview) removeSlide(current);
 			}}>
+			{mine > 0 && (
+				<button className={"rail-mine" + (only ? " on" : "")} aria-pressed={only} onClick={() => setOnlyMine(!only)} title={t("assignOnlyHint")}>
+					{t("assignMine").replace("{n}", String(mine))}
+				</button>
+			)}
 			{deck.slides.map((sl, i) => {
+				const isMine = !!assign[sl.id]?.includes(me);
+				if (only && !isMine) return null;
 				const n = pins.filter((p) => p.slide === sl.id && !p.done).length;
 				// 비교 차이는 숫자 대신 미리보기 테두리로 — 숫자는 비교 렌즈를 켰을 때만. 0.1% 차이에 모든 쪽이 빨간 글자로 칠해지면 무엇이 급한지 안 보인다
 				// 판 비교 중이면 고른 판과 다른 쪽에 점선 테두리 · 그 뒤에 생긴 쪽에 「새」 — 바뀐 쪽만 골라 넘겨 볼 수 있게
 				const vs = !preview ? vdiff?.slides[sl.id] : undefined;
 				return (
-					<div key={sl.id} className={"rail-item" + (i === current ? " on" : "") + (dropAt === i ? " drop-before" : "") + (vs ? " drift" : "")}
+					<div key={sl.id} className={"rail-item" + (i === current ? " on" : "") + (dropAt === i ? " drop-before" : "") + (vs ? " drift" : "") + (role === "assigned" && !isMine ? " notmine" : "")}
 						onDragOver={(e) => { if (drag != null) { e.preventDefault(); setDropAt(i); } }}
 						onDrop={() => { if (drag != null) move(drag, i); setDrag(null); setDropAt(null); }}
 						// 누른 쪽을 지금 쪽으로 — PowerPoint 처럼 메뉴가 가리키는 쪽이 무대에 보인다
-						onContextMenu={(e) => { setCurrent(i); openMenu(e, preview ? previewItems(t) : slideItems(i, live.slides.length, t)); }}>
+						onContextMenu={(e) => { setCurrent(i); openMenu(e, preview ? previewItems(t) : [...slideItems(i, live.slides.length, t), ...assignItems(sl.id, t)]); }}>
 						<div className="no">
 							<span>{i + 1}</span>
 							{n > 0 && <span className="pins" title={`${t("pins")} ${n}`} />}
 							{vs && <span className="drift">{vs === "added" ? t("vsAdded") : t("vsChangedOne")}</span>}
+							<AssignTag slideId={sl.id} />
 							<SlideFaces slideId={sl.id} />
 							{!preview && <button className="at" onClick={() => mentionSlide(i + 1)} title={`${t("mention")} (@${i + 1})`} aria-label={`${t("mention")} @${i + 1}`}>@</button>}
 						</div>

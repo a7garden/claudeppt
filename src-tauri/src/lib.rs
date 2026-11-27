@@ -132,6 +132,7 @@ pub fn run() {
 			collab::collab_link_remove,
 			collab::collab_kick,
 			collab::collab_lock,
+			collab::collab_role,
 			collab::collab_tunnel,
 			collab::collab_tools,
 			collab::collab_join,

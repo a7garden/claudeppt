@@ -726,6 +726,26 @@ textarea.field { height: auto; padding: 8px 10px; line-height: 1.5; resize: vert
 .face.sm { width: 15px; height: 15px; font-size: 8.5px; box-shadow: 0 0 0 1.5px var(--bg); }
 .face.more { background: var(--hair-2); color: var(--dim); }
 .rail-item .no .faces { display: flex; flex-direction: column; gap: 2px; align-items: flex-end; }
+/* 쪽 담당 · 권한 (2026.11.27) — 담당은 네모 머리글자(보는 사람 얼굴은 동그라미). 내가 맡은 쪽은 테두리로 */
+.rail-item .no .assign-tag { display: flex; flex-direction: column; gap: 2px; align-items: flex-end; }
+.assign-tag i { display: inline-grid; place-items: center; width: 15px; height: 15px; border-radius: 3px; font: 600 8.5px/1 var(--ui); font-style: normal; color: hsl(var(--h, 210) 55% 40%); background: hsl(var(--h, 210) 55% 45% / 0.14); }
+.assign-tag i.more { color: var(--dim); background: var(--hair); }
+.assign-tag.mine i { box-shadow: 0 0 0 1.5px var(--text); }
+.rail-item.notmine .thumb { opacity: 0.45; }
+.rail-item.notmine:hover .thumb, .rail-item.notmine.on .thumb { opacity: 0.8; }
+.rail-mine { display: block; margin: 0 0 10px 24px; padding: 3px 10px; border-radius: 12px; font-size: 11.5px; color: var(--dim); outline: 1px solid var(--hair-2); outline-offset: -1px; }
+.rail-mine:hover { color: var(--text); }
+.rail-mine.on { color: var(--text); outline: 1.5px solid var(--accent); outline-offset: -1.5px; }
+.collab-members .row { flex-wrap: wrap; }
+.collab-members .perm { flex-basis: 100%; display: flex; align-items: center; gap: 8px; padding-left: 30px; font-size: 11.5px; }
+.collab-members .perm .field { height: 26px; font-size: 12px; padding: 0 6px; }
+.assigned { display: inline-flex; flex-wrap: wrap; gap: 3px; }
+.assigned button { min-width: 20px; padding: 1px 5px; border-radius: 4px; font-size: 11px; color: var(--dim); background: var(--hair); }
+.assigned button:hover { color: var(--text); background: var(--hair-2); }
+.collab-pop .my-role { display: grid; gap: 6px; padding-bottom: 10px; margin-bottom: 4px; border-bottom: 1px solid var(--hair); }
+.collab-pop .my-role .lbl { flex: none; font-size: 12px; color: var(--dim); min-width: 52px; }
+.collab-pop .my-role .note { font-size: 11.5px; color: var(--dim); line-height: 1.5; margin: 0; }
+.composer-lock { margin: 8px 16px 14px; padding: 10px 12px; border-radius: 8px; background: var(--raise); color: var(--dim); font-size: 12.5px; line-height: 1.5; }
 
 /* 무대 위 오른쪽 — 다른 사람들. 같은 쪽을 보는 사람은 진하게, 다른 쪽이면 옅게 + 쪽 번호(누르면 그 쪽으로) */
 .stage-faces { position: absolute; top: 10px; right: 14px; display: flex; gap: 4px; z-index: 4; }

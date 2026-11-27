@@ -23,7 +23,7 @@ import { useSettings } from "../lib/settings";
 import { bindKey, inPool, isMine, routeOf, type Turn, useDeck } from "../lib/store";
 import { noteDraft } from "../lib/updater";
 import { appWindow, remote } from "../lib/transport";
-import { useCollab, useMine, usePool } from "../lib/collab";
+import { useCollab, useMine, usePool, useRole } from "../lib/collab";
 
 /** 이 화면의 세션 묶음 (2026.11.27) — 덱 주인이 세션 공유를 켜지 않았으면 내 묶음의 세션만 보이고, 지금 대화도 그 안에서.
  *  지금 대화(talkKey)가 묶음 밖이면(덱 주인 것을 처음 받았을 때) 묶음의 마지막 세션으로 본다 */
@@ -121,7 +121,7 @@ export default function Talk() {
 						turns.map((x) => <TurnView key={x.id} turn={x} head={!!head && x.version?.hash === head.hash} />)
 					)}
 				</div>
-				<Composer />
+				<ComposerOrLock />
 			</div>
 		</aside>
 	);
@@ -343,6 +343,14 @@ function Mentioned({ text, turn }: { text: string; turn?: Turn }) {
 
 /** 요청칸 위 쌓인 표시의 종류 — 글자 한 자로 (핀은 비워 둔다) */
 const GLYPH = { pen: "〰", arrow: "→", box: "▭" } as const;
+
+/** 공유 덱 창: 의견만 · 보기만 권한이면 요청칸 대신 까닭 한 줄 (2026.11.27). 보내도 덱 주인 쪽에서 막히니 적게 두지 않는다 */
+function ComposerOrLock() {
+	const t = useT();
+	const role = useRole();
+	if (role === "comment" || role === "view") return <div className="composer-lock" role="note">{t(role === "comment" ? "roleCommentNote" : "roleViewNote")}</div>;
+	return <Composer />;
+}
 
 function Composer() {
 	const t = useT();

@@ -42,6 +42,37 @@ pub struct Device {
 	/// 「내 Claude」 전용 열쇠의 해시 (runner.rs) — 공유 덱 창 없이 앱을 켜자마자 붙는다. 기기를 내보내면 함께 사라진다
 	#[serde(default)]
 	pub runner: Option<String>,
+	/// 덱 주인이 정한 권한 (2026.11.27) — 없는 장부(옛 collab.json)는 「편집」이라 지금까지처럼 다 한다
+	#[serde(default)]
+	pub role: Role,
+}
+
+/// 팀원 권한 — 덱 주인이 공유 창 「들어온 사람」에서 사람마다 고른다. 막는 곳은 collab.rs(의도 이름) · collab.ts(어느 쪽인가)
+///   edit      모든 쪽을 고치고 Claude 에 요청한다 (기본 · 전과 같다)
+///   assigned  덱 주인이 맡긴 쪽만 고친다 — 직접 편집 · 요청 · 되돌리기가 그 쪽에만. 의견은 어느 쪽에나
+///   comment   의견(핀)만 남긴다
+///   view      보기만
+#[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Debug, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum Role {
+	#[default]
+	Edit,
+	Assigned,
+	Comment,
+	/// 모르는 값(앞으로 생길 권한을 옛 앱이 읽을 때)은 가장 좁은 「보기만」으로 — 장부 전체를 못 읽어 모든 기기가 사라지지 않게
+	#[serde(other)]
+	View,
+}
+
+impl Role {
+	/// 이 권한으로 부를 수 있는 의도인가 — 쪽을 가리는 것은 덱 주인 화면이 한다(담당은 덱마다 다르고 서버는 모른다)
+	pub fn allows(self, intent: &str) -> bool {
+		match self {
+			Role::Edit | Role::Assigned => true,
+			Role::Comment => matches!(intent, "pinAdd" | "pinUpdate" | "pinRemove" | "pinResolve"),
+			Role::View => false,
+		}
+	}
 }
 
 #[derive(Debug, PartialEq)]
@@ -117,7 +148,9 @@ impl Book {
 		let secret = random();
 		// 개인 링크는 호스트가 정한 한 사람이라 휴대폰 · 노트북으로 두 번 들어와도 같은 이름이다
 		let name = link.name.clone().unwrap_or_else(|| self.unique(&clean_name(name), reserved));
-		let d = Device { id: uuid::Uuid::new_v4().simple().to_string()[..10].to_string(), hash: hash(&secret), name, link: link.id.clone(), created: now, seen: now, runner: None };
+		// 같은 이름(개인 링크로 두 기기)으로 이미 들어온 사람이면 그 권한을 잇는다 — 휴대폰으로 들어왔다고 보기만이 편집이 되지 않게
+		let role = self.devices.iter().find(|d| d.name == name).map(|d| d.role).unwrap_or_default();
+		let d = Device { id: uuid::Uuid::new_v4().simple().to_string()[..10].to_string(), hash: hash(&secret), name, link: link.id.clone(), created: now, seen: now, runner: None, role };
 		self.devices.push(d.clone());
 		(d, secret)
 	}
@@ -154,6 +187,19 @@ impl Book {
 		let d = self.devices.iter_mut().find(|d| d.runner.as_deref().is_some_and(|r| same(r, &h)))?;
 		d.seen = now;
 		Some(d.clone())
+	}
+
+	/// 권한을 바꾼다 — 그 기기와 이름이 같은 기기 모두. 담당 · 핀 · 되돌리기가 이름으로 가르므로 권한도 사람(이름) 단위다
+	pub fn set_role(&mut self, id: &str, role: Role) -> bool {
+		let Some(name) = self.devices.iter().find(|d| d.id == id).map(|d| d.name.clone()) else { return false };
+		for d in self.devices.iter_mut().filter(|d| d.name == name) {
+			d.role = role;
+		}
+		true
+	}
+
+	pub fn role_of(&self, id: &str) -> Role {
+		self.devices.iter().find(|d| d.id == id).map(|d| d.role).unwrap_or_default()
 	}
 
 	pub fn remove_device(&mut self, id: &str) -> bool {
@@ -263,6 +309,27 @@ mod tests {
 		b.remove_device(&d.id);
 		assert!(b.device_by_runner(&k2, 1).is_none(), "내보내면 열쇠도 사라진다");
 		assert!(b.runner_key("없는 기기").is_none());
+	}
+
+	#[test]
+	fn roles_follow_the_person_and_gate_intents() {
+		let mut b = Book::default();
+		let p = b.new_link(Some("민수".into()), None, 0);
+		let (phone, _) = b.join(&p, "", &[], 0);
+		assert_eq!(phone.role, Role::Edit, "처음은 편집 — 전과 같다");
+		assert!(b.set_role(&phone.id, Role::Comment));
+		let (laptop, _) = b.join(&p, "", &[], 0);
+		assert_eq!(laptop.role, Role::Comment, "같은 사람의 새 기기는 그 권한을 잇는다");
+		b.set_role(&laptop.id, Role::View);
+		assert_eq!(b.role_of(&phone.id), Role::View, "권한은 이름 단위로 바뀐다");
+		assert!(Role::Comment.allows("pinAdd") && !Role::Comment.allows("send") && !Role::Comment.allows("direct"));
+		assert!(!Role::View.allows("pinAdd") && !Role::View.allows("upload"));
+		assert!(Role::Assigned.allows("direct"));
+		// 옛 장부(role 없음)는 편집, 모르는 값은 보기만 — 어느 쪽이든 장부는 읽힌다
+		let old: Device = serde_json::from_str(r#"{"id":"a","hash":"h","name":"n","link":"l","created":0,"seen":0}"#).unwrap();
+		assert_eq!(old.role, Role::Edit);
+		let odd: Device = serde_json::from_str(r#"{"id":"a","hash":"h","name":"n","link":"l","created":0,"seen":0,"role":"owner"}"#).unwrap();
+		assert_eq!(odd.role, Role::View);
 	}
 
 	#[test]
