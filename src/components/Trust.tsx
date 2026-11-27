@@ -5,7 +5,7 @@
 // 승인자가 한 명이고 열쇠가 이 PC 하나뿐이거나, 이 PC 에만 있는 변경이 있으면 경고색이다
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { ask as askBox, open as pickFile, save } from "@tauri-apps/plugin-dialog";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { api, type SyncStatus, type TrustPending, type TrustRole, type TrustView } from "../lib/api";
 import { tNow, useT } from "../lib/i18n";
 import { useDeck } from "../lib/store";
@@ -16,12 +16,18 @@ const ROLES: TrustRole[] = ["edit", "assigned", "comment", "view", "approve"];
 /** 1분마다 주고받는다: 켜져 있는 명부 사람에게 iroh 로 묻고(peers.rs), 우편함을 정한 덱이면 우편함도 돈다(sync.rs).
  *  명부에 나 말고 아무도 없으면 둘 다 아무것도 하지 않는다. 앱 안 Claude 가 일하는 동안은 건너뛴다(우편함이 덱 폴더를 판으로 남기므로) */
 export function useSync(dir: string | null) {
+	// 앞 차례가 아직 도는 중이면 건너뛴다 : 꺼진 팀원 기다리기 · 큰 묶음 받기가 1분을 넘길 수 있다 (Rust 쪽도 sync.rs busy 로 막는다)
+	const going = useRef(false);
 	useEffect(() => {
 		if (!dir) return;
 		let live = true;
 		const tick = async () => {
 			const st = useDeck.getState();
-			if (!live || st.running || st.dir !== dir) return;
+			if (!live || going.current || st.running || st.dir !== dir) return;
+			going.current = true;
+			try { await round(st); } finally { going.current = false; }
+		};
+		const round = async (st: ReturnType<typeof useDeck.getState>) => {
 			const p = await api.syncPeersRun(dir).catch(() => null);
 			const r = await api.syncMailboxRun(dir).catch(() => null);
 			if (!live) return;
@@ -82,7 +88,7 @@ export function TrustLine({ dir }: { dir: string }) {
 	const [v, setV] = useState<TrustView | null>(null);
 	const [sync, setSync] = useState<SyncStatus | null>(null);
 	const [open, setOpen] = useState(false);
-	const [secret, setSecret] = useState<string | null>(null);
+	const [secret, setSecret] = useState<{ secret: string; pending: boolean } | null>(null);
 	const [ask, setAsk] = useState<"name" | "recover" | "join" | null>(null);
 	const [text, setText] = useState("");
 	const [roles, setRoles] = useState<Record<string, TrustRole>>({});
@@ -182,9 +188,10 @@ export function TrustLine({ dir }: { dir: string }) {
 					{secret && (
 						<div className="secret" role="alert">
 							<p>{t("trustSecretHint")}</p>
-							<code>{secret}</code>
+							{secret.pending && <p><b>{t("trustSecretPending")}</b></p>}
+							<code>{secret.secret}</code>
 							<div className="acts">
-								<button onClick={() => { copyText(secret); notify(t("trustSecretCopied"), "ok"); }}>{t("copy")}</button>
+								<button onClick={() => { copyText(secret.secret); notify(t("trustSecretCopied"), "ok"); }}>{t("copy")}</button>
 								<button onClick={() => setSecret(null)}>{t("trustSecretDone")}</button>
 							</div>
 						</div>

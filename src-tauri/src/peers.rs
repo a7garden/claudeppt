@@ -29,6 +29,9 @@ const MAX: u64 = 4 << 30;
 struct Ask {
 	deck: String,
 	haves: Vec<String>,
+	/// 받은 묶음을 다 들였다는 알림 : 그때의 haves 를 보낸다. 주는 쪽은 이것을 받고서야 「다른 PC 에도 있음」으로 적는다
+	#[serde(default)]
+	ack: bool,
 }
 
 fn temp(name: &str) -> PathBuf {
@@ -50,6 +53,9 @@ pub async fn serve(conn: Connection) {
 				let out = out.clone();
 				tauri::async_runtime::spawn_blocking(move || {
 					let d = sync::deck_dir(&ask.deck).ok_or("이 PC 에 없는 덱")?;
+					if ask.ack {
+						return sync::acknowledge(&d, &who, &ask.haves).map(|_| false);
+					}
 					sync::serve_bundle(&d, &who, &ask.haves, &out)
 				})
 				.await
@@ -85,7 +91,7 @@ async fn pull(ep: &Endpoint, d: &Path, deck: &str, to: impl Into<iroh::EndpointA
 	let (mut send, mut recv) = conn.open_bi().await.map_err(err)?;
 	let dd = d.to_path_buf();
 	let haves = tauri::async_runtime::spawn_blocking(move || sync::haves(&dd)).await.map_err(err)?;
-	send.write_all(&serde_json::to_vec(&Ask { deck: deck.into(), haves }).map_err(err)?).await.map_err(err)?;
+	send.write_all(&serde_json::to_vec(&Ask { deck: deck.into(), haves, ack: false }).map_err(err)?).await.map_err(err)?;
 	send.finish().map_err(err)?;
 	let mut head = [0u8; 1];
 	recv.read_exact(&mut head).await.map_err(|e| format!("답을 읽지 못했다: {e}"))?;
@@ -114,6 +120,19 @@ async fn pull(ep: &Endpoint, d: &Path, deck: &str, to: impl Into<iroh::EndpointA
 	}
 	.await;
 	let _ = tokio::fs::remove_file(&file).await;
+	if r.is_ok() {
+		// 다 들였다고 알린다 : 상대는 이것을 받고서야 「다른 PC 에도 있음」으로 적는다
+		let dd = d.to_path_buf();
+		if let Ok(haves) = tauri::async_runtime::spawn_blocking(move || sync::haves(&dd)).await {
+			if let Ok((mut s2, mut r2)) = conn.open_bi().await {
+				if let Ok(body) = serde_json::to_vec(&Ask { deck: deck.into(), haves, ack: true }) {
+					let _ = s2.write_all(&body).await;
+					let _ = s2.finish();
+					let _ = r2.read_to_end(4096).await;
+				}
+			}
+		}
+	}
 	conn.close(0u32.into(), b"done");
 	r.map(Some)
 }
@@ -140,6 +159,7 @@ pub async fn sync_peers_run(app: AppHandle, dir: String) -> Res<PeerRan> {
 	if peers.is_empty() {
 		return Ok(ran);
 	}
+	let Some(_b) = sync::busy(&d) else { return Ok(ran) };
 	let ep = crate::p2p::endpoint(&app).await?;
 	// 한 사람씩 : 같은 덱 폴더에 묶음을 둘 이상 동시에 들이지 않게 (들이는 동안 잠그지만 받기까지는 차례로 하는 편이 간단하다)
 	for p in peers {

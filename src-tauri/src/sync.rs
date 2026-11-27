@@ -25,6 +25,10 @@ const PROPS: &str = "refs/cppt/props/";
 const JOINS: &str = "refs/cppt/join/";
 /// 마지막으로 내보낸 ref 들 : 다음 묶음은 이것 뒤의 것만 담는다(증분). 이름은 원래 ref 에서 refs/cppt/ 를 뗀 것
 const SENT: &str = "refs/cppt/sent/";
+/// 손으로 내보낸 묶음 파일(sync_export)의 바탕 : 우편함(SENT)과 나눈다.
+/// 2026.11.27 : 처음에는 같이 썼다. 한 사람에게 메일로 보낸 묶음이 바탕을 옮기면, 우편함 묶음이 그 사람만 가진 커밋을 빼고 만들어져
+///              우편함만 보는 사람은 영영 들이지 못했다
+const SENT_FILE: &str = "refs/cppt/sent-file/";
 /// 앱끼리 상대에게 내준 ref 들 (peers.rs) : 「이 PC 에만 있음」을 가리는 데만 쓴다. 우편함의 증분 바탕(SENT)과 섞으면
 /// 우편함만 보는 사람이 받지 못한 커밋을 빼고 보내게 된다
 const GIVEN: &str = "refs/cppt/given/";
@@ -185,17 +189,17 @@ fn note_file(d: &Path) -> PathBuf {
 }
 
 /// 묶음을 쓴다. full 이면 처음 받는 사람용(전 이력), 아니면 지난번 내보낸 뒤의 것만. 보낼 것이 없으면 None
-fn export(d: &Path, out: &Path, full: bool) -> Res<Option<PathBuf>> {
+fn export(d: &Path, out: &Path, full: bool, base: &str) -> Res<Option<PathBuf>> {
 	let _l = vcs::lock(d)?;
 	vcs::commit_all(d, "남아 있던 변경", None)?;
 	trust::seal(d);
 	let st = trust::load(d)?.ok_or("이 덱에는 아직 승인 기록이 없다")?;
 	make_prop(d, &st)?;
 	let names = names(d);
-	let sent = refs(d, SENT);
+	let sent = refs(d, base);
 	let changed = full || names.iter().any(|r| {
 		let now = rev(d, r);
-		let then = sent.iter().find(|(s, _)| s.strip_prefix(SENT) == r.strip_prefix("refs/cppt/")).map(|(_, h)| h.clone());
+		let then = sent.iter().find(|(s, _)| s.strip_prefix(base) == r.strip_prefix("refs/cppt/")).map(|(_, h)| h.clone());
 		now != then
 	});
 	if !changed {
@@ -207,7 +211,7 @@ fn export(d: &Path, out: &Path, full: bool) -> Res<Option<PathBuf>> {
 	}
 	for r in &names {
 		if let (Some(h), Some(tail)) = (rev(d, r), r.strip_prefix("refs/cppt/")) {
-			vcs::run(d, &["update-ref", &format!("{SENT}{tail}"), &h])?;
+			vcs::run(d, &["update-ref", &format!("{base}{tail}"), &h])?;
 		}
 	}
 	let _ = std::fs::write(note_file(d), serde_json::to_string(&SentNote { at: trust::now(), path: out.to_string_lossy().into() }).unwrap_or_default());
@@ -264,7 +268,7 @@ fn write_bundle(d: &Path, names: &[String], not: &[String], out: &Path) -> Res<b
 
 /// 내가 가진 끝들 : 상대가 묶음에서 뺄 것
 pub(crate) fn haves(d: &Path) -> Vec<String> {
-	let mut out: Vec<String> = refs(d, "refs/cppt/").into_iter().filter(|(r, _)| !r.starts_with(INBOX) && !r.starts_with(SENT) && !r.starts_with(GIVEN)).map(|(_, h)| h).collect();
+	let mut out: Vec<String> = refs(d, "refs/cppt/").into_iter().filter(|(r, _)| ![INBOX, SENT, SENT_FILE, GIVEN].iter().any(|p| r.starts_with(p))).map(|(_, h)| h).collect();
 	out.extend(rev(d, "HEAD"));
 	out.sort();
 	out.dedup();
@@ -285,13 +289,33 @@ pub(crate) fn serve_bundle(d: &Path, key: &str, haves: &[String], out: &Path) ->
 	let not: Vec<String> = haves.iter().filter(|h| h.len() == 40 && h.chars().all(|c| c.is_ascii_hexdigit()) && vcs::run(d, &["cat-file", "-e", &format!("{h}^{{commit}}")]).is_ok()).cloned().collect();
 	let names = names(d);
 	let made = write_bundle(d, &names, &not, out)?;
-	// 이제 다른 PC 하나에 이것들이 있다 (줄 것이 없었으면 이미 있었다)
-	for r in &names {
-		if let (Some(h), Some(tail)) = (rev(d, r), r.strip_prefix("refs/cppt/")) {
-			let _ = vcs::run(d, &["update-ref", &format!("{GIVEN}{tail}"), &h]);
-		}
+	// 줄 것이 없었으면 상대가 이미 다 가졌다. 줄 것이 있었으면 상대가 다 받아 들였다고 알려 올 때(acknowledge) 적는다
+	// 2026.11.27 : 처음에는 묶음을 쓰자마자 적었다. 보내다 끊겨도 「이 PC 에만 있음」 경고와 창 닫기 붙잡기가 꺼졌다
+	if !made {
+		mark_given(d, &names, haves);
 	}
 	Ok(made)
+}
+
+/// 상대가 가진 끝(haves) 중 내 ref 와 같거나 그 뒤인 것이 있으면 「다른 PC 에도 있음」으로 적는다
+fn mark_given(d: &Path, names: &[String], haves: &[String]) {
+	let known: Vec<&String> = haves.iter().filter(|h| h.len() == 40 && h.chars().all(|c| c.is_ascii_hexdigit()) && vcs::run(d, &["cat-file", "-e", &format!("{h}^{{commit}}")]).is_ok()).collect();
+	for r in names {
+		let (Some(v), Some(tail)) = (rev(d, r), r.strip_prefix("refs/cppt/")) else { continue };
+		if known.iter().any(|h| **h == v || Git(d).is_ancestor(&v, h)) {
+			let _ = vcs::run(d, &["update-ref", &format!("{GIVEN}{tail}"), &v]);
+		}
+	}
+}
+
+/// 상대가 묶음을 받아 들인 뒤 알려 온 끝들 : 이제 그 PC 에도 있는 것을 적는다
+pub(crate) fn acknowledge(d: &Path, key: &str, haves: &[String]) -> Res<()> {
+	let st = trust::load(d)?.ok_or("승인 기록이 없는 덱")?;
+	if !st.roster.person_of(key).is_some_and(|p| p.replica) {
+		return Err("명부에 없는 사람".into());
+	}
+	mark_given(d, &names(d), haves);
+	Ok(())
 }
 
 /// 사본을 주고받을 사람의 열쇠 : 명부에서 사본을 받는 사람 모두(같은 사람의 다른 기기 포함), 이 앱 열쇠만 빼고
@@ -505,17 +529,41 @@ fn approve(d: &Path, key: &str, id: &str) -> Res<Vec<String>> {
 	if st.roster.person_of(&me).is_none_or(|x| x.role != Role::Approve) {
 		return Err("이 PC 는 이 덱의 승인자가 아니다".into());
 	}
-	let left = catch_up(d)?;
-	if !left.is_empty() {
-		return Err(format!("승인된 줄기를 먼저 내 줄에 합쳐야 한다 (겹친 파일: {})", left.join(", ")));
+	if Git(d).is_ancestor(&p.tip, &st.head) {
+		return Err("이미 줄기에 들어간 제안이다".into());
 	}
+	// 승인된 줄기 위에서 따로(작업 폴더 하나를 잠깐 열어) 합친다. 내 줄(main)에 합치면 내가 아직 승인받지 않은 변경
+	// (「다른 승인자 확인 받기」를 켠 덱)이 남의 제안에 묻어 줄기에 들어간다
 	let name = st.roster.person_of(&p.by).map(|x| x.name.clone()).unwrap_or_default();
-	let m = crate::branch::merge_into(d, &p.tip, &format!("{name} 의 제안을 승인함"), Some(&name), None)?;
-	if !m.ok {
-		return Ok(m.conflicts);
+	let wt = crate::control::data_dir().join("approve").join(uuid::Uuid::new_v4().simple().to_string());
+	std::fs::create_dir_all(wt.parent().unwrap()).map_err(err)?;
+	vcs::run(d, &["worktree", "add", "-q", "--detach", &wt.to_string_lossy(), &st.head])?;
+	let merged = (|| -> Res<Result<String, Vec<String>>> {
+		let o = vcs::git(&wt)
+			.env("GIT_AUTHOR_NAME", name.replace(['<', '>'], ""))
+			.env("GIT_AUTHOR_EMAIL", "member@claudeppt")
+			.args(["merge", "--no-ff", "--no-edit", "-m", &format!("{name} 의 제안을 승인함"), &p.tip])
+			.output()
+			.map_err(err)?;
+		if o.status.success() {
+			return Ok(Ok(vcs::run(&wt, &["rev-parse", "HEAD"])?));
+		}
+		let files: Vec<String> = vcs::run(&wt, &["diff", "--name-only", "--diff-filter=U"]).unwrap_or_default().lines().map(String::from).collect();
+		let _ = vcs::run(&wt, &["merge", "--abort"]);
+		Ok(Err(if files.is_empty() { vec![String::from_utf8_lossy(&o.stderr).trim().to_string()] } else { files }))
+	})();
+	let _ = vcs::run(d, &["worktree", "remove", "--force", &wt.to_string_lossy()]);
+	let _ = std::fs::remove_dir_all(&wt);
+	let head = match merged? {
+		Ok(h) => h,
+		Err(files) => return Ok(files),
+	};
+	{
+		let _l = vcs::lock(d)?;
+		trust::approve_at(d, &head, trust::Proposal { by: p.by.clone(), id: p.id.clone(), tip: p.tip.clone() })?;
 	}
-	let _l = vcs::lock(d)?;
-	trust::seal_with(d, Some(trust::Proposal { by: p.by.clone(), id: p.id.clone(), tip: p.tip.clone() }))?;
+	// 승인된 줄기를 내 줄에도 : 겹치면 내 줄은 그대로 두고 한 줄 경고(줄기를 아직 합치지 못함)로 남는다
+	let _ = catch_up(d)?;
 	Ok(vec![])
 }
 
@@ -562,8 +610,9 @@ fn mailbox_run(d: &Path) -> Res<Ran> {
 	let mut ran = Ran::default();
 	let stamp = chrono::Local::now().format("%Y%m%d-%H%M%S");
 	let name = format!("{mine}-{stamp}-{}.cpptb", &uuid::Uuid::new_v4().simple().to_string()[..4]);
-	ran.sent = export(d, &folder.join(name), false)?.map(|p| p.to_string_lossy().into());
-	let mut seen: Vec<String> = std::fs::read_to_string(seen_file(d)).ok().and_then(|t| serde_json::from_str(&t).ok()).unwrap_or_default();
+	ran.sent = export(d, &folder.join(name), false, SENT)?.map(|p| p.to_string_lossy().into());
+	let mut book: Seen = std::fs::read_to_string(seen_file(d)).ok().and_then(|t| serde_json::from_str(&t).ok()).unwrap_or_default();
+	let seen = &mut book.seen;
 	let mut todo: Vec<String> = std::fs::read_dir(&folder)
 		.map_err(err)?
 		.filter_map(|e| e.ok()?.file_name().into_string().ok())
@@ -583,9 +632,15 @@ fn mailbox_run(d: &Path) -> Res<Ran> {
 					progress = true;
 				}
 				Err(e) if e == MISSING => left.push(n),
+				// 클라우드 자리 표시 파일 · 동기화 중 잠긴 파일은 다음 차례에 읽힌다 : 열 번까지 다시 해 보고 그 뒤에 넘긴다.
+				// 2026.11.27 : 처음에는 한 번 실패하면 넘겼다. 그러면 그 사람의 다음 묶음들이 모두 앞선 묶음을 기다리며 멈췄다
 				Err(e) => {
-					ran.errors.push(format!("{n}: {e}"));
-					seen.push(n);
+					let t = book.tries.entry(n.clone()).or_insert(0);
+					*t += 1;
+					if *t >= 10 {
+						ran.errors.push(format!("{n}: {e}"));
+						seen.push(n);
+					}
 				}
 			}
 		}
@@ -595,8 +650,54 @@ fn mailbox_run(d: &Path) -> Res<Ran> {
 		}
 	}
 	ran.waiting = todo.len();
-	let _ = std::fs::write(seen_file(d), serde_json::to_string(&seen).unwrap_or_default());
+	book.tries.retain(|n, _| !book.seen.contains(n));
+	let _ = std::fs::write(seen_file(d), serde_json::to_string(&book).unwrap_or_default());
 	Ok(ran)
+}
+
+/// 우편함에서 읽은 파일 · 읽다 실패한 횟수
+#[derive(Serialize, Default)]
+struct Seen {
+	seen: Vec<String>,
+	tries: std::collections::BTreeMap<String, u32>,
+}
+
+impl<'de> Deserialize<'de> for Seen {
+	/// 처음 꼴(파일 이름 목록)도 읽는다
+	fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+		#[derive(Deserialize)]
+		#[serde(untagged)]
+		enum Any {
+			Old(Vec<String>),
+			New { seen: Vec<String>, #[serde(default)] tries: std::collections::BTreeMap<String, u32> },
+		}
+		Ok(match Any::deserialize(d)? {
+			Any::Old(seen) => Seen { seen, tries: Default::default() },
+			Any::New { seen, tries } => Seen { seen, tries },
+		})
+	}
+}
+
+/// 같은 덱을 두 번 겹쳐 주고받지 않는다 : 1분 주고받기가 앞 차례(꺼진 팀원 기다리기 · 큰 묶음)가 끝나기 전에 다시 돌 수 있다
+static BUSY: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+
+pub(crate) struct Busy(String);
+
+impl Drop for Busy {
+	fn drop(&mut self) {
+		BUSY.lock().unwrap().retain(|x| *x != self.0);
+	}
+}
+
+/// 이 덱을 주고받는 중이 아니면 표를 받는다
+pub(crate) fn busy(d: &Path) -> Option<Busy> {
+	let k = d.to_string_lossy().to_lowercase();
+	let mut b = BUSY.lock().unwrap();
+	if b.contains(&k) {
+		return None;
+	}
+	b.push(k.clone());
+	Some(Busy(k))
 }
 
 // ── 앱 명령 ──
@@ -654,8 +755,8 @@ fn status(d: &Path) -> Res<Option<Status>> {
 	// 이 PC 에만 있는 것 : 사슬이 보낸 뒤 바뀌었거나, 승인받지 않은 내 변경이 마지막으로 보낸 제안에 없다
 	// 묶음 · 우편함으로 보냈거나(SENT) 켜져 있던 팀원이 받아 갔으면(GIVEN) 다른 PC 에도 있다
 	let chain_now = rev(d, CHAIN);
-	let chain_out = [SENT, GIVEN].iter().any(|b| rev(d, &format!("{b}chain")) == chain_now);
-	let prop_out = [SENT, GIVEN].iter().any(|b| rev(d, &format!("{b}props/{me}/main")).is_some_and(|p| Git(d).is_ancestor(&main, &p)));
+	let chain_out = [SENT, SENT_FILE, GIVEN].iter().any(|b| rev(d, &format!("{b}chain")) == chain_now);
+	let prop_out = [SENT, SENT_FILE, GIVEN].iter().any(|b| rev(d, &format!("{b}props/{me}/main")).is_some_and(|p| Git(d).is_ancestor(&main, &p)));
 	let peers = peers_of(d).len();
 	let unsent = peers > 0 && (!chain_out || (pending > 0 && who.is_some() && !prop_out));
 	let note: Option<SentNote> = std::fs::read_to_string(note_file(d)).ok().and_then(|t| serde_json::from_str(&t).ok());
@@ -700,7 +801,7 @@ pub fn sync_status(dir: String) -> Res<Option<Status>> {
 /// 묶음 파일로 내보낸다. 보낼 것이 없으면 None
 #[tauri::command(async)]
 pub fn sync_export(dir: String, out: String, full: bool) -> Res<Option<String>> {
-	Ok(export(Path::new(&dir), Path::new(&out), full)?.map(|p| p.to_string_lossy().into()))
+	Ok(export(Path::new(&dir), Path::new(&out), full, SENT_FILE)?.map(|p| p.to_string_lossy().into()))
 }
 
 #[tauri::command(async)]
@@ -768,7 +869,9 @@ pub fn sync_mailbox_set(dir: String, folder: Option<String>) -> Res<()> {
 
 #[tauri::command(async)]
 pub fn sync_mailbox_run(dir: String) -> Res<Ran> {
-	mailbox_run(Path::new(&dir))
+	let d = Path::new(&dir);
+	let Some(_b) = busy(d) else { return Ok(Ran::default()) };
+	mailbox_run(d)
 }
 
 /// 묶음 파일로 덱을 처음 받는다 : dest 는 없거나 빈 폴더
@@ -966,6 +1069,9 @@ mod tests {
 		})
 		.unwrap();
 		assert_eq!(trust::load(&a).unwrap().unwrap().n, n0, "아직 서지 않았다");
+		// 서명을 모으는 동안 판을 남겨 승인 칸이 붙어도 대기 판은 살아 있다
+		put(&a, "slides/x.html", "가");
+		assert_eq!(trust::load(&a).unwrap().unwrap().n, n0 + 1);
 		let v = serde_json::to_value(trust::trust_state(s(&a)).unwrap().unwrap()).unwrap();
 		assert_eq!((v["pending"].as_array().unwrap().len(), v["pending"][0]["mine"].as_bool(), v["pending"][0]["changes"][0]["kind"].as_str()), (1, Some(true), Some("add")));
 		let f2 = box_.join("2.cpptb");
@@ -973,6 +1079,7 @@ mod tests {
 		// 다 : 받아 서명을 더한다 : 과반이 되어 선다
 		as_(3);
 		sync_import(s(&c), s(&f2)).unwrap();
+		put(&c, "slides/y.html", "다");
 		let v = serde_json::to_value(trust::trust_state(s(&c)).unwrap().unwrap()).unwrap();
 		assert_eq!(v["pending"][0]["mine"].as_bool(), Some(false));
 		let h = v["pending"][0]["hash"].as_str().unwrap().to_string();
@@ -987,6 +1094,69 @@ mod tests {
 		assert_eq!((v["people"].as_array().unwrap().len(), v["pending"].as_array().unwrap().len()), (3, 0));
 		as_(7);
 		for p in [&a, &c, &box_] {
+			let _ = std::fs::remove_dir_all(p);
+		}
+	}
+
+	/// 「다른 승인자 확인 받기」를 켠 덱 : 승인자의 제안 승인은 줄기에 들어가고, 승인자 자신의 승인받지 않은 변경은 묻어 들어가지 않는다
+	#[test]
+	fn review_mode_approves_proposals_without_the_approvers_own_changes() {
+		let (a, b, box_) = (tmp("va"), tmp("vb"), tmp("vbox"));
+		std::fs::create_dir_all(&a).unwrap();
+		as_(1);
+		put(&a, "deck.json", "{}");
+		trust::change(&a, &SecretKey::from_bytes(&[1; 32]), |r| {
+			r.review = true;
+			r.people.push(trust::Person { id: "b".into(), name: "나".into(), keys: vec![key(2)], role: Role::Edit, slides: vec![], replica: true });
+			Ok(())
+		})
+		.unwrap();
+		let f1 = box_.join("1.cpptb");
+		sync_export(s(&a), s(&f1), true).unwrap();
+		as_(2);
+		sync_open(s(&f1), s(&b)).unwrap();
+		put(&b, "slides/b.html", "나");
+		let f2 = box_.join("2.cpptb");
+		sync_export(s(&b), s(&f2), false).unwrap().unwrap();
+		as_(1);
+		// 가 자신의 변경 : 확인 모드라 봉하지 않는다
+		put(&a, "slides/a.html", "가 혼자");
+		assert_eq!(status(&a).unwrap().unwrap().pending, 1);
+		sync_import(s(&a), s(&f2)).unwrap();
+		let n0 = trust::load(&a).unwrap().unwrap().n;
+		assert!(sync_approve(s(&a), key(2), "main".into()).unwrap().is_empty());
+		let st = trust::load(&a).unwrap().unwrap();
+		assert_eq!(st.n, n0 + 1, "승인이 줄기에 들어갔다");
+		let files = vcs::run(&a, &["ls-tree", "-r", "--name-only", &st.head]).unwrap();
+		assert!(files.contains("slides/b.html") && !files.contains("slides/a.html"), "{files}");
+		// 내 줄에는 둘 다 · 내 변경은 아직 승인 대기
+		assert_eq!((read(&a, "slides/a.html"), read(&a, "slides/b.html")), ("가 혼자".into(), "나".into()));
+		assert_eq!(status(&a).unwrap().unwrap().pending, 2, "내 변경과, 줄기를 내 줄에 합친 판");
+		as_(7);
+		for p in [&a, &b, &box_] {
+			let _ = std::fs::remove_dir_all(p);
+		}
+	}
+
+	/// 우편함에서 읽지 못한 파일은 바로 넘기지 않고 다시 해 본다 (클라우드 자리 표시 · 잠김)
+	#[test]
+	fn mailbox_retries_unreadable_files() {
+		let (a, shared) = (tmp("ya"), tmp("yshared"));
+		std::fs::create_dir_all(&a).unwrap();
+		as_(1);
+		put(&a, "deck.json", "{}");
+		sync_mailbox_set(s(&a), Some(s(&shared))).unwrap();
+		let st = trust::load(&a).unwrap().unwrap();
+		let folder = shared.join(&st.deck[..12]);
+		std::fs::create_dir_all(&folder).unwrap();
+		std::fs::write(folder.join("zzzzzzzzzzzz-1.cpptb"), "아직 내려받는 중").unwrap();
+		for _ in 0..9 {
+			assert!(mailbox_run(&a).unwrap().errors.is_empty());
+		}
+		assert_eq!(mailbox_run(&a).unwrap().errors.len(), 1, "열 번째에야 넘기며 알린다");
+		assert!(mailbox_run(&a).unwrap().errors.is_empty(), "그 뒤로는 읽지 않는다");
+		as_(7);
+		for p in [&a, &shared] {
 			let _ = std::fs::remove_dir_all(p);
 		}
 	}

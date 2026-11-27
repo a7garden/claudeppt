@@ -103,7 +103,17 @@ pub struct Proposal {
 #[serde(tag = "kind", rename_all = "lowercase")]
 pub enum Body {
 	/// 명부 판: 줄기는 그대로 두고 명부만 바꾼다. 창세 칸도 이것이다(head = 그때 줄기 끝)
-	Roster { roster: Roster, head: String },
+	/// 서명은 사슬 자리(앞 칸 · 번호 · head)가 아니라 「base(바꾸기 전 명부의 해시) · since(낸 때의 칸 번호) · roster」에 건다 (roster_bytes).
+	/// 2026.11.27 : 처음에는 칸 전체에 걸었다. 그러면 서명을 모으는 동안 누가 판을 하나만 남겨도(승인 칸이 붙어도) 대기 판이 낡아 버려,
+	///              승인자가 둘 이상인 덱에서 명부를 사실상 바꿀 수 없었다. 이제 명부가 그대로인 동안은 대기 판이 살아 있다
+	Roster {
+		roster: Roster,
+		head: String,
+		#[serde(default)]
+		since: u64,
+		#[serde(default)]
+		base: String,
+	},
 	/// 줄기를 base 에서 head 로 옮기는 승인. rewind 는 승인자가 줄기를 뒤로 돌린 때만 (앱 밖 git 으로 줄기를 되감은 덱)
 	Approve {
 		base: String,
@@ -146,6 +156,9 @@ pub struct State {
 	/// 승인된 줄기 끝
 	pub head: String,
 	pub roster: Roster,
+	/// 지금 명부를 세운 칸 번호 : 이보다 앞서 낸 명부 판은 낡았다(옛 판을 다시 들이밀어 되살리지 못하게)
+	#[serde(default)]
+	pub roster_n: u64,
 }
 
 // ── 서명 ──
@@ -190,6 +203,34 @@ pub fn signed_bytes(e: &Entry) -> Vec<u8> {
 	s.into_bytes()
 }
 
+const ROSTER_DOMAIN: &str = "claudeppt/roster/1\n";
+
+/// 명부 판의 서명 바이트 : 자리와 상관없이 「어느 덱 · 어떤 명부에서 · 언제 낸 · 어떤 명부로」만
+fn roster_bytes(e: &Entry) -> Option<Vec<u8>> {
+	let Body::Roster { roster, since, base, .. } = &e.body else { return None };
+	let v = serde_json::json!({ "deck": e.deck, "since": since, "base": base, "roster": roster });
+	let mut s = ROSTER_DOMAIN.to_string();
+	canon(&v, &mut s);
+	Some(s.into_bytes())
+}
+
+/// 이 칸에서 서명이 걸리는 바이트 : 명부 판은 roster_bytes, 승인은 칸 전체(서명 칸 빼고)
+fn sig_bytes(e: &Entry) -> Vec<u8> {
+	roster_bytes(e).unwrap_or_else(|| signed_bytes(e))
+}
+
+/// 명부 하나의 해시 : 명부 판의 base 가 이것이다
+pub(crate) fn roster_hash(r: &Roster) -> String {
+	let mut s = String::new();
+	canon(&serde_json::to_value(r).unwrap(), &mut s);
+	Sha256::digest(s.as_bytes()).iter().map(|b| format!("{b:02x}")).collect()
+}
+
+/// 명부 판의 이름 : 자리와 상관없이 같은 판이면 같다 (서명 대기 판을 가리키는 데 쓴다)
+pub(crate) fn proposal_id(e: &Entry) -> String {
+	Sha256::digest(sig_bytes(e)).iter().map(|b| format!("{b:02x}")).collect()
+}
+
 /// 칸의 해시: 서명은 넣지 않는다 (명부 판에 서명이 더 모여도 같은 판이다)
 pub fn hash(e: &Entry) -> String {
 	Sha256::digest(signed_bytes(e)).iter().map(|b| format!("{b:02x}")).collect()
@@ -200,7 +241,7 @@ pub fn key_id(k: &SecretKey) -> String {
 }
 
 pub fn sign(e: &mut Entry, k: &SecretKey) {
-	let sig = k.sign(&signed_bytes(e));
+	let sig = k.sign(&sig_bytes(e));
 	let key = key_id(k);
 	e.sigs.retain(|s| s.key != key);
 	e.sigs.push(Sig { key, sig: base64::engine::general_purpose::STANDARD.encode(sig.to_bytes()) });
@@ -209,7 +250,7 @@ pub fn sign(e: &mut Entry, k: &SecretKey) {
 fn check_sig(e: &Entry, s: &Sig) -> bool {
 	let Ok(pk) = PublicKey::from_z32(&s.key) else { return false };
 	let Some(b) = base64::engine::general_purpose::STANDARD.decode(&s.sig).ok().and_then(|b| <[u8; 64]>::try_from(b).ok()) else { return false };
-	pk.verify(&signed_bytes(e), &Signature::from_bytes(&b)).is_ok()
+	pk.verify(&sig_bytes(e), &Signature::from_bytes(&b)).is_ok()
 }
 
 /// 서명이 맞는 열쇠들. 하나라도 틀린 서명이 있으면 칸 전체를 받지 않는다: 틀린 서명을 섞어 두는 것은 실수거나 장난이다
@@ -287,8 +328,8 @@ pub fn apply(st: Option<&State>, e: &Entry, repo: &dyn Repo) -> Result<State, St
 	let signed = signers(e)?;
 	let Some(st) = st else {
 		// 창세: 덱을 만든 사람 한 명의 서명. 그 사람은 명부의 승인자여야 한다
-		let Body::Roster { roster, head } = &e.body else { return Err("첫 칸이 명부가 아니다".into()) };
-		if e.n != 0 || e.prev.is_some() || !e.deck.is_empty() {
+		let Body::Roster { roster, head, since, base } = &e.body else { return Err("첫 칸이 명부가 아니다".into()) };
+		if e.n != 0 || e.prev.is_some() || !e.deck.is_empty() || *since != 0 || !base.is_empty() {
 			return Err("첫 칸의 꼴이 맞지 않다".into());
 		}
 		sane(roster)?;
@@ -298,7 +339,7 @@ pub fn apply(st: Option<&State>, e: &Entry, repo: &dyn Repo) -> Result<State, St
 		if !head.is_empty() && repo.tree(head).is_none() {
 			return Err("첫 칸의 줄기 커밋이 저장소에 없다".into());
 		}
-		return Ok(State { deck: hash(e), n: 0, tip: hash(e), head: head.clone(), roster: roster.clone() });
+		return Ok(State { deck: hash(e), n: 0, tip: hash(e), head: head.clone(), roster: roster.clone(), roster_n: 0 });
 	};
 	if e.deck != st.deck {
 		return Err("다른 덱의 기록이다".into());
@@ -311,16 +352,23 @@ pub fn apply(st: Option<&State>, e: &Entry, repo: &dyn Repo) -> Result<State, St
 	people.sort();
 	people.dedup();
 	match &e.body {
-		Body::Roster { roster, head } => {
+		Body::Roster { roster, head, since, base } => {
 			if *head != st.head {
 				return Err("명부 판이 지금 줄기 위에 있지 않다".into());
+			}
+			// 서명은 자리에 걸리지 않으므로 「지금 명부에서 · 지금 명부가 선 뒤에 낸 판」인지를 여기서 본다
+			if *base != roster_hash(&st.roster) || *since < st.roster_n || *since > st.n {
+				return Err("낡은 명부 판이다 (그 사이 명부가 바뀌었다)".into());
+			}
+			if *roster == st.roster {
+				return Err("명부가 바뀌지 않는 판이다".into());
 			}
 			sane(roster)?;
 			let total = st.roster.approvers().count();
 			if people.len() * 2 <= total {
 				return Err(format!("명부를 바꾸려면 승인자 과반의 서명이 있어야 한다 ({}/{total})", people.len()));
 			}
-			Ok(State { deck: st.deck.clone(), n: e.n, tip: hash(e), head: st.head.clone(), roster: roster.clone() })
+			Ok(State { deck: st.deck.clone(), n: e.n, tip: hash(e), head: st.head.clone(), roster: roster.clone(), roster_n: e.n })
 		}
 		Body::Approve { base, head, tree, proposal, rewind } => {
 			if *base != st.head {
@@ -345,7 +393,7 @@ pub fn apply(st: Option<&State>, e: &Entry, repo: &dyn Repo) -> Result<State, St
 			if st.roster.review && who.is_some_and(|w| people.iter().all(|id| *id == w.id)) {
 				return Err("「다른 승인자 확인 받기」가 켜져 있어 자기 변경을 스스로 승인하지 못한다".into());
 			}
-			Ok(State { deck: st.deck.clone(), n: e.n, tip: hash(e), head: head.clone(), roster: st.roster.clone() })
+			Ok(State { deck: st.deck.clone(), n: e.n, tip: hash(e), head: head.clone(), roster: st.roster.clone(), roster_n: st.roster_n })
 		}
 	}
 }
@@ -648,7 +696,7 @@ fn genesis(d: &Path, head: &str, k: &SecretKey) -> Res<State> {
 		let _ = std::fs::write(d.join(".gitattributes"), crate::deckmerge::ATTRS);
 	}
 	let me = Person { id: new_person_id(), name: my_name(), keys: vec![key_id(k)], role: Role::Approve, slides: vec![], replica: true };
-	let mut e = Entry { v: 1, deck: String::new(), n: 0, prev: None, at: now(), body: Body::Roster { roster: Roster { people: vec![me], review: false }, head: head.into() }, sigs: vec![] };
+	let mut e = Entry { v: 1, deck: String::new(), n: 0, prev: None, at: now(), body: Body::Roster { roster: Roster { people: vec![me], review: false }, head: head.into(), since: 0, base: String::new() }, sigs: vec![] };
 	sign(&mut e, k);
 	push(d, None, &e)
 }
@@ -657,15 +705,25 @@ fn genesis(d: &Path, head: &str, k: &SecretKey) -> Res<State> {
 /// 사슬이 없는 덱은 여기서 창세를 만든다: 지금 쓰는 덱이 처음 판을 남길 때 저절로 옮겨진다.
 /// 실패해도 판 남기기는 그대로 둔다: 봉하지 못한 줄기는 다음 판에서 함께 봉한다
 pub fn seal(d: &Path) {
-	if let Err(e) = seal_with(d, None) {
+	if let Err(e) = try_seal(d) {
 		eprintln!("서명 기록을 남기지 못했다: {e}");
 	}
 }
 
-/// 봉한다. proposal 을 주면 그 제안을 승인한 기록으로 남긴다(담당 쪽 범위 · 「다른 승인자 확인 받기」가 제안한 사람으로 따져진다)
-pub(crate) fn seal_with(d: &Path, proposal: Option<Proposal>) -> Res<()> {
+/// 앱 열쇠가 디스크에 남아 있나 : 남기지 못한 열쇠(이번 실행에만 있는 열쇠)로 서명하면 다음 실행부터 그 덱의 승인자가 사라진다
+fn key_kept() -> bool {
+	#[cfg(test)]
+	return true;
+	#[cfg(not(test))]
+	crate::p2p::key_saved()
+}
+
+fn try_seal(d: &Path) -> Res<()> {
 	if !is_main_checkout(d) {
 		return Ok(());
+	}
+	if !key_kept() {
+		return Err("앱 열쇠를 저장하지 못해 서명하지 않는다".into());
 	}
 	let Ok(head) = vcs::run(d, &["rev-parse", "--verify", "-q", "HEAD"]) else { return Ok(()) };
 	let k = my_key();
@@ -684,7 +742,7 @@ pub(crate) fn seal_with(d: &Path, proposal: Option<Proposal>) -> Res<()> {
 		let mine = key_id(&k);
 		let Some(p) = st.roster.person_of(&mine) else { return Ok(()) };
 		if p.role != Role::Approve || st.roster.review {
-			// 승인자가 아니거나 다른 승인자의 확인을 받아야 한다: 줄기 밖 변경으로 남는다 (2단계에서 제안이 된다)
+			// 승인자가 아니거나 다른 승인자의 확인을 받아야 한다: 줄기 밖 변경으로 남아 제안이 된다 (sync.rs make_prop)
 			return Ok(());
 		}
 		// 내 줄이 승인된 줄기를 품지 않았다(남이 승인한 줄기를 받았는데 아직 합치지 못했다): 봉하면 남의 승인을 되돌리게 되므로 하지 않는다.
@@ -693,7 +751,7 @@ pub(crate) fn seal_with(d: &Path, proposal: Option<Proposal>) -> Res<()> {
 			return Ok(());
 		}
 		let tree = Git(d).tree(&head).ok_or("줄기 커밋의 트리를 읽지 못했다")?;
-		let mut e = Entry { v: 1, deck: st.deck.clone(), n: st.n + 1, prev: Some(st.tip.clone()), at: now(), body: Body::Approve { base: st.head.clone(), head: head.clone(), tree, proposal: proposal.clone(), rewind: false }, sigs: vec![] };
+		let mut e = Entry { v: 1, deck: st.deck.clone(), n: st.n + 1, prev: Some(st.tip.clone()), at: now(), body: Body::Approve { base: st.head.clone(), head: head.clone(), tree, proposal: None, rewind: false }, sigs: vec![] };
 		sign(&mut e, &k);
 		match push(d, Some(&st), &e) {
 			Ok(_) => return Ok(()),
@@ -703,10 +761,28 @@ pub(crate) fn seal_with(d: &Path, proposal: Option<Proposal>) -> Res<()> {
 	Err("다른 곳에서 같은 때 기록을 남겨 두 번 다 졌다".into())
 }
 
+/// 남의 제안을 승인한다 : head 는 승인된 줄기 위에서 그 제안을 합친 커밋 (sync.rs approve 가 따로 만든다).
+/// 내 줄(main)과 상관없이 줄기를 옮긴다 : 승인자 자신의 승인받지 않은 변경이 남의 제안에 묻어 들어가지 않게 (잠근 채로 부른다)
+pub(crate) fn approve_at(d: &Path, head: &str, proposal: Proposal) -> Res<State> {
+	if !key_kept() {
+		return Err("앱 열쇠를 저장하지 못해 서명하지 않는다".into());
+	}
+	let st = load(d)?.ok_or("이 덱에는 아직 승인 기록이 없다")?;
+	let k = my_key();
+	if st.roster.person_of(&key_id(&k)).is_none_or(|p| p.role != Role::Approve) {
+		return Err("이 PC 는 이 덱의 승인자가 아니다".into());
+	}
+	let tree = Git(d).tree(head).ok_or("합친 커밋을 읽지 못했다")?;
+	let mut e = Entry { v: 1, deck: st.deck.clone(), n: st.n + 1, prev: Some(st.tip.clone()), at: now(), body: Body::Approve { base: st.head.clone(), head: head.into(), tree, proposal: Some(proposal), rewind: false }, sigs: vec![] };
+	sign(&mut e, &k);
+	push(d, Some(&st), &e)
+}
+
 // ── 서명 모으기 ──
 // 명부를 바꾸려면 지금 승인자의 과반이 서명해야 한다. 승인자가 둘 이상이면 한 사람이 낸 판은 「서명 대기」로 남고,
 // 다른 승인자가 묶음 · 앱끼리 주고받기로 받아 서명을 더한다. 과반이 되는 순간 그 PC 가 사슬에 붙인다.
-// 그 사이 사슬이 앞으로 가면(다른 판이 먼저 섰다) 대기 판은 낡아 버린다 : 바뀐 명부 위에서 다시 낸다
+// 서명은 사슬 자리가 아니라 「바꾸기 전 명부 · 낸 때 · 바꾼 명부」에 걸리므로(roster_bytes), 그 사이 승인 칸이 붙어도 대기 판은 살아 있다.
+// 그 사이 명부가 바뀌면(다른 명부 판이 먼저 섰다) 대기 판은 낡아 버린다 : 바뀐 명부 위에서 다시 낸다
 
 /// 지금 명부의 승인자 중 이 칸에 맞는 서명을 한 사람이 과반인가
 fn majority(st: &State, e: &Entry) -> bool {
@@ -720,20 +796,39 @@ fn save_pending(d: &Path, e: &Entry) -> Res<()> {
 	let blob = git_in(d, &["hash-object", "-w", "--stdin"], (serde_json::to_string_pretty(e).map_err(err)? + "\n").as_bytes())?;
 	let tree = git_in(d, &["mktree"], format!("100644 blob {blob}\t{FILE}\n").as_bytes())?;
 	let c = vcs::run(d, &["commit-tree", &tree, "-m", "서명 대기 명부"])?;
-	vcs::run(d, &["update-ref", &format!("{PENDING}{}", hash(e)), &c]).map(|_| ())
+	vcs::run(d, &["update-ref", &format!("{PENDING}{}", proposal_id(e)), &c]).map(|_| ())
+}
+
+/// 대기 판이 지금 명부 위에서 살아 있나 (낸 뒤 명부가 바뀌지 않았다)
+fn alive(st: &State, e: &Entry) -> bool {
+	match &e.body {
+		Body::Roster { since, base, .. } => e.v == 1 && e.deck == st.deck && *base == roster_hash(&st.roster) && *since >= st.roster_n && *since <= st.n,
+		_ => false,
+	}
+}
+
+/// 대기 판을 지금 사슬 끝 자리에 놓는다 : 서명은 자리에 걸리지 않아 그대로 맞다
+fn place(st: &State, e: &Entry) -> Entry {
+	let mut x = e.clone();
+	x.n = st.n + 1;
+	x.prev = Some(st.tip.clone());
+	if let Body::Roster { head, .. } = &mut x.body {
+		*head = st.head.clone();
+	}
+	x
 }
 
 fn read_entry(d: &Path, r: &str) -> Option<Entry> {
 	serde_json::from_str(&vcs::run(d, &["show", &format!("{r}:{FILE}")]).ok()?).ok()
 }
 
-/// 이 사슬 끝 위에 낸 서명 대기 판들. 낡은 것(사슬이 앞으로 갔다)은 지운다
+/// 지금 명부 위에서 살아 있는 서명 대기 판들 (지금 사슬 끝 자리에 놓아서). 낡은 것(명부가 바뀌었다)은 지운다
 pub(crate) fn pendings(d: &Path, st: &State) -> Vec<Entry> {
 	let list = vcs::run(d, &["for-each-ref", "--format=%(refname)", PENDING]).unwrap_or_default();
 	let mut out = vec![];
 	for r in list.lines().filter(|l| !l.is_empty()) {
 		match read_entry(d, r) {
-			Some(e) if e.deck == st.deck && e.prev.as_deref() == Some(st.tip.as_str()) && matches!(e.body, Body::Roster { .. }) => out.push(e),
+			Some(e) if alive(st, &e) => out.push(place(st, &e)),
 			_ => {
 				let _ = vcs::run(d, &["update-ref", "-d", r]);
 			}
@@ -745,12 +840,13 @@ pub(crate) fn pendings(d: &Path, st: &State) -> Vec<Entry> {
 /// 받은(또는 내가 서명을 더한) 대기 판을 내 것과 합친다. 과반이 되면 사슬에 붙이고 true. 잠근 채로 부른다
 pub(crate) fn merge_pending(d: &Path, e: &Entry) -> Res<bool> {
 	let Some(st) = load(d)? else { return Ok(false) };
-	if e.v != 1 || e.deck != st.deck || e.n != st.n + 1 || e.prev.as_deref() != Some(st.tip.as_str()) || !matches!(e.body, Body::Roster { .. }) {
+	if !alive(&st, e) {
 		return Ok(false);
 	}
-	let h = hash(e);
+	let e = &place(&st, e);
+	let h = proposal_id(e);
 	let r = format!("{PENDING}{h}");
-	let mut merged = read_entry(d, &r).filter(|x| hash(x) == h).unwrap_or_else(|| Entry { sigs: vec![], ..e.clone() });
+	let mut merged = read_entry(d, &r).filter(|x| proposal_id(x) == h).map(|x| place(&st, &x)).unwrap_or_else(|| Entry { sigs: vec![], ..e.clone() });
 	for s in e.sigs.iter().filter(|s| check_sig(e, s)) {
 		if !merged.sigs.iter().any(|x| x.key == s.key) {
 			merged.sigs.push(s.clone());
@@ -770,12 +866,18 @@ pub(crate) fn merge_pending(d: &Path, e: &Entry) -> Res<bool> {
 
 /// 명부를 바꾸는 판 하나를 signer 로 서명해 낸다. 혼자 과반이면 바로 서고, 아니면 서명 대기로 남는다(돌려주는 상태는 그대로)
 pub(crate) fn change(d: &Path, signer: &SecretKey, f: impl FnOnce(&mut Roster) -> Res<()>) -> Res<State> {
+	if !key_kept() {
+		return Err("앱 열쇠를 저장하지 못해 서명하지 않는다".into());
+	}
 	let _l = vcs::lock(d)?;
 	seal(d);
 	let st = load(d)?.ok_or("이 덱에는 아직 서명 기록이 없다: 판을 하나 남기면 생긴다")?;
 	let mut roster = st.roster.clone();
 	f(&mut roster)?;
-	let mut e = Entry { v: 1, deck: st.deck.clone(), n: st.n + 1, prev: Some(st.tip.clone()), at: now(), body: Body::Roster { roster, head: st.head.clone() }, sigs: vec![] };
+	if roster == st.roster {
+		return Ok(st);
+	}
+	let mut e = Entry { v: 1, deck: st.deck.clone(), n: st.n + 1, prev: Some(st.tip.clone()), at: now(), body: Body::Roster { roster, head: st.head.clone(), since: st.n, base: roster_hash(&st.roster) }, sigs: vec![] };
 	sign(&mut e, signer);
 	if majority(&st, &e) {
 		return push(d, Some(&st), &e);
@@ -794,7 +896,7 @@ pub fn trust_cosign(dir: String, hash_: String) -> Res<View> {
 	let d = Path::new(&dir);
 	let _l = vcs::lock(d)?;
 	let st = load(d)?.ok_or("이 덱에는 아직 서명 기록이 없다")?;
-	let mut e = pendings(d, &st).into_iter().find(|e| hash(e) == hash_).ok_or("서명을 기다리는 명부 판이 없다 (그 사이 다른 판이 섰다)")?;
+	let mut e = pendings(d, &st).into_iter().find(|e| proposal_id(e) == hash_).ok_or("서명을 기다리는 명부 판이 없다 (그 사이 명부가 바뀌었다)")?;
 	let k = my_key();
 	if st.roster.person_of(&key_id(&k)).is_none_or(|p| p.role != Role::Approve) {
 		return Err("승인자만 명부 판에 서명한다".into());
@@ -915,7 +1017,7 @@ fn view(d: &Path, st: &State) -> View {
 				let Body::Roster { roster, .. } = &e.body else { return None };
 				let mut signed: Vec<String> = e.sigs.iter().filter(|s| check_sig(&e, s)).filter_map(|s| st.roster.person_of(&s.key).map(|p| p.name.clone())).collect();
 				signed.dedup();
-				Some(PendingView { hash: hash(&e), mine: e.sigs.iter().any(|s| s.key == mine), signed, changes: diff(&st.roster, roster) })
+				Some(PendingView { hash: proposal_id(&e), mine: e.sigs.iter().any(|s| s.key == mine), signed, changes: diff(&st.roster, roster) })
 			})
 			.collect(),
 	}
@@ -954,20 +1056,28 @@ pub fn trust_rename(dir: String, name: String) -> Res<View> {
 
 /// 복구 열쇠를 하나 만들어 내 두 번째 열쇠로 명부에 넣고, 그 비밀을 돌려준다. 비밀은 어디에도 남기지 않는다: 사람이 적어 둔다
 #[tauri::command(async)]
-pub fn trust_recovery(dir: String) -> Res<String> {
+pub fn trust_recovery(dir: String) -> Res<Recovery> {
 	let d = Path::new(&dir);
 	let k = SecretKey::generate();
 	let id = key_id(&k);
 	let mine = key_id(&my_key());
-	change(d, &my_key(), |r| {
+	let st = change(d, &my_key(), |r| {
 		let p = r.people.iter_mut().find(|p| p.keys.contains(&mine)).ok_or("명부에 내가 없다")?;
 		if p.role != Role::Approve {
 			return Err("승인자만 복구 열쇠를 만든다".into());
 		}
-		p.keys.push(id);
+		p.keys.push(id.clone());
 		Ok(())
 	})?;
-	Ok(recovery_text(&k))
+	// 승인자가 둘 이상이면 명부에 바로 들지 않고 서명 대기로 남는다 : 그동안은 이 열쇠로 되찾지 못한다고 함께 알린다
+	Ok(Recovery { secret: recovery_text(&k), pending: st.roster.person_of(&id).is_none() })
+}
+
+#[derive(Serialize)]
+pub struct Recovery {
+	secret: String,
+	/// 아직 명부에 들지 않았다 (다른 승인자의 서명을 기다린다)
+	pending: bool,
 }
 
 /// 복구 열쇠의 비밀로 이 앱의 열쇠를 그 사람에게 더한다: PC 를 바꿨거나 앱 데이터를 잃은 승인자
@@ -1034,7 +1144,12 @@ mod tests {
 		Person { id: name.into(), name: name.into(), keys: vec![key_id(k)], role, slides: vec![], replica: true }
 	}
 	/// 다음 칸: 서명은 하지 않는다
-	fn next(st: &State, body: Body) -> Entry {
+	fn next(st: &State, mut body: Body) -> Entry {
+		// 명부 판은 지금 명부 위에서 지금 낸 것으로
+		if let Body::Roster { since, base, .. } = &mut body {
+			*since = st.n;
+			*base = roster_hash(&st.roster);
+		}
 		Entry { v: 1, deck: st.deck.clone(), n: st.n + 1, prev: Some(st.tip.clone()), at: "t".into(), body, sigs: vec![] }
 	}
 	fn approve(d: &Path, st: &State, head: &str) -> Entry {
@@ -1139,19 +1254,22 @@ mod tests {
 		let d = tmp("roster");
 		let c = commit(&d, "a.txt", "1");
 		let (a, b, x) = (key(1), key(2), key(3));
-		let g = signed(Entry { v: 1, deck: String::new(), n: 0, prev: None, at: "t".into(), body: Body::Roster { roster: Roster { people: vec![person("가", &a, Role::Approve)], review: false }, head: c.clone() }, sigs: vec![] }, &[&a]);
+		let g = signed(Entry { v: 1, deck: String::new(), n: 0, prev: None, at: "t".into(), body: Body::Roster { roster: Roster { people: vec![person("가", &a, Role::Approve)], review: false }, head: c.clone(), since: 0, base: String::new() }, sigs: vec![] }, &[&a]);
 		let st = apply(None, &g, &Git(&d)).unwrap();
 		// 가 혼자 과반: 나를 승인자로 더한다
 		let two = Roster { people: vec![person("가", &a, Role::Approve), person("나", &b, Role::Approve)], review: false };
-		let st = apply(Some(&st), &signed(next(&st, Body::Roster { roster: two.clone(), head: c.clone() }), &[&a]), &Git(&d)).unwrap();
+		let st = apply(Some(&st), &signed(next(&st, Body::Roster { roster: two.clone(), head: c.clone(), since: 0, base: String::new() }), &[&a]), &Git(&d)).unwrap();
 		// 이제 둘 중 하나는 과반이 아니다
 		let three = Roster { people: [two.people.clone(), vec![person("다", &x, Role::Edit)]].concat(), review: false };
-		let e = next(&st, Body::Roster { roster: three.clone(), head: c.clone() });
+		let e = next(&st, Body::Roster { roster: three.clone(), head: c.clone(), since: 0, base: String::new() });
 		assert!(apply(Some(&st), &signed(e.clone(), &[&a]), &Git(&d)).unwrap_err().contains("과반"));
 		// 같은 사람의 열쇠 둘은 한 사람이다
 		let mut two_keys = st.clone();
 		two_keys.roster.people[0].keys.push(key_id(&x));
-		assert!(apply(Some(&two_keys), &signed(e.clone(), &[&a, &x]), &Git(&d)).unwrap_err().contains("과반"));
+		let e2 = next(&two_keys, Body::Roster { roster: three.clone(), head: c.clone(), since: 0, base: String::new() });
+		assert!(apply(Some(&two_keys), &signed(e2, &[&a, &x]), &Git(&d)).unwrap_err().contains("과반"));
+		// 다른 명부 위에서 낸 판(base 가 다르다)은 낡았다
+		assert!(apply(Some(&two_keys), &signed(e.clone(), &[&a, &b]), &Git(&d)).unwrap_err().contains("낡은"));
 		let st = apply(Some(&st), &signed(e, &[&a, &b]), &Git(&d)).unwrap();
 		assert_eq!(st.roster.people.len(), 3);
 		// 편집 권한은 승인하지 못한다 · 승인자가 없는 명부는 서지 않는다
@@ -1159,7 +1277,7 @@ mod tests {
 		let e = next(&st, Body::Approve { base: c.clone(), head: c2.clone(), tree: Git(&d).tree(&c2).unwrap(), proposal: None, rewind: false });
 		assert!(apply(Some(&st), &signed(e, &[&x]), &Git(&d)).unwrap_err().contains("권한"));
 		let none = Roster { people: vec![person("다", &x, Role::Edit)], review: false };
-		assert!(apply(Some(&st), &signed(next(&st, Body::Roster { roster: none, head: c.clone() }), &[&a, &b]), &Git(&d)).unwrap_err().contains("승인자가 없다"));
+		assert!(apply(Some(&st), &signed(next(&st, Body::Roster { roster: none, head: c.clone(), since: 0, base: String::new() }), &[&a, &b]), &Git(&d)).unwrap_err().contains("승인자가 없다"));
 		let _ = std::fs::remove_dir_all(&d);
 	}
 
@@ -1171,7 +1289,7 @@ mod tests {
 		let mut writer = person("담당", &w, Role::Assigned);
 		writer.slides = vec!["s1".into()];
 		let roster = Roster { people: vec![person("가", &a, Role::Approve), writer], review: false };
-		let st = apply(None, &signed(Entry { v: 1, deck: String::new(), n: 0, prev: None, at: "t".into(), body: Body::Roster { roster: roster.clone(), head: c.clone() }, sigs: vec![] }, &[&a]), &Git(&d)).unwrap();
+		let st = apply(None, &signed(Entry { v: 1, deck: String::new(), n: 0, prev: None, at: "t".into(), body: Body::Roster { roster: roster.clone(), head: c.clone(), since: 0, base: String::new() }, sigs: vec![] }, &[&a]), &Git(&d)).unwrap();
 		let by = |h: &str| next(&st, Body::Approve { base: c.clone(), head: h.into(), tree: Git(&d).tree(h).unwrap(), proposal: Some(Proposal { by: key_id(&w), id: "p1".into(), tip: h.into() }), rewind: false });
 		let ok = commit(&d, "slides/s1.html", "2");
 		assert!(apply(Some(&st), &signed(by(&ok), &[&a]), &Git(&d)).is_ok());
@@ -1192,7 +1310,7 @@ mod tests {
 		let c = commit(&d, "a.txt", "1");
 		let (a, b) = (key(1), key(2));
 		let roster = Roster { people: vec![person("가", &a, Role::Approve), person("나", &b, Role::Approve)], review: false };
-		let g = signed(Entry { v: 1, deck: String::new(), n: 0, prev: None, at: "t".into(), body: Body::Roster { roster: roster.clone(), head: c.clone() }, sigs: vec![] }, &[&a]);
+		let g = signed(Entry { v: 1, deck: String::new(), n: 0, prev: None, at: "t".into(), body: Body::Roster { roster: roster.clone(), head: c.clone(), since: 0, base: String::new() }, sigs: vec![] }, &[&a]);
 		let st = apply(None, &g, &Git(&d)).unwrap();
 		let ca = commit(&d, "a.txt", "가");
 		vcs::run(&d, &["reset", "-q", "--hard", &c]).unwrap();
@@ -1219,11 +1337,11 @@ mod tests {
 		let c = commit(&d, "a.txt", "1");
 		let (a, b) = (key(1), key(2));
 		let both = Roster { people: vec![person("가", &a, Role::Approve), person("나", &b, Role::Approve)], review: false };
-		let g = signed(Entry { v: 1, deck: String::new(), n: 0, prev: None, at: "t".into(), body: Body::Roster { roster: both.clone(), head: c.clone() }, sigs: vec![] }, &[&a]);
+		let g = signed(Entry { v: 1, deck: String::new(), n: 0, prev: None, at: "t".into(), body: Body::Roster { roster: both.clone(), head: c.clone(), since: 0, base: String::new() }, sigs: vec![] }, &[&a]);
 		let st = apply(None, &g, &Git(&d)).unwrap();
 		// 가 쪽: 나를 뺀다 (가 · 나 둘 다 서명: 과반)
 		let only_a = Roster { people: vec![person("가", &a, Role::Approve), person("나", &b, Role::View)], review: false };
-		let cut = signed(next(&st, Body::Roster { roster: only_a, head: c.clone() }), &[&a, &b]);
+		let cut = signed(next(&st, Body::Roster { roster: only_a, head: c.clone(), since: 0, base: String::new() }), &[&a, &b]);
 		// 나 쪽: 소식을 못 받은 척 같은 자리에서 승인을 여러 번 시도한다: 해시가 작은 칸을 골라 와도 진다
 		let cb = commit(&d, "b.txt", "나");
 		for i in 0..8 {
@@ -1242,7 +1360,9 @@ mod tests {
 		commit(&d, "a.txt", "1");
 		let dir: String = d.to_string_lossy().into();
 		assert!(trust_state(dir.clone()).unwrap().unwrap().fragile);
-		let secret = trust_recovery(dir.clone()).unwrap();
+		let r = trust_recovery(dir.clone()).unwrap();
+		assert!(!r.pending, "승인자가 하나면 바로 명부에 든다");
+		let secret = r.secret;
 		assert_eq!(secret.len(), 64 + 7);
 		let v = trust_state(dir.clone()).unwrap().unwrap();
 		assert!(!v.fragile && v.approver);
@@ -1265,18 +1385,18 @@ mod tests {
 	}
 
 	#[test]
-	fn copies_keep_the_chain_and_are_compared_on_the_way_back() {
+	fn copies_start_their_own_chain_and_tampering_is_caught() {
 		let d = tmp("copy");
 		write(&d, "deck.json", "{}");
 		commit(&d, "a.txt", "1");
 		let f = tmp("copy-fork");
 		let _ = std::fs::remove_dir_all(&f);
 		crate::branch::vcs_fork(d.to_string_lossy().into(), f.to_string_lossy().into()).unwrap();
-		assert_eq!(chain(&f), chain(&d), "사본은 같은 기록을 이어 간다");
+		assert!(chain(&f).is_empty(), "사본은 원본의 기록을 가져가지 않는다");
 		commit(&f, "a.txt", "사본");
-		assert_eq!(compare_copy(&d, &f, "c1"), "behind");
-		commit(&d, "b.txt", "원본");
-		assert_eq!(compare_copy(&d, &f, "c2"), "diverged");
+		assert_ne!(load(&f).unwrap().unwrap().deck, load(&d).unwrap().unwrap().deck, "사본은 다른 덱이다");
+		assert_eq!(compare_copy(&d, &f, "c1"), "foreign");
+		commit(&f, "a.txt", "사본 2");
 		// 사본의 기록을 고친다: 마지막 칸을 서명 없이 바꿔 끼운다
 		let mut es = chain(&f);
 		es.last_mut().unwrap().at = "고침".into();

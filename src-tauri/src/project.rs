@@ -155,6 +155,17 @@ pub fn unpack_deck(file: String, dest: String) -> Res<String> {
 	if !target.join("deck.json").exists() {
 		return Err("묶음 안에 deck.json 이 없다".into());
 	}
+	// 풀어 낸 덱은 원본과 다른 덱이다 : 원본의 서명 기록 · 명부를 걷어, 첫 판에서 이 PC 를 승인자로 둔 새 기록을 시작하게 한다.
+	// 그대로 두면 같은 덱 id 로 원본 자리를 차지해 팀원에게 이 사본을 내줄 수 있다 (sync.rs register). 팀원과 함께 쓰는 덱은 .cpptb 로 받는다
+	if target.join(".git").is_dir() {
+		let refs = crate::vcs::run(&target, &["for-each-ref", "--format=%(refname)", "refs/cppt/chain", "refs/cppt/trunk", "refs/cppt/pending", "refs/cppt/props", "refs/cppt/join", "refs/cppt/sent", "refs/cppt/sent-file", "refs/cppt/given", "refs/cppt/peers"]).unwrap_or_default();
+		for r in refs.lines().filter(|l| !l.is_empty()) {
+			let _ = crate::vcs::run(&target, &["update-ref", "-d", r]);
+		}
+		for f in ["claudeppt-chain.json", "claudeppt-sent.json", "claudeppt-mailbox-seen.json"] {
+			let _ = std::fs::remove_file(target.join(".git").join(f));
+		}
+	}
 	Ok(target.to_string_lossy().into())
 }
 

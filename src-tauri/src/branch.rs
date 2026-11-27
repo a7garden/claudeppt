@@ -207,6 +207,8 @@ pub(crate) fn merge_into(into: &Path, other: &str, message: &str, author: Option
 	c.args(["merge", "--no-ff", "--no-edit", "-m", message]);
 	if let Some(x) = x {
 		c.arg(x);
+		// deck.json 합치기 드라이버에도 고른 쪽을 알린다 (-X 는 드라이버에 닿지 않는다)
+		c.env(crate::deckmerge::PREFER_ENV, if x == "-Xours" { "ours" } else { "theirs" });
 	}
 	let o = c.arg(other).output().map_err(err)?;
 	if o.status.success() {
@@ -360,10 +362,9 @@ pub fn vcs_fork(dir: String, dest: String) -> Res<()> {
 	let src = src.strip_prefix(r"\\?\").unwrap_or(&src).to_string();
 	let parent = to.parent().ok_or("사본 자리가 맞지 않다")?;
 	std::fs::create_dir_all(parent).map_err(err)?;
-	run(parent, &["clone", "-q", "--no-hardlinks", &src, &to.to_string_lossy()])?;
-	// 서명 기록도 함께: 없으면 사본이 첫 판에서 새 기록(다른 덱)을 시작해, 돌아올 때 원본과 견줄 수 없다. 기록이 없는 덱이면 그냥 둔다
-	let _ = run(to, &["fetch", "-q", "--no-tags", "origin", &format!("+{0}:{0}", crate::trust::CHAIN)]);
-	Ok(())
+	// 서명 기록은 따라가지 않는다(clone 은 refs/cppt 를 받지 않는다) : 사본은 첫 판에서 이 PC 를 승인자로 둔 새 기록을 시작하는 다른 덱이다.
+	// 2026.11.27 : 잠깐 기록을 함께 떼어 갔다. 사본도 같은 열쇠로 승인자라 원본과 따로 봉해 늘 「갈라짐」이 되고, 덱 id 가 같아 팀원에게 사본을 내줄 수 있었다
+	run(parent, &["clone", "-q", "--no-hardlinks", &src, &to.to_string_lossy()]).map(|_| ())
 }
 
 /// 사본의 변경을 원본 덱의 가지로 보낸다 — 같은 PC 에 원본 덱이 있을 때. 없으면 CPPT 로 보내 원본에서 가져온다

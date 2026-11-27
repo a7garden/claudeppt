@@ -29,8 +29,19 @@ fn pick<'a>(o: Option<&'a Value>, a: Option<&'a Value>, b: Option<&'a Value>) ->
 	}
 }
 
+/// 겹친 곳을 어느 쪽 것으로 : 사람이 「가지 것으로 · 줄기 것으로」를 고른 합치기 (branch.rs merge_into 가 -X 와 함께 환경 변수로 넘긴다).
+/// 2026.11.27 : git 의 -Xours · -Xtheirs 는 줄 합치기에만 걸리고 합치기 드라이버에는 닿지 않아, 고르기를 눌러도 deck.json 이 다시 겹쳤다
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub enum Prefer {
+	Ours,
+	Theirs,
+}
+
+/// 합치기 드라이버가 읽는 환경 변수 : ours · theirs
+pub const PREFER_ENV: &str = "CPPT_MERGE_PREFER";
+
 /// 객체의 칸마다 3방향: 칸 순서는 a 를 따르고 b 에만 생긴 칸은 끝에 붙인다
-fn fields(o: Option<&Map<String, Value>>, a: &Map<String, Value>, b: &Map<String, Value>, skip: &[&str], at: &str, bad: &mut Vec<String>) -> Map<String, Value> {
+fn fields(o: Option<&Map<String, Value>>, a: &Map<String, Value>, b: &Map<String, Value>, skip: &[&str], at: &str, bad: &mut Vec<String>, prefer: Option<Prefer>) -> Map<String, Value> {
 	let mut keys: Vec<&String> = a.keys().collect();
 	keys.extend(b.keys().filter(|k| !a.contains_key(*k)));
 	if let Some(o) = o {
@@ -44,8 +55,15 @@ fn fields(o: Option<&Map<String, Value>>, a: &Map<String, Value>, b: &Map<String
 			}
 			Ok(None) => {}
 			Err(()) => {
-				bad.push(format!("{at}{k}"));
-				if let Some(v) = a.get(k) {
+				let side = match prefer {
+					Some(Prefer::Theirs) => b.get(k),
+					Some(Prefer::Ours) => a.get(k),
+					None => {
+						bad.push(format!("{at}{k}"));
+						a.get(k)
+					}
+				};
+				if let Some(v) = side {
 					out.insert(k.clone(), v.clone());
 				}
 			}
@@ -73,10 +91,16 @@ fn insert_new(list: &mut Vec<String>, order: &[String], new: &[String]) {
 }
 
 /// 세 판을 합친다. 겹치면 겹친 곳 목록을 돌려준다
+#[cfg(test)]
 pub fn merge(o: &Value, a: &Value, b: &Value) -> Result<Value, Vec<String>> {
+	merge_with(o, a, b, None)
+}
+
+/// 세 판을 합친다. prefer 를 주면 겹친 곳을 그쪽 것으로 하고 겹치지 않은 곳은 양쪽이 다 남는다
+pub fn merge_with(o: &Value, a: &Value, b: &Value, prefer: Option<Prefer>) -> Result<Value, Vec<String>> {
 	let mut bad = vec![];
 	let (oo, ao, bo) = (o.as_object(), a.as_object().ok_or(vec!["내 판이 객체가 아니다".to_string()])?, b.as_object().ok_or(vec!["남의 판이 객체가 아니다".to_string()])?);
-	let mut top = fields(oo, ao, bo, &["slides"], "", &mut bad);
+	let mut top = fields(oo, ao, bo, &["slides"], "", &mut bad, prefer);
 
 	let (os, as_, bs) = (slides(o), slides(a), slides(b));
 	let get = |l: &[(String, Map<String, Value>)], id: &str| l.iter().find(|(x, _)| x == id).map(|(_, m)| m.clone());
@@ -91,13 +115,20 @@ pub fn merge(o: &Value, a: &Value, b: &Value) -> Result<Value, Vec<String>> {
 		let (so, sa, sb) = (get(&os, id), get(&as_, id), get(&bs, id));
 		let at = format!("slides[{id}].");
 		match (&so, &sa, &sb) {
-			(_, Some(x), Some(y)) => merged.push((id.clone(), fields(so.as_ref(), x, y, &[], &at, &mut bad))),
+			(_, Some(x), Some(y)) => merged.push((id.clone(), fields(so.as_ref(), x, y, &[], &at, &mut bad, prefer))),
 			(None, Some(x), None) | (None, None, Some(x)) => merged.push((id.clone(), x.clone())),
-			// 한쪽이 뺐다: 다른 쪽이 고치지 않았으면 빠지고, 고쳤으면 겹침(고친 것을 남긴다)
+			// 한쪽이 뺐다: 다른 쪽이 고치지 않았으면 빠지고, 고쳤으면 겹침(고친 것을 남긴다). 고른 쪽이 있으면 그쪽대로
 			(Some(base), Some(x), None) | (Some(base), None, Some(x)) => {
+				let kept_by = if sa.is_some() { Prefer::Ours } else { Prefer::Theirs };
 				if x != base {
-					bad.push(format!("slides[{id}]"));
-					merged.push((id.clone(), x.clone()));
+					match prefer {
+						Some(p) if p != kept_by => {}
+						Some(_) => merged.push((id.clone(), x.clone())),
+						None => {
+							bad.push(format!("slides[{id}]"));
+							merged.push((id.clone(), x.clone()));
+						}
+					}
 				}
 			}
 			(_, None, None) => {}
@@ -113,8 +144,14 @@ pub fn merge(o: &Value, a: &Value, b: &Value) -> Result<Value, Vec<String>> {
 	} else if cb == co || ca == cb {
 		ca.clone()
 	} else {
-		bad.push("slides 순서".into());
-		ca.clone()
+		match prefer {
+			Some(Prefer::Theirs) => cb.clone(),
+			Some(Prefer::Ours) => ca.clone(),
+			None => {
+				bad.push("slides 순서".into());
+				ca.clone()
+			}
+		}
 	};
 	// 겹쳐서 남긴 쪽(한쪽은 뺐는데 다른 쪽이 고친 쪽)은 셋 중 어디엔가 있던 자리로
 	let extra: Vec<String> = keep.iter().filter(|x| oi.contains(x) && !order.contains(x)).cloned().collect();
@@ -153,7 +190,12 @@ pub fn driver(args: &[String]) -> i32 {
 	let (Some(a_path), Some(a), Some(b)) = (args.get(1), a, b) else { return 1 };
 	// 바탕이 없으면(둘이 따로 만든 파일) 빈 바탕으로: 같은 칸이 다르면 겹침이 된다
 	let o = o.unwrap_or(Value::Object(Map::new()));
-	match merge(&o, &a, &b) {
+	let prefer = match std::env::var(PREFER_ENV).as_deref() {
+		Ok("ours") => Some(Prefer::Ours),
+		Ok("theirs") => Some(Prefer::Theirs),
+		_ => None,
+	};
+	match merge_with(&o, &a, &b, prefer) {
 		Ok(v) => match serde_json::to_string_pretty(&v) {
 			Ok(t) if std::fs::write(a_path, format!("{t}\n")).is_ok() => 0,
 			_ => 1,
@@ -233,9 +275,22 @@ mod tests {
 		let m = merge(&o, &a, &b).unwrap();
 		assert_eq!((m["title"].as_str(), m["slides"][0]["title"].as_str(), m["slides"][1]["title"].as_str()), (Some("덱 이름"), Some("가"), Some("나")));
 		assert_eq!(m["size"]["w"], 1280);
-		// 같은 칸을 둘이 다르게
+		// 같은 칸을 둘이 다르게 · 고른 쪽이 있으면 그쪽 것으로
 		let b = deck(&[("a", "다"), ("b", "B")]);
 		assert_eq!(merge(&o, &a, &b).unwrap_err(), ["slides[a].title"]);
+		assert_eq!(merge_with(&o, &a, &b, Some(Prefer::Theirs)).unwrap()["slides"][0]["title"], "다");
+		assert_eq!(merge_with(&o, &a, &b, Some(Prefer::Ours)).unwrap()["slides"][0]["title"], "가");
+		// 한쪽이 뺀 쪽을 다른 쪽이 고쳤다 · 다르게 옮겼다
+		let gone = deck(&[("a", "A")]);
+		let edited = deck(&[("a", "A"), ("b", "새")]);
+		assert_eq!(order(&merge_with(&o, &gone, &edited, Some(Prefer::Ours)).unwrap()), ["a"]);
+		assert_eq!(order(&merge_with(&o, &gone, &edited, Some(Prefer::Theirs)).unwrap()), ["a", "b"]);
+		let (x, y) = (deck(&[("b", "B"), ("a", "A")]), deck(&[("a", "A"), ("b", "B"), ("c", "C")]));
+		let o3 = deck(&[("a", "A"), ("c", "C"), ("b", "B")]);
+		let x3 = deck(&[("c", "C"), ("a", "A"), ("b", "B")]);
+		assert!(merge(&o3, &x3, &y).is_err());
+		assert_eq!(order(&merge_with(&o3, &x3, &y, Some(Prefer::Theirs)).unwrap()), ["a", "b", "c"]);
+		let _ = x;
 	}
 
 	#[test]
