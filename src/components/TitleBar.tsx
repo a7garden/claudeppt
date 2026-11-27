@@ -11,6 +11,7 @@ import { useUpdate } from "../lib/updater";
 import { CollabChip } from "./Collab";
 import DeckActions from "./DeckActions";
 import { History } from "./History";
+import { useCloseGuard } from "./Trust";
 
 export const Mark = () => (
 	<svg className="mark" viewBox="0 0 16 16" aria-hidden>
@@ -30,6 +31,8 @@ export default function TitleBar({ onSettings, settingsOpen }: { onSettings: () 
 	const saveDeck = useDeck((s) => s.saveDeck);
 	// 협업 브라우저에는 창이 없다 — 창 단추 · 끌기는 호스트 앱만
 	const win = remote ? null : getCurrentWindow();
+	// 이 PC 에만 있는 변경이 있으면 창을 닫기 전에 묻는다 (Trust.tsx)
+	useCloseGuard(!remote);
 	const [max, setMax] = useState(false);
 	const [list, setList] = useState(false);
 	useEffect(() => {

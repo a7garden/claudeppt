@@ -19,6 +19,7 @@ mod imagegen;
 mod invite;
 mod metafile;
 mod p2p;
+mod peers;
 mod project;
 mod pptsnap;
 mod runner;
@@ -133,6 +134,8 @@ pub fn run() {
 			trust::trust_rename,
 			trust::trust_recovery,
 			trust::trust_recover,
+			trust::trust_cosign,
+			trust::trust_pending_drop,
 			sync::sync_status,
 			sync::sync_export,
 			sync::sync_import,
@@ -142,6 +145,7 @@ pub fn run() {
 			sync::sync_mailbox_set,
 			sync::sync_mailbox_run,
 			sync::sync_open,
+			peers::sync_peers_run,
 			claude::claude_detect,
 			claude::claude_run,
 			claude::claude_stop,

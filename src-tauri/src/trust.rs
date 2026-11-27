@@ -31,6 +31,9 @@ pub const CHAIN: &str = "refs/cppt/chain";
 /// 승인된 줄기 끝 (사슬 상태의 head): 사슬이 바뀔 때마다 맞춘다. 덱 폴더의 main 은 「내 줄」이라
 /// 승인자가 아닌 사람의 main 은 이것보다 앞서 있을 수 있다(아직 승인받지 않은 내 변경 = 내 제안)
 pub const TRUNK: &str = "refs/cppt/trunk";
+/// 서명이 모자라 아직 서지 않은 명부 판 (칸 해시마다 하나) : 다른 승인자가 서명을 더해 과반이 되면 사슬에 붙는다.
+/// 묶음 · 앱끼리 주고받기에 실려 다니며, 서로 다른 PC 에서 더한 서명은 합쳐진다
+pub const PENDING: &str = "refs/cppt/pending/";
 /// 서명할 바이트의 머리: 같은 열쇠로 한 다른 서명(앞으로의 묶음 파일 · 수신 확인)과 섞이지 않게
 const DOMAIN: &str = "claudeppt/chain/1\n";
 const FILE: &str = "entry.json";
@@ -700,7 +703,72 @@ pub(crate) fn seal_with(d: &Path, proposal: Option<Proposal>) -> Res<()> {
 	Err("다른 곳에서 같은 때 기록을 남겨 두 번 다 졌다".into())
 }
 
-/// 명부를 바꾸는 판 하나를 내 열쇠(signer)로 서명해 붙인다
+// ── 서명 모으기 ──
+// 명부를 바꾸려면 지금 승인자의 과반이 서명해야 한다. 승인자가 둘 이상이면 한 사람이 낸 판은 「서명 대기」로 남고,
+// 다른 승인자가 묶음 · 앱끼리 주고받기로 받아 서명을 더한다. 과반이 되는 순간 그 PC 가 사슬에 붙인다.
+// 그 사이 사슬이 앞으로 가면(다른 판이 먼저 섰다) 대기 판은 낡아 버린다 : 바뀐 명부 위에서 다시 낸다
+
+/// 지금 명부의 승인자 중 이 칸에 맞는 서명을 한 사람이 과반인가
+fn majority(st: &State, e: &Entry) -> bool {
+	let mut ids: Vec<&str> = e.sigs.iter().filter(|s| check_sig(e, s)).filter_map(|s| st.roster.person_of(&s.key)).filter(|p| p.role == Role::Approve).map(|p| p.id.as_str()).collect();
+	ids.sort();
+	ids.dedup();
+	ids.len() * 2 > st.roster.approvers().count()
+}
+
+fn save_pending(d: &Path, e: &Entry) -> Res<()> {
+	let blob = git_in(d, &["hash-object", "-w", "--stdin"], (serde_json::to_string_pretty(e).map_err(err)? + "\n").as_bytes())?;
+	let tree = git_in(d, &["mktree"], format!("100644 blob {blob}\t{FILE}\n").as_bytes())?;
+	let c = vcs::run(d, &["commit-tree", &tree, "-m", "서명 대기 명부"])?;
+	vcs::run(d, &["update-ref", &format!("{PENDING}{}", hash(e)), &c]).map(|_| ())
+}
+
+fn read_entry(d: &Path, r: &str) -> Option<Entry> {
+	serde_json::from_str(&vcs::run(d, &["show", &format!("{r}:{FILE}")]).ok()?).ok()
+}
+
+/// 이 사슬 끝 위에 낸 서명 대기 판들. 낡은 것(사슬이 앞으로 갔다)은 지운다
+pub(crate) fn pendings(d: &Path, st: &State) -> Vec<Entry> {
+	let list = vcs::run(d, &["for-each-ref", "--format=%(refname)", PENDING]).unwrap_or_default();
+	let mut out = vec![];
+	for r in list.lines().filter(|l| !l.is_empty()) {
+		match read_entry(d, r) {
+			Some(e) if e.deck == st.deck && e.prev.as_deref() == Some(st.tip.as_str()) && matches!(e.body, Body::Roster { .. }) => out.push(e),
+			_ => {
+				let _ = vcs::run(d, &["update-ref", "-d", r]);
+			}
+		}
+	}
+	out
+}
+
+/// 받은(또는 내가 서명을 더한) 대기 판을 내 것과 합친다. 과반이 되면 사슬에 붙이고 true. 잠근 채로 부른다
+pub(crate) fn merge_pending(d: &Path, e: &Entry) -> Res<bool> {
+	let Some(st) = load(d)? else { return Ok(false) };
+	if e.v != 1 || e.deck != st.deck || e.n != st.n + 1 || e.prev.as_deref() != Some(st.tip.as_str()) || !matches!(e.body, Body::Roster { .. }) {
+		return Ok(false);
+	}
+	let h = hash(e);
+	let r = format!("{PENDING}{h}");
+	let mut merged = read_entry(d, &r).filter(|x| hash(x) == h).unwrap_or_else(|| Entry { sigs: vec![], ..e.clone() });
+	for s in e.sigs.iter().filter(|s| check_sig(e, s)) {
+		if !merged.sigs.iter().any(|x| x.key == s.key) {
+			merged.sigs.push(s.clone());
+		}
+	}
+	// 서명은 서명 칸을 뺀 바이트에 걸린다 : 서명 목록이 없는 사본으로 확인한다
+	let bare = Entry { sigs: vec![], ..merged.clone() };
+	merged.sigs.retain(|s| check_sig(&bare, s));
+	if majority(&st, &merged) {
+		push(d, Some(&st), &merged)?;
+		let _ = vcs::run(d, &["update-ref", "-d", &r]);
+		return Ok(true);
+	}
+	save_pending(d, &merged)?;
+	Ok(false)
+}
+
+/// 명부를 바꾸는 판 하나를 signer 로 서명해 낸다. 혼자 과반이면 바로 서고, 아니면 서명 대기로 남는다(돌려주는 상태는 그대로)
 pub(crate) fn change(d: &Path, signer: &SecretKey, f: impl FnOnce(&mut Roster) -> Res<()>) -> Res<State> {
 	let _l = vcs::lock(d)?;
 	seal(d);
@@ -709,8 +777,41 @@ pub(crate) fn change(d: &Path, signer: &SecretKey, f: impl FnOnce(&mut Roster) -
 	f(&mut roster)?;
 	let mut e = Entry { v: 1, deck: st.deck.clone(), n: st.n + 1, prev: Some(st.tip.clone()), at: now(), body: Body::Roster { roster, head: st.head.clone() }, sigs: vec![] };
 	sign(&mut e, signer);
-	// 다른 승인자의 서명을 모으는 길은 2단계(사본 주고받기)에서 연다: 지금은 혼자 과반일 때만 선다
-	push(d, Some(&st), &e)
+	if majority(&st, &e) {
+		return push(d, Some(&st), &e);
+	}
+	let who = st.roster.person_of(&key_id(signer)).filter(|p| p.role == Role::Approve);
+	if who.is_none() {
+		return Err("명부를 바꾸는 것은 승인자만 한다".into());
+	}
+	save_pending(d, &e)?;
+	Ok(st)
+}
+
+/// 서명 대기 판에 내 서명을 더한다
+#[tauri::command(async)]
+pub fn trust_cosign(dir: String, hash_: String) -> Res<View> {
+	let d = Path::new(&dir);
+	let _l = vcs::lock(d)?;
+	let st = load(d)?.ok_or("이 덱에는 아직 서명 기록이 없다")?;
+	let mut e = pendings(d, &st).into_iter().find(|e| hash(e) == hash_).ok_or("서명을 기다리는 명부 판이 없다 (그 사이 다른 판이 섰다)")?;
+	let k = my_key();
+	if st.roster.person_of(&key_id(&k)).is_none_or(|p| p.role != Role::Approve) {
+		return Err("승인자만 명부 판에 서명한다".into());
+	}
+	sign(&mut e, &k);
+	merge_pending(d, &e)?;
+	let st = load(d)?.ok_or("서명 기록을 읽지 못했다")?;
+	Ok(view(d, &st))
+}
+
+/// 서명 대기 판 하나를 버린다 (낸 사람이든 아니든 승인자면) : 이 PC 에서만 지운다. 남의 PC 에 있는 것은 그 PC 가 다시 실어 올 수 있다
+#[tauri::command(async)]
+pub fn trust_pending_drop(dir: String, hash_: String) -> Res<()> {
+	if hash_.len() != 64 || !hash_.chars().all(|c| c.is_ascii_hexdigit()) {
+		return Err("맞지 않는 판".into());
+	}
+	vcs::run(Path::new(&dir), &["update-ref", "-d", &format!("{PENDING}{hash_}")]).map(|_| ())
 }
 
 // ── 앱 명령 ──
@@ -723,6 +824,57 @@ pub struct PersonView {
 	keys: usize,
 	slides: Vec<String>,
 	me: bool,
+}
+
+/// 서명 대기 판 하나 : 무엇이 바뀌는지와 누가 서명했는지
+#[derive(Serialize)]
+pub struct PendingView {
+	hash: String,
+	/// 서명한 사람 이름
+	signed: Vec<String>,
+	/// 내가 서명했나
+	mine: bool,
+	/// 지금 명부와 견준 바뀜 : kind = add · remove · role · keys · rename · review
+	changes: Vec<ChangeView>,
+}
+
+#[derive(Serialize)]
+pub struct ChangeView {
+	kind: &'static str,
+	name: String,
+	from: Option<String>,
+	to: Option<String>,
+}
+
+fn role_name(r: Role) -> String {
+	serde_json::to_value(r).ok().and_then(|v| v.as_str().map(String::from)).unwrap_or_default()
+}
+
+fn diff(a: &Roster, b: &Roster) -> Vec<ChangeView> {
+	let mut out = vec![];
+	for p in &b.people {
+		match a.people.iter().find(|x| x.id == p.id) {
+			None => out.push(ChangeView { kind: "add", name: p.name.clone(), from: None, to: Some(role_name(p.role)) }),
+			Some(o) => {
+				if o.role != p.role {
+					out.push(ChangeView { kind: "role", name: p.name.clone(), from: Some(role_name(o.role)), to: Some(role_name(p.role)) });
+				}
+				if o.keys != p.keys {
+					out.push(ChangeView { kind: "keys", name: p.name.clone(), from: Some(o.keys.len().to_string()), to: Some(p.keys.len().to_string()) });
+				}
+				if o.name != p.name {
+					out.push(ChangeView { kind: "rename", name: p.name.clone(), from: Some(o.name.clone()), to: Some(p.name.clone()) });
+				}
+			}
+		}
+	}
+	for o in a.people.iter().filter(|o| !b.people.iter().any(|p| p.id == o.id)) {
+		out.push(ChangeView { kind: "remove", name: o.name.clone(), from: Some(role_name(o.role)), to: None });
+	}
+	if a.review != b.review {
+		out.push(ChangeView { kind: "review", name: String::new(), from: Some(a.review.to_string()), to: Some(b.review.to_string()) });
+	}
+	out
 }
 
 #[derive(Serialize)]
@@ -739,6 +891,8 @@ pub struct View {
 	approver: bool,
 	/// 승인자가 한 명이고 그 사람의 열쇠가 하나뿐이다: 그 열쇠를 잃으면 줄기가 멈춘다
 	fragile: bool,
+	/// 서명 대기 명부 판
+	pending: Vec<PendingView>,
 }
 
 fn view(d: &Path, st: &State) -> View {
@@ -755,6 +909,15 @@ fn view(d: &Path, st: &State) -> View {
 		me: short(&mine).to_string(),
 		approver: me.is_some_and(|p| p.role == Role::Approve),
 		fragile: approvers.len() == 1 && approvers[0].keys.len() == 1,
+		pending: pendings(d, st)
+			.into_iter()
+			.filter_map(|e| {
+				let Body::Roster { roster, .. } = &e.body else { return None };
+				let mut signed: Vec<String> = e.sigs.iter().filter(|s| check_sig(&e, s)).filter_map(|s| st.roster.person_of(&s.key).map(|p| p.name.clone())).collect();
+				signed.dedup();
+				Some(PendingView { hash: hash(&e), mine: e.sigs.iter().any(|s| s.key == mine), signed, changes: diff(&st.roster, roster) })
+			})
+			.collect(),
 	}
 }
 

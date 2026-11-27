@@ -16,14 +16,17 @@ export type TrustRole = "approve" | "edit" | "assigned" | "comment" | "view";
 export interface TrustPerson { id: string; name: string; role: TrustRole; keys: number; slides: string[]; me: boolean }
 /** 주고받기 상태 (sync.rs Status) */
 export interface SyncStatus {
-	member: boolean; approver: boolean; unsent: boolean; sent_at: string | null; sent_to: string | null; behind: boolean; pending: number;
+	peers: number; member: boolean; approver: boolean; unsent: boolean; sent_at: string | null; sent_to: string | null; behind: boolean; pending: number;
 	props: { key: string; id: string; name: string; at: string; ahead: number; mine: boolean }[];
 	joins: { key: string; name: string; at: string }[];
 	mailbox: string | null;
 }
 export interface SyncImported { chain: ChainRelation; adopted: boolean; props: number; joins: number; conflicts: string[] }
 export interface SyncRan { sent: string | null; received: number; waiting: number; errors: string[]; conflicts: string[] }
-export interface TrustView { deck: string; n: number; sealed: boolean; people: TrustPerson[]; review: boolean; me: string; approver: boolean; fragile: boolean }
+export interface PeerRan { asked: number; reached: number; received: number; conflicts: string[]; errors: string[] }
+/** 서명 대기 명부 판 (trust.rs PendingView) : changes 의 kind 는 add · remove · role · keys · rename · review */
+export interface TrustPending { hash: string; signed: string[]; mine: boolean; changes: { kind: "add" | "remove" | "role" | "keys" | "rename" | "review"; name: string; from: string | null; to: string | null }[] }
+export interface TrustView { deck: string; n: number; sealed: boolean; people: TrustPerson[]; review: boolean; me: string; approver: boolean; fragile: boolean; pending: TrustPending[] }
 /** 이 폴더는 어느 덱의 어느 줄인가 — sian 이 있으면 가지 폴더, main 은 본 덱 폴더 */
 export interface Where { main: string; sian: string | null; name: string | null; origin: string | null }
 /** 합친 결과 — ok 가 아니면 겹친 파일 */
@@ -97,6 +100,8 @@ export const api = {
 	trustRename: (dir: string, name: string) => invoke<TrustView>("trust_rename", { dir, name }),
 	trustRecovery: (dir: string) => invoke<string>("trust_recovery", { dir }),
 	trustRecover: (dir: string, secret: string) => invoke<TrustView>("trust_recover", { dir, secret }),
+	trustCosign: (dir: string, hash: string) => invoke<TrustView>("trust_cosign", { dir, hash_: hash }),
+	trustPendingDrop: (dir: string, hash: string) => invoke<void>("trust_pending_drop", { dir, hash_: hash }),
 	syncStatus: (dir: string) => invoke<SyncStatus | null>("sync_status", { dir }),
 	syncExport: (dir: string, out: string, full: boolean) => invoke<string | null>("sync_export", { dir, out, full }),
 	syncImport: (dir: string, file: string) => invoke<SyncImported>("sync_import", { dir, file }),
@@ -106,6 +111,7 @@ export const api = {
 	syncMailboxSet: (dir: string, folder: string | null) => invoke<void>("sync_mailbox_set", { dir, folder }),
 	syncMailboxRun: (dir: string) => invoke<SyncRan>("sync_mailbox_run", { dir }),
 	syncOpen: (file: string, dest: string) => invoke<string>("sync_open", { file, dest }),
+	syncPeersRun: (dir: string) => invoke<PeerRan>("sync_peers_run", { dir }),
 	log: (dir: string, limit?: number) => invoke<Commit[]>("vcs_log", { dir, limit }),
 	tag: (dir: string, name: string) => invoke<void>("vcs_tag", { dir, name }),
 	restore: (dir: string, hash: string, message: string, author?: string) => invoke<Commit | null>("vcs_restore", { dir, hash, message, author: author || null }),

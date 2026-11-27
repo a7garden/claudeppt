@@ -25,6 +25,9 @@ const PROPS: &str = "refs/cppt/props/";
 const JOINS: &str = "refs/cppt/join/";
 /// 마지막으로 내보낸 ref 들 : 다음 묶음은 이것 뒤의 것만 담는다(증분). 이름은 원래 ref 에서 refs/cppt/ 를 뗀 것
 const SENT: &str = "refs/cppt/sent/";
+/// 앱끼리 상대에게 내준 ref 들 (peers.rs) : 「이 PC 에만 있음」을 가리는 데만 쓴다. 우편함의 증분 바탕(SENT)과 섞으면
+/// 우편함만 보는 사람이 받지 못한 커밋을 빼고 보내게 된다
+const GIVEN: &str = "refs/cppt/given/";
 /// 받은 묶음을 검증하기 전에 두는 자리 : 검증을 지난 것만 제자리로 옮기고 지운다
 const INBOX: &str = "refs/cppt/in/";
 const PROP_FILE: &str = "prop.json";
@@ -188,12 +191,7 @@ fn export(d: &Path, out: &Path, full: bool) -> Res<Option<PathBuf>> {
 	trust::seal(d);
 	let st = trust::load(d)?.ok_or("이 덱에는 아직 승인 기록이 없다")?;
 	make_prop(d, &st)?;
-	let mut names = vec![CHAIN.to_string()];
-	if rev(d, TRUNK).is_some() {
-		names.push(TRUNK.into());
-	}
-	names.extend(refs(d, PROPS).into_iter().map(|(r, _)| r));
-	names.extend(refs(d, JOINS).into_iter().map(|(r, _)| r));
+	let names = names(d);
 	let sent = refs(d, SENT);
 	let changed = full || names.iter().any(|r| {
 		let now = rev(d, r);
@@ -203,27 +201,10 @@ fn export(d: &Path, out: &Path, full: bool) -> Res<Option<PathBuf>> {
 	if !changed {
 		return Ok(None);
 	}
-	if let Some(p) = out.parent() {
-		std::fs::create_dir_all(p).map_err(err)?;
+	let not: Vec<String> = if full { vec![] } else { sent.iter().map(|(_, h)| h.clone()).collect() };
+	if !write_bundle(d, &names, &not, out)? {
+		return Ok(None);
 	}
-	// 다 쓴 뒤에 이름을 바꾼다 : 공유 폴더에서 반쯤 쓴 파일을 남이 읽지 않게
-	let part = out.with_extension("part");
-	let mut args: Vec<String> = vec!["bundle".into(), "create".into(), "-q".into(), part.to_string_lossy().into()];
-	args.extend(names.iter().cloned());
-	if !full && !sent.is_empty() {
-		args.push("--not".into());
-		args.extend(sent.iter().map(|(_, h)| h.clone()));
-	}
-	let a: Vec<&str> = args.iter().map(String::as_str).collect();
-	if let Err(e) = vcs::run(d, &a) {
-		let _ = std::fs::remove_file(&part);
-		// 새로 담을 커밋이 없고 ref 만 그대로다
-		if e.contains("empty bundle") {
-			return Ok(None);
-		}
-		return Err(e);
-	}
-	std::fs::rename(&part, out).map_err(err)?;
 	for r in &names {
 		if let (Some(h), Some(tail)) = (rev(d, r), r.strip_prefix("refs/cppt/")) {
 			vcs::run(d, &["update-ref", &format!("{SENT}{tail}"), &h])?;
@@ -233,16 +214,129 @@ fn export(d: &Path, out: &Path, full: bool) -> Res<Option<PathBuf>> {
 	Ok(Some(out.to_path_buf()))
 }
 
+/// 묶음에 담는 ref : 사슬 · 승인된 줄기 · 제안 · 참여 요청
+fn names(d: &Path) -> Vec<String> {
+	let mut names = vec![CHAIN.to_string()];
+	if rev(d, TRUNK).is_some() {
+		names.push(TRUNK.into());
+	}
+	names.extend(refs(d, PROPS).into_iter().map(|(r, _)| r));
+	names.extend(refs(d, JOINS).into_iter().map(|(r, _)| r));
+	names.extend(refs(d, trust::PENDING).into_iter().map(|(r, _)| r));
+	names
+}
+
+/// 묶음을 쓴다 : not 의 커밋은 받는 쪽에 있다고 보고 뺀다. 새로 담을 커밋이 없으면 쓰지 않고 false.
+/// 다 쓴 뒤에 이름을 바꾼다 : 공유 폴더에서 반쯤 쓴 파일을 남이 읽지 않게
+fn write_bundle(d: &Path, names: &[String], not: &[String], out: &Path) -> Res<bool> {
+	// 빈 묶음인지는 git 의 오류 글이 아니라 개수로 본다(git 이 한국어로 말하면 글이 달라진다)
+	let mut count_args: Vec<&str> = vec!["rev-list", "--count"];
+	count_args.extend(names.iter().map(String::as_str));
+	if !not.is_empty() {
+		count_args.push("--not");
+		count_args.extend(not.iter().map(String::as_str));
+	}
+	if vcs::run(d, &count_args)?.trim() == "0" {
+		return Ok(false);
+	}
+	if let Some(p) = out.parent() {
+		std::fs::create_dir_all(p).map_err(err)?;
+	}
+	let part = out.with_extension("part");
+	let p = part.to_string_lossy().to_string();
+	let mut args: Vec<&str> = vec!["bundle", "create", "-q", &p];
+	args.extend(names.iter().map(String::as_str));
+	if !not.is_empty() {
+		args.push("--not");
+		args.extend(not.iter().map(String::as_str));
+	}
+	if let Err(e) = vcs::run(d, &args) {
+		let _ = std::fs::remove_file(&part);
+		return Err(e);
+	}
+	std::fs::rename(&part, out).map_err(err)?;
+	Ok(true)
+}
+
+// ── 앱끼리 (3단계, peers.rs) ──
+// 켜져 있는 명부 사람에게 iroh 로 「내가 가진 것」(haves)을 보내면, 상대는 그 뒤의 것만 담은 묶음을 흘려 보낸다.
+// 받은 묶음은 파일로 받은 것과 같은 import 를 지난다 : 검증이 하나라 통로가 늘어도 구멍이 늘지 않는다
+
+/// 내가 가진 끝들 : 상대가 묶음에서 뺄 것
+pub(crate) fn haves(d: &Path) -> Vec<String> {
+	let mut out: Vec<String> = refs(d, "refs/cppt/").into_iter().filter(|(r, _)| !r.starts_with(INBOX) && !r.starts_with(SENT) && !r.starts_with(GIVEN)).map(|(_, h)| h).collect();
+	out.extend(rev(d, "HEAD"));
+	out.sort();
+	out.dedup();
+	out
+}
+
+/// 상대(key)에게 줄 묶음을 쓴다. 상대가 이 덱의 명부에서 사본을 받는 사람이 아니면 Err. 줄 것이 없으면 false
+pub(crate) fn serve_bundle(d: &Path, key: &str, haves: &[String], out: &Path) -> Res<bool> {
+	let st = trust::load(d)?.ok_or("승인 기록이 없는 덱")?;
+	if !st.roster.person_of(key).is_some_and(|p| p.replica) {
+		return Err("명부에 없는 사람".into());
+	}
+	{
+		// 내 최신 제안까지 실어 보낸다. 덱 폴더에 판으로 남지 않은 것은 건드리지 않는다(남의 요청 때문에 내 손 편집을 판으로 끊지 않게)
+		let _l = vcs::lock(d)?;
+		make_prop(d, &st)?;
+	}
+	let not: Vec<String> = haves.iter().filter(|h| h.len() == 40 && h.chars().all(|c| c.is_ascii_hexdigit()) && vcs::run(d, &["cat-file", "-e", &format!("{h}^{{commit}}")]).is_ok()).cloned().collect();
+	let names = names(d);
+	let made = write_bundle(d, &names, &not, out)?;
+	// 이제 다른 PC 하나에 이것들이 있다 (줄 것이 없었으면 이미 있었다)
+	for r in &names {
+		if let (Some(h), Some(tail)) = (rev(d, r), r.strip_prefix("refs/cppt/")) {
+			let _ = vcs::run(d, &["update-ref", &format!("{GIVEN}{tail}"), &h]);
+		}
+	}
+	Ok(made)
+}
+
+/// 사본을 주고받을 사람의 열쇠 : 명부에서 사본을 받는 사람 모두(같은 사람의 다른 기기 포함), 이 앱 열쇠만 빼고
+pub(crate) fn peers_of(d: &Path) -> Vec<String> {
+	let me = trust::key_id(&trust::my_key());
+	let Ok(Some(st)) = trust::load(d) else { return vec![] };
+	st.roster.people.iter().filter(|p| p.replica).flat_map(|p| p.keys.iter().cloned()).filter(|k| *k != me).collect()
+}
+
+/// 덱 id → 덱 폴더 : 상대가 덱 id 로 물으면 이것으로 찾는다. 덱을 열 때마다 적는다 (앱 데이터 sync-decks.json)
+fn registry_file() -> PathBuf {
+	#[cfg(test)]
+	return std::env::temp_dir().join(format!("cppt-test-sync-decks-{}.json", std::process::id()));
+	#[cfg(not(test))]
+	crate::control::data_dir().join("sync-decks.json")
+}
+
+pub(crate) fn register(d: &Path) -> Option<String> {
+	let st = trust::load(d).ok()??;
+	let mut m: std::collections::BTreeMap<String, String> = std::fs::read_to_string(registry_file()).ok().and_then(|t| serde_json::from_str(&t).ok()).unwrap_or_default();
+	let dir = d.to_string_lossy().to_string();
+	if m.get(&st.deck) != Some(&dir) {
+		m.insert(st.deck.clone(), dir);
+		let _ = std::fs::write(registry_file(), serde_json::to_string_pretty(&m).unwrap_or_default());
+	}
+	Some(st.deck)
+}
+
+pub(crate) fn deck_dir(deck: &str) -> Option<PathBuf> {
+	let m: std::collections::BTreeMap<String, String> = std::fs::read_to_string(registry_file()).ok().and_then(|t| serde_json::from_str(&t).ok())?;
+	let p = PathBuf::from(m.get(deck)?);
+	// 옮겼거나 지운 덱 · 다른 덱이 그 자리에 생긴 경우를 거른다
+	(trust::load(&p).ok()??.deck == deck).then_some(p)
+}
+
 #[derive(Serialize, Default, Debug)]
 pub struct Imported {
 	/// 받은 사슬과 내 사슬의 사이 : none · same · ahead · behind · diverged · foreign · invalid
-	chain: &'static str,
+	pub(crate) chain: &'static str,
 	/// 받은 사슬을 내 것으로 삼았나
-	adopted: bool,
-	props: usize,
-	joins: usize,
+	pub(crate) adopted: bool,
+	pub(crate) props: usize,
+	pub(crate) joins: usize,
 	/// 승인된 줄기를 내 줄에 합치다 겹친 파일 : 비어 있으면 합쳤다
-	conflicts: Vec<String>,
+	pub(crate) conflicts: Vec<String>,
 }
 
 /// 묶음 머리에 적힌 선행 커밋 : 이 묶음을 들이려면 받는 쪽에 있어야 하는 것. 머리는 빈 줄까지다 (git bundle 꼴 v2 · v3)
@@ -273,7 +367,7 @@ fn prerequisites(file: &Path) -> Res<Vec<String>> {
 }
 
 /// 묶음 하나를 들인다
-fn import(d: &Path, file: &Path) -> Res<Imported> {
+pub(crate) fn import(d: &Path, file: &Path) -> Res<Imported> {
 	let f = file.to_string_lossy().to_string();
 	// 앞선 묶음이 빠졌는지는 git 의 오류 글로 가리지 않는다(git 이 한국어로 말하면 글이 달라진다) : 묶음 머리의 선행 커밋을 직접 본다
 	if prerequisites(file)?.iter().any(|c| vcs::run(d, &["cat-file", "-e", &format!("{c}^{{commit}}")]).is_err()) {
@@ -339,6 +433,13 @@ fn import(d: &Path, file: &Path) -> Res<Imported> {
 			vcs::run(d, &["update-ref", &mine, &c])?;
 			got.props += 1;
 		}
+		// 서명 대기 명부 판 : 내 것과 서명을 합친다. 과반이 되면 여기서 사슬에 붙는다
+		for (_, c) in refs(d, &format!("{inbox}pending/")) {
+			if let Some(e) = vcs::run(d, &["show", &format!("{c}:entry.json")]).ok().and_then(|t| serde_json::from_str::<trust::Entry>(&t).ok()) {
+				trust::merge_pending(d, &e)?;
+			}
+		}
+		let st = trust::load(d)?.unwrap_or(st);
 		for (r, c) in refs(d, &format!("{inbox}join/")) {
 			let Some(key) = r.strip_prefix(&format!("{inbox}join/")) else { continue };
 			if !key_ok(key) || st.roster.person_of(key).is_some() {
@@ -523,8 +624,10 @@ pub struct Status {
 	/// 이 PC 가 명부에 있나
 	member: bool,
 	approver: bool,
+	/// 명부에서 사본을 주고받을 다른 사람(기기) 수 : 0 이면 혼자 쓰는 덱이라 「이 PC 에만 있음」을 따지지 않는다
+	peers: usize,
 	/// 내보내지 않은 것이 있다 (이 PC 에만 있다)
-	unsent: bool,
+	pub(crate) unsent: bool,
 	/// 마지막으로 내보낸 때 · 곳
 	sent_at: Option<String>,
 	sent_to: Option<String>,
@@ -549,10 +652,12 @@ fn status(d: &Path) -> Res<Option<Status>> {
 	let behind = !main.is_empty() && !st.head.is_empty() && !Git(d).is_ancestor(&st.head, &main);
 	let pending = if main.is_empty() { 0 } else { count(d, &format!("{}..{main}", st.head)) };
 	// 이 PC 에만 있는 것 : 사슬이 보낸 뒤 바뀌었거나, 승인받지 않은 내 변경이 마지막으로 보낸 제안에 없다
-	let sent_chain = rev(d, &format!("{SENT}chain"));
-	let sent_prop = rev(d, &format!("{SENT}props/{me}/main"));
+	// 묶음 · 우편함으로 보냈거나(SENT) 켜져 있던 팀원이 받아 갔으면(GIVEN) 다른 PC 에도 있다
 	let chain_now = rev(d, CHAIN);
-	let unsent = chain_now != sent_chain || (pending > 0 && who.is_some() && !sent_prop.is_some_and(|p| Git(d).is_ancestor(&main, &p)));
+	let chain_out = [SENT, GIVEN].iter().any(|b| rev(d, &format!("{b}chain")) == chain_now);
+	let prop_out = [SENT, GIVEN].iter().any(|b| rev(d, &format!("{b}props/{me}/main")).is_some_and(|p| Git(d).is_ancestor(&main, &p)));
+	let peers = peers_of(d).len();
+	let unsent = peers > 0 && (!chain_out || (pending > 0 && who.is_some() && !prop_out));
 	let note: Option<SentNote> = std::fs::read_to_string(note_file(d)).ok().and_then(|t| serde_json::from_str(&t).ok());
 	let mut props = vec![];
 	for (r, c) in refs(d, PROPS) {
@@ -569,6 +674,7 @@ fn status(d: &Path) -> Res<Option<Status>> {
 		.map(|j| JoinView { key: j.key, name: j.name, at: j.at })
 		.collect();
 	Ok(Some(Status {
+		peers,
 		member: who.is_some(),
 		approver: who.is_some_and(|p| p.role == Role::Approve),
 		unsent,
@@ -831,6 +937,56 @@ mod tests {
 		assert!(status(&a).unwrap().unwrap().props.is_empty());
 		as_(7);
 		for p in [&a, &b, &box_] {
+			let _ = std::fs::remove_dir_all(p);
+		}
+	}
+
+	/// 승인자가 둘(가 1 · 다 3)이면 명부를 바꾸는 판은 둘 다 서명해야 선다 : 가가 내고, 다가 묶음으로 받아 서명을 더한다
+	#[test]
+	fn roster_changes_collect_signatures_across_copies() {
+		let (a, c, box_) = (tmp("ra"), tmp("rc"), tmp("rbox"));
+		std::fs::create_dir_all(&a).unwrap();
+		as_(1);
+		put(&a, "deck.json", "{}");
+		trust::change(&a, &SecretKey::from_bytes(&[1; 32]), |r| {
+			r.people.push(trust::Person { id: "c".into(), name: "다".into(), keys: vec![key(3)], role: Role::Approve, slides: vec![], replica: true });
+			Ok(())
+		})
+		.unwrap();
+		let f1 = box_.join("1.cpptb");
+		sync_export(s(&a), s(&f1), true).unwrap();
+		as_(3);
+		sync_open(s(&f1), s(&c)).unwrap();
+		// 가 : 나(2)를 더하려 한다 : 둘 중 하나라 서명 대기
+		as_(1);
+		let n0 = trust::load(&a).unwrap().unwrap().n;
+		trust::change(&a, &SecretKey::from_bytes(&[1; 32]), |r| {
+			r.people.push(trust::Person { id: "b".into(), name: "나".into(), keys: vec![key(2)], role: Role::Edit, slides: vec![], replica: true });
+			Ok(())
+		})
+		.unwrap();
+		assert_eq!(trust::load(&a).unwrap().unwrap().n, n0, "아직 서지 않았다");
+		let v = serde_json::to_value(trust::trust_state(s(&a)).unwrap().unwrap()).unwrap();
+		assert_eq!((v["pending"].as_array().unwrap().len(), v["pending"][0]["mine"].as_bool(), v["pending"][0]["changes"][0]["kind"].as_str()), (1, Some(true), Some("add")));
+		let f2 = box_.join("2.cpptb");
+		sync_export(s(&a), s(&f2), false).unwrap().unwrap();
+		// 다 : 받아 서명을 더한다 : 과반이 되어 선다
+		as_(3);
+		sync_import(s(&c), s(&f2)).unwrap();
+		let v = serde_json::to_value(trust::trust_state(s(&c)).unwrap().unwrap()).unwrap();
+		assert_eq!(v["pending"][0]["mine"].as_bool(), Some(false));
+		let h = v["pending"][0]["hash"].as_str().unwrap().to_string();
+		let v = serde_json::to_value(trust::trust_cosign(s(&c), h).unwrap()).unwrap();
+		assert_eq!((v["people"].as_array().unwrap().len(), v["pending"].as_array().unwrap().len()), (3, 0));
+		let f3 = box_.join("3.cpptb");
+		sync_export(s(&c), s(&f3), false).unwrap().unwrap();
+		// 가 : 선 명부를 받는다 : 대기 판은 낡아 사라진다
+		as_(1);
+		assert!(sync_import(s(&a), s(&f3)).unwrap().adopted);
+		let v = serde_json::to_value(trust::trust_state(s(&a)).unwrap().unwrap()).unwrap();
+		assert_eq!((v["people"].as_array().unwrap().len(), v["pending"].as_array().unwrap().len()), (3, 0));
+		as_(7);
+		for p in [&a, &c, &box_] {
 			let _ = std::fs::remove_dir_all(p);
 		}
 	}

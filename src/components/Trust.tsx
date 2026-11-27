@@ -3,36 +3,76 @@
 //   주고받기  묶음 파일로 보내기 · 들이기, 공유 폴더 우편함, 이 PC 에만 있는 변경 알림
 //   제안      승인자에게는 남의 제안 · 참여 요청, 승인자가 아닌 사람에게는 승인을 기다리는 내 변경
 // 승인자가 한 명이고 열쇠가 이 PC 하나뿐이거나, 이 PC 에만 있는 변경이 있으면 경고색이다
-import { open as pickFile, save } from "@tauri-apps/plugin-dialog";
+import { getCurrentWindow } from "@tauri-apps/api/window";
+import { ask as askBox, open as pickFile, save } from "@tauri-apps/plugin-dialog";
 import { useEffect, useState } from "react";
-import { api, type SyncStatus, type TrustRole, type TrustView } from "../lib/api";
+import { api, type SyncStatus, type TrustPending, type TrustRole, type TrustView } from "../lib/api";
 import { tNow, useT } from "../lib/i18n";
 import { useDeck } from "../lib/store";
 import { copyText } from "./ContextMenu";
 
 const ROLES: TrustRole[] = ["edit", "assigned", "comment", "view", "approve"];
 
-/** 우편함을 정한 덱이면 1분마다 주고받는다. 앱 안 Claude 가 일하는 동안은 건너뛴다(덱 폴더를 판으로 남기므로) */
-export function useMailbox(dir: string | null) {
+/** 1분마다 주고받는다: 켜져 있는 명부 사람에게 iroh 로 묻고(peers.rs), 우편함을 정한 덱이면 우편함도 돈다(sync.rs).
+ *  명부에 나 말고 아무도 없으면 둘 다 아무것도 하지 않는다. 앱 안 Claude 가 일하는 동안은 건너뛴다(우편함이 덱 폴더를 판으로 남기므로) */
+export function useSync(dir: string | null) {
 	useEffect(() => {
 		if (!dir) return;
 		let live = true;
 		const tick = async () => {
 			const st = useDeck.getState();
 			if (!live || st.running || st.dir !== dir) return;
+			const p = await api.syncPeersRun(dir).catch(() => null);
 			const r = await api.syncMailboxRun(dir).catch(() => null);
-			if (!r || !live) return;
-			if (r.received) {
+			if (!live) return;
+			const got = (p?.received ?? 0) + (r?.received ?? 0);
+			if (got) {
 				st.refreshVersions();
-				st.notify(tNow("syncMailboxGot").replace("{n}", String(r.received)), "ok");
+				st.notify(tNow("syncGot").replace("{n}", String(got)), "ok");
 			}
-			if (r.conflicts.length) st.notify(tNow("syncConflicts").replace("{files}", r.conflicts.join(", ")), "err", { sticky: true });
-			if (r.errors.length) st.notify(r.errors.join("\n"), "err");
+			const clash = [...(p?.conflicts ?? []), ...(r?.conflicts ?? [])];
+			if (clash.length) st.notify(tNow("syncConflicts").replace("{files}", clash.join(", ")), "err", { sticky: true });
+			const errs = [...(p?.errors ?? []), ...(r?.errors ?? [])];
+			if (errs.length) st.notify(errs.join("\n"), "err");
 		};
 		const first = setTimeout(tick, 5000);
 		const every = setInterval(tick, 60000);
 		return () => { live = false; clearTimeout(first); clearInterval(every); };
 	}, [dir]);
+}
+
+/** 창을 닫을 때 이 PC 에만 있는 변경이 있으면 붙잡는다. 우편함을 정했으면 먼저 한 번 보내 보고, 그래도 남으면 묻는다.
+ *  Windows 를 끌 때는 이것이 돌지 않는다: 앱이 종료를 막을 수 없어 1분마다 주고받는 것과 경고로 줄인다 (design/분산 협업 조사 보고서) */
+export function useCloseGuard(on: boolean) {
+	useEffect(() => {
+		if (!on) return;
+		const un = getCurrentWindow().onCloseRequested(async (e) => {
+			const st = useDeck.getState();
+			if (!st.dir || st.line?.sian) return;
+			let s = await api.syncStatus(st.dir).catch(() => null);
+			if (s?.unsent && s.mailbox) {
+				await api.syncMailboxRun(st.dir).catch(() => null);
+				s = await api.syncStatus(st.dir).catch(() => null);
+			}
+			if (!s?.unsent) return;
+			const quit = await askBox(tNow("syncCloseAsk"), { title: "ClaudePPT", kind: "warning", okLabel: tNow("syncCloseAnyway"), cancelLabel: tNow("syncCloseStay") });
+			if (!quit) e.preventDefault();
+		});
+		return () => { un.then((f) => f()); };
+	}, [on]);
+}
+
+/** 서명 대기 명부 판 한 줄 : 무엇이 바뀌는지 */
+function changeText(t: ReturnType<typeof useT>, p: TrustPending) {
+	const role = (r: string | null) => (r ? t(("trustRole_" + r) as "trustRole_approve") : "");
+	return p.changes.map((c) =>
+		c.kind === "add" ? t("pendAdd").replace("{name}", c.name).replace("{role}", role(c.to))
+		: c.kind === "remove" ? t("pendRemove").replace("{name}", c.name)
+		: c.kind === "role" ? t("pendRole").replace("{name}", c.name).replace("{from}", role(c.from)).replace("{to}", role(c.to))
+		: c.kind === "keys" ? t("pendKeys").replace("{name}", c.name).replace("{from}", c.from ?? "").replace("{to}", c.to ?? "")
+		: c.kind === "rename" ? t("pendRename").replace("{from}", c.from ?? "").replace("{to}", c.to ?? "")
+		: t(c.to === "true" ? "pendReviewOn" : "pendReviewOff"),
+	).join(" · ");
 }
 
 export function TrustLine({ dir }: { dir: string }) {
@@ -100,9 +140,14 @@ export function TrustLine({ dir }: { dir: string }) {
 		const left = await api.syncApprove(dir, key, id);
 		notify(left.length ? t("syncApproveClash").replace("{files}", left.join(", ")) : t("syncApproved"), left.length ? "err" : "ok", left.length ? { sticky: true } : {});
 	});
+	const cosign = (hash: string) => run(async () => {
+		const nv = await api.trustCosign(dir, hash);
+		notify(t(nv.pending.some((p) => p.hash === hash) ? "pendSignedWait" : "pendSignedDone"), "ok");
+	});
 	const admit = (key: string) => run(async () => {
 		await api.syncAdmit(dir, key, roles[key] ?? "edit");
-		notify(t("syncAdmitted"), "ok");
+		const nv = await api.trustState(dir);
+		notify(t(nv && nv.pending.length ? "pendWaitOthers" : "syncAdmitted"), "ok");
 	});
 
 	const warn = v.fragile || !v.approver || !!sync?.unsent || !!sync?.behind;
@@ -118,6 +163,7 @@ export function TrustLine({ dir }: { dir: string }) {
 				{sync?.behind && <b>{t("syncBehind")}</b>}
 				{v.approver && theirs.length > 0 && <i className="badge">{t("syncPropsN").replace("{n}", String(theirs.length))}</i>}
 				{v.approver && !!sync?.joins.length && <i className="badge">{t("syncJoinsN").replace("{n}", String(sync.joins.length))}</i>}
+				{v.approver && v.pending.some((p) => !p.mine) && <i className="badge">{t("pendN").replace("{n}", String(v.pending.filter((p) => !p.mine).length))}</i>}
 			</button>
 			{open && (
 				<div className="more">
@@ -160,6 +206,18 @@ export function TrustLine({ dir }: { dir: string }) {
 						</div>
 					)}
 
+					{v.pending.length > 0 && (
+						<div className="group">
+							<h4>{t("pendTitle")}</h4>
+							{v.pending.map((p) => (
+								<div className="row" key={p.hash}>
+									<span title={t("pendSignedBy").replace("{names}", p.signed.join(", "))}>{changeText(t, p)} <i className="dim">· {t("pendSignedBy").replace("{names}", p.signed.join(", "))}</i></span>
+									{v.approver && !p.mine && <button className="send" disabled={busy} onClick={() => cosign(p.hash)}>{t("pendSign")}</button>}
+									{v.approver && <button disabled={busy} onClick={() => run(() => api.trustPendingDrop(dir, p.hash))}>{t("pendDrop")}</button>}
+								</div>
+							))}
+						</div>
+					)}
 					{v.approver && theirs.length > 0 && (
 						<div className="group">
 							<h4>{t("syncPropsTitle")}</h4>

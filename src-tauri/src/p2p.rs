@@ -69,12 +69,12 @@ pub(crate) fn secret() -> SecretKey {
 }
 
 /// 이 앱의 iroh 끝점 — 처음 쓸 때 연다(덱 주인으로 공유를 켤 때 · 팀원으로 공유 덱에 들어갈 때). 앱이 꺼질 때까지 둔다
-async fn endpoint(app: &AppHandle) -> Res<Endpoint> {
+pub(crate) async fn endpoint(app: &AppHandle) -> Res<Endpoint> {
 	let p = app.state::<P2p>();
 	let ep = p
 		.ep
 		.get_or_try_init(|| async {
-			let ep = Endpoint::builder(presets::N0).secret_key(secret()).alpns(vec![ALPN.to_vec()]).bind().await.map_err(|e| format!("앱끼리 잇는 길을 열지 못했다: {e}"))?;
+			let ep = Endpoint::builder(presets::N0).secret_key(secret()).alpns(vec![ALPN.to_vec(), crate::peers::ALPN.to_vec()]).bind().await.map_err(|e| format!("앱끼리 잇는 길을 열지 못했다: {e}"))?;
 			let (ep2, app2) = (ep.clone(), app.clone());
 			tauri::async_runtime::spawn(async move { serve(app2, ep2).await });
 			Ok::<_, String>(ep)
@@ -96,6 +96,10 @@ async fn serve(app: AppHandle, ep: Endpoint) {
 		let app = app.clone();
 		tauri::async_runtime::spawn(async move {
 			let Ok(conn) = incoming.await else { return };
+			// 2026.11.27 : 덱 사본 주고받기(peers.rs)도 같은 끝점으로 받는다. 공유를 켜지 않아도 받는다
+			if conn.alpn() == crate::peers::ALPN {
+				return crate::peers::serve(conn).await;
+			}
 			while let Ok((send, recv)) = conn.accept_bi().await {
 				// 협업이 꺼져 있으면 받지 않는다 — 팀원 출입구는 「덱 주인이 공유를 끄셨습니다」를 보인다
 				let Some(port) = crate::collab::serving_port(&app) else {
