@@ -33,7 +33,8 @@ export interface Deck {
 	/** 쪽 설정 — 이 덱의 쪽 여백(px). 없으면 템플릿 여백을 네 변에 똑같이 쓴다 (2026.11.26) */
 	page?: { margin: Margins };
 	created: string;
-	updated: string;
+	/** 2026.11.27 부터 쓰지 않는다: 저장할 때마다 바뀌어 두 사람의 변경이 늘 겹쳤다. 옛 덱에 남은 값은 저장할 때 지운다 */
+	updated?: string;
 }
 
 /** 쪽 여백 — 위 · 오른쪽 · 아래 · 왼쪽 (CSS padding 차례) */
@@ -66,7 +67,7 @@ export async function readDeck(dir: string): Promise<Deck> {
 }
 
 export async function writeDeck(dir: string, deck: Deck) {
-	deck.updated = new Date().toISOString();
+	delete deck.updated;
 	await api.writeText(dir, "deck.json", JSON.stringify(deck, null, 2) + "\n");
 }
 
@@ -197,7 +198,6 @@ export async function createDeck(dir: string, title: string, s: Settings, templa
 		source: { kind: "new" },
 		template: tpl.id,
 		created: new Date().toISOString(),
-		updated: new Date().toISOString(),
 	};
 	await embedFont(dir);
 	await api.writeText(dir, "theme.css", themeCss(tpl));

@@ -11,7 +11,7 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { deckUrl } from "../lib/api";
 import { type Deck } from "../lib/deck";
-import { ask, onFrame, tell } from "../lib/frames";
+import { SLIDE_SANDBOX, ask, onFrame, tell } from "../lib/frames";
 import { useT } from "../lib/i18n";
 import { anchor, bbox, MARK, type Shape, shapePath, tiny, type Tool } from "../lib/markup";
 import { type Pin, useDeck } from "../lib/store";
@@ -25,6 +25,7 @@ import { CheckBar, CheckMarks, PageGuides } from "./CheckMarks";
 import { remote } from "../lib/transport";
 import { useSettings } from "../lib/settings";
 import Talk, { openTalk, useTalkFold } from "./Talk";
+import { useSync } from "./Trust";
 
 /** 담당이 아니라 내용 없이 자리만 받은 쪽 (2026.11.27 collab.rs limit_view) — 쪽 그림 대신. 덱 주인이 「담당 쪽만 보이기」를 켠 사람에게만 생긴다 */
 function LockedSlide({ width, height }: { width: number; height: number }) {
@@ -62,8 +63,10 @@ export function SlideFrame({ file, rev, width, height, w, h, onWin, revHash }: {
 		<iframe
 			ref={ref}
 			src={src}
-			// 협업 브라우저에서는 슬라이드를 다른 출처로 — 슬라이드 안 스크립트가 앱 화면에 손대거나 이 사람 이름으로 의도를 보내지 못하게 (collab.rs)
-			sandbox={remote ? "allow-scripts" : undefined}
+			// 슬라이드는 늘 이름 없는 출처(sandbox)에서 돈다: 슬라이드 안 스크립트가 앱 화면 · 앱 명령에 손대거나 이 사람 이름으로 의도를 보내지 못하게.
+			// 2026.11.27 : 전에는 공유 덱 창에서만 걸었다. 사본에서 가져온 쪽 · 앞으로 사본으로 받는 쪽은 남이 쓴 HTML 이라 내 앱 창에서도 건다.
+			// 슬라이드와는 postMessage 로만 주고받고(frames.ts), deck:// 는 Access-Control-Allow-Origin: * 를 달아(lib.rs ok) 그림 · 글꼴이 그대로 읽힌다
+			sandbox={SLIDE_SANDBOX}
 			title={file}
 			width={w}
 			height={h}
@@ -249,6 +252,10 @@ function Splitter({ side, at, set, label }: { side: "left" | "right"; at: number
 
 export default function Workspace() {
 	const setTool = useDeck((s) => s.setTool);
+	// 공유 폴더 우편함을 정한 덱이면 열려 있는 동안 주고받는다 (sync.rs). 공유 덱 창(팀원)은 덱 주인의 것이라 하지 않는다
+	const line = useDeck((s) => s.line);
+	const deckDir = useDeck((s) => s.dir);
+	useSync(remote || line?.sian ? null : deckDir);
 	const setCurrent = useDeck((s) => s.setCurrent);
 	useEffect(() => {
 		const k = (e: KeyboardEvent) => {

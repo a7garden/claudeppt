@@ -125,6 +125,27 @@ input, textarea, select { font: inherit; color: inherit; }
 .hist-ask label { display: grid; gap: 4px; color: var(--dim); }
 .hist-sian .acts, .hist-clash .acts, .hist-ask .acts { display: flex; flex-wrap: wrap; gap: 6px; }
 .hist-sian .acts button, .hist-clash .acts button, .hist-ask .acts button { height: 26px; padding: 0 10px; border-radius: var(--r-ctl); outline: 1px solid var(--hair); outline-offset: -1px; }
+/* 명부 · 승인 기록 (Trust.tsx): 접힌 한 줄. 이 PC 를 잃으면 줄기가 멈추는 덱이면 경고색 */
+.hist-trust { display: grid; gap: 6px; font-size: 12px; border-radius: 8px; outline: 1px solid var(--hair); outline-offset: -1px; }
+.hist-trust.warn { outline-color: var(--err); }
+.hist-trust .sum { display: flex; flex-wrap: wrap; gap: 4px 8px; align-items: baseline; padding: 6px 10px; text-align: left; color: var(--dim); }
+.hist-trust .sum b { color: var(--err); font-weight: 600; }
+.hist-trust .more { display: grid; gap: 8px; padding: 0 10px 8px; }
+.hist-trust ul { margin: 0; padding: 0; list-style: none; display: grid; gap: 2px; }
+.hist-trust li { display: flex; justify-content: space-between; gap: 8px; }
+.hist-trust p { margin: 0; color: var(--dim); line-height: 1.5; }
+.hist-trust code { display: block; padding: 6px 8px; border-radius: 6px; background: var(--raise-2); font-size: 12px; overflow-wrap: anywhere; user-select: all; }
+.hist-trust .secret { display: grid; gap: 6px; }
+.hist-trust form { display: grid; gap: 6px; }
+.hist-trust .acts { display: flex; flex-wrap: wrap; gap: 6px; }
+.hist-trust .acts button { height: 26px; padding: 0 10px; border-radius: var(--r-ctl); outline: 1px solid var(--hair); outline-offset: -1px; }
+.hist-trust .badge { font-style: normal; padding: 0 6px; border-radius: 999px; background: var(--accent); color: var(--on-accent, #fff); }
+.hist-trust .group { display: grid; gap: 6px; padding-top: 8px; border-top: 1px solid var(--hair); }
+.hist-trust h4 { margin: 0; font-size: 12px; font-weight: 600; color: var(--text); }
+.hist-trust .row { display: flex; align-items: center; gap: 6px; }
+.hist-trust .row > span { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.hist-trust .row button { height: 26px; padding: 0 10px; border-radius: var(--r-ctl); outline: 1px solid var(--hair); outline-offset: -1px; }
+.hist-trust select { height: 26px; }
 .hist-body { overflow-y: auto; min-height: 120px; margin: 0 -4px; }
 .hist-rows { position: relative; }
 .hist-graph { position: absolute; left: 4px; top: 0; pointer-events: none; z-index: 1; }

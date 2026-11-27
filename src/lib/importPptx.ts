@@ -1013,7 +1013,7 @@ export async function importPptx(bytes: Uint8Array, src: string, dir: string, ti
 
 	await api.vcsInit(dir);
 	await embedFont(dir);
-	const deck: Deck = { format: FORMAT, title, size: { w: W, h: H }, slides: [], theme: "theme.css", source: { kind: "pptx", file: "source/original.pptx" }, created: new Date().toISOString(), updated: new Date().toISOString() };
+	const deck: Deck = { format: FORMAT, title, size: { w: W, h: H }, slides: [], theme: "theme.css", source: { kind: "pptx", file: "source/original.pptx" }, created: new Date().toISOString() };
 	await api.absCopyIn(src, dir, "source/original.pptx");
 	const warnings = new Set<string>();
 	const media = new Map<string, string>();

@@ -37,6 +37,12 @@ pub(crate) fn git(dir: &Path) -> Command {
 		"-c", "color.ui=false",
 		"-c", "i18n.logOutputEncoding=utf-8",
 	]);
+	// deck.json 은 쪽 단위로 합친다 (deckmerge.rs): 드라이버는 이 실행 파일의 CLI 다. 시험에서는 실행 파일이 시험 묶음이라 걸지 않는다
+	// (걸면 시험 묶음이 merge-deck 을 시험 이름으로 읽고 아무것도 하지 않은 채 0 으로 끝나, 합치기가 말없이 남의 것을 버린다)
+	#[cfg(not(test))]
+	if let Some(exe) = std::env::current_exe().ok().map(|p| p.to_string_lossy().replace('\\', "/")) {
+		c.arg("-c").arg(format!("merge.cpptdeck.driver=\"{exe}\" merge-deck %O %A %B"));
+	}
 	c
 }
 
@@ -70,6 +76,9 @@ pub fn vcs_init(dir: String) -> Res<()> {
 	if !d.join(".gitignore").exists() {
 		std::fs::write(d.join(".gitignore"), IGNORE).map_err(err)?;
 	}
+	if !d.join(".gitattributes").exists() {
+		std::fs::write(d.join(".gitattributes"), crate::deckmerge::ATTRS).map_err(err)?;
+	}
 	Ok(())
 }
 
@@ -91,7 +100,15 @@ pub struct Commit {
 pub fn vcs_commit(dir: String, message: String, author: Option<String>) -> Res<Option<Commit>> {
 	vcs_init(dir.clone())?;
 	let _l = lock(Path::new(&dir))?;
-	commit_all(Path::new(&dir), &message, author.as_deref())
+	sealed(Path::new(&dir), commit_all(Path::new(&dir), &message, author.as_deref()))
+}
+
+/// 줄기가 앞으로 갔으면 서명 기록을 붙인다 (trust.rs seal): 줄기를 옮기는 명령은 모두 이것으로 끝낸다. 잠근 채로 부른다
+pub(crate) fn sealed<T>(d: &Path, r: Res<T>) -> Res<T> {
+	if r.is_ok() {
+		crate::trust::seal(d);
+	}
+	r
 }
 
 /// 판 남기기 잠금 — 앱과 앱 밖 CLI(Claude Code 세션마다 프로세스가 따로 돈다)가 덱 하나의 git 색인을 함께 쓴다.
@@ -231,7 +248,7 @@ pub fn vcs_restore(dir: String, hash: String, message: String, author: Option<St
 		let _ = std::fs::remove_file(d.join(rel));
 	}
 	run(d, &["checkout", &hash, "--", ".", ":(exclude)releases", ":(exclude)source"])?;
-	commit_all(d, &message, author.as_deref())
+	sealed(d, commit_all(d, &message, author.as_deref()))
 }
 
 // ── 작업 사본 (2026.11.27) ──
@@ -352,7 +369,7 @@ pub fn vcs_work_finish(dir: String, key: String, turn: String, message: String, 
 	// 얹기 전에 보류 갈래부터 — 얹다가 오류가 나도 묶음이 남는다. 들어가면 land 가 걷는다
 	run(d, &["branch", "-f", &format!("{HOLD}{turn}"), &c])?;
 	let _l = lock(d)?;
-	land(d, &c, &turn)
+	sealed(d, land(d, &c, &turn))
 }
 
 /// 묶음 하나를 덱 위에 얹는다 (잠근 채로 부른다). 못 얹으면 덱은 그대로 두고 보류 갈래로 남긴다
@@ -419,7 +436,7 @@ pub fn vcs_hold_retry(dir: String, name: String) -> Res<Landed> {
 	let d = Path::new(&dir);
 	let c = run(d, &["rev-parse", &format!("{HOLD}{}", plain(&name)?)])?;
 	let _l = lock(d)?;
-	land(d, &c, &name)
+	sealed(d, land(d, &c, &name))
 }
 
 /// 보류한 것으로 바꾼다 — 그 묶음이 고친 파일을 묶음의 내용 그대로 덱에 놓고 새 판으로. 덮인 지금 내용은 지난 판에 남는다
@@ -440,7 +457,7 @@ pub fn vcs_hold_take(dir: String, name: String, message: String, author: Option<
 	}
 	let made = commit_all(d, &message, author.as_deref())?;
 	run(d, &["branch", "-D", &r])?;
-	Ok(made)
+	sealed(d, Ok(made))
 }
 
 /// 보류한 것을 버린다 — 사람이 고른 때만. 지우지 않고 치워 둔다(cppt/old/…) — 잘못 눌러도 git 으로 되살린다
