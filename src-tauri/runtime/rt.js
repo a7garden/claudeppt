@@ -1185,6 +1185,23 @@
 		const bx = best([x, x + z.w / 2, x + z.w], z.xs), by = best([y, y + z.h / 2, y + z.h], z.ys);
 		return { dx: dx + (bx ? bx.d : 0), dy: dy + (by ? by.d : 0), gx: bx?.at, gy: by?.at };
 	};
+	/** 크기를 끄는 중 움직이는 변이 붙을 자리 — 붙으면 그때의 너비 · 높이(w · h)와 안내선 자리. k2 는 Ctrl(가운데 기준)이면 2: 한 변이 d 움직이면 크기는 2d 바뀐다 */
+	const snapSize = (s, d, w, h, k2, ratio) => {
+		const z = s.z, out = {};
+		const near = (v, cands) => { let b = null; for (const c of cands) { const dd = c - v; if (Math.abs(dd) <= SNAP && (!b || Math.abs(dd) < Math.abs(b.d))) b = { d: dd, at: c }; } return b; };
+		// 끌기 전 상자(z.x0 · z.y0 · s.w · s.h)에서 움직이는 변의 지금 자리
+		const cx = z.x0 + s.w / 2, cy = z.y0 + s.h / 2;
+		let bx = null, by = null;
+		if (d.includes("e")) { const b = near(k2 === 2 ? cx + w / 2 : z.x0 + w, z.xs); if (b) bx = { ...b, w: w + k2 * b.d }; }
+		else if (d.includes("w")) { const b = near(k2 === 2 ? cx - w / 2 : z.x0 + s.w - w, z.xs); if (b) bx = { ...b, w: w - k2 * b.d }; }
+		if (d.includes("s")) { const b = near(k2 === 2 ? cy + h / 2 : z.y0 + h, z.ys); if (b) by = { ...b, h: h + k2 * b.d }; }
+		else if (d.includes("n")) { const b = near(k2 === 2 ? cy - h / 2 : z.y0 + s.h - h, z.ys); if (b) by = { ...b, h: h - k2 * b.d }; }
+		// 비율을 지키면 가까운 쪽 하나만
+		if (bx && by && ratio) { if (Math.abs(bx.d) <= Math.abs(by.d)) by = null; else bx = null; }
+		if (bx) { out.w = bx.w; out.gx = bx.at; }
+		if (by) { out.h = by.h; out.gy = by.at; }
+		return out;
+	};
 	const showGuides = (z, g) => {
 		Object.assign(gx.style, g?.gx != null ? { display: "block", left: z.S.left + g.gx - 0.5 + "px", top: z.S.top + "px", width: "1px", height: z.S.height + "px" } : { display: "none" });
 		Object.assign(gy.style, g?.gy != null ? { display: "block", top: z.S.top + g.gy - 0.5 + "px", left: z.S.left + "px", height: "1px", width: z.S.width + "px" } : { display: "none" });
@@ -1222,7 +1239,7 @@
 		if (hd) {
 			if (sel && e.button === 0) {
 				const p = posOf(sel);
-				size = { el: sel, dir: hd.dataset.dir, x: e.clientX, y: e.clientY, l: p.l, t: p.t, rel: p.rel, w: sel.offsetWidth, h: sel.offsetHeight, img: sel.tagName === "IMG", props: new Set() };
+				size = { el: sel, dir: hd.dataset.dir, x: e.clientX, y: e.clientY, l: p.l, t: p.t, rel: p.rel, w: sel.offsetWidth, h: sel.offsetHeight, img: sel.tagName === "IMG", props: new Set(), z: snapTargets(sel) };
 				hd.setPointerCapture(e.pointerId);
 			}
 			e.preventDefault();
@@ -1296,7 +1313,16 @@
 			const k2 = e.ctrlKey ? 2 : 1;
 			let w = size.w + k2 * (d.includes("e") ? dx : d.includes("w") ? -dx : 0);
 			let h = size.h + k2 * (d.includes("s") ? dy : d.includes("n") ? -dy : 0);
-			if (d.length === 2 && (e.shiftKey || size.img)) { const k = Math.max(w / size.w, h / size.h); w = size.w * k; h = size.h * k; }
+			const ratio = d.length === 2 && (e.shiftKey || size.img);
+			if (ratio) { const k = Math.max(w / size.w, h / size.h); w = size.w * k; h = size.h * k; }
+			// 움직이는 변을 쪽 · 이웃 요소의 가장자리 · 가운데에 붙인다 (PowerPoint 는 크기를 끌 때도 붙는다). Alt 면 붙지 않는다.
+			// 비율을 지키는 중이면 더 가까운 한 변만 붙이고 다른 변은 비율로 따라간다 — 둘 다 붙이면 비율이 깨진다
+			const g = !e.altKey && size.z ? snapSize(size, d, w, h, k2, ratio) : null;
+			if (g?.w != null || g?.h != null) {
+				if (ratio) { const k = g.w != null ? g.w / size.w : g.h / size.h; w = size.w * k; h = size.h * k; }
+				else { if (g.w != null) w = g.w; if (g.h != null) h = g.h; }
+			}
+			showGuides(size.z, g);
 			w = Math.max(Math.min(8, size.w), w);
 			h = Math.max(Math.min(8, size.h), h);
 			const st = size.el.style;
@@ -1370,6 +1396,7 @@
 				post({ t: "patch", path: pathOf(size.el), style: { ...posPatch(size.el, size.props), ...cut } });
 			}
 			size = null;
+			showGuides(null, null);
 			// 서식 띠의 크기 · 위치 칸이 끈 뒤의 값을 보이게 (전에는 다른 것을 고를 때까지 옛 값이 남았다)
 			announce();
 			return;
