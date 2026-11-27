@@ -7,6 +7,7 @@ import { ask, open, save } from "@tauri-apps/plugin-dialog";
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { api, deckUrl, type LibItem } from "../lib/api";
 import { readDeck, safeName, writeDeck } from "../lib/deck";
+import { SLIDE_SANDBOX } from "../lib/frames";
 import { openAny, startNew } from "../lib/flows";
 import { useT } from "../lib/i18n";
 import { useSettings } from "../lib/settings";
@@ -293,7 +294,7 @@ function DeckThumb({ item }: { item: LibItem }) {
 	return (
 		<span className="dthumb" ref={ref}>
 			{id && first && width > 0 && (
-				<iframe src={deckUrl(id, first)} title="" tabIndex={-1} width={size.w} height={size.h}
+				<iframe src={deckUrl(id, first)} sandbox={SLIDE_SANDBOX} title="" tabIndex={-1} width={size.w} height={size.h}
 					style={{ transform: `translate(${(width - size.w * k) / 2}px, ${(boxH - size.h * k) / 2}px) scale(${k})` }} />
 			)}
 		</span>

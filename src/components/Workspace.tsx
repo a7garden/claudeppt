@@ -11,7 +11,7 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { deckUrl } from "../lib/api";
 import { type Deck } from "../lib/deck";
-import { ask, onFrame, tell } from "../lib/frames";
+import { SLIDE_SANDBOX, ask, onFrame, tell } from "../lib/frames";
 import { useT } from "../lib/i18n";
 import { anchor, bbox, MARK, type Shape, shapePath, tiny, type Tool } from "../lib/markup";
 import { type Pin, useDeck } from "../lib/store";
@@ -58,8 +58,10 @@ export function SlideFrame({ file, rev, width, height, w, h, onWin, revHash }: {
 		<iframe
 			ref={ref}
 			src={src}
-			// 협업 브라우저에서는 슬라이드를 다른 출처로 — 슬라이드 안 스크립트가 앱 화면에 손대거나 이 사람 이름으로 의도를 보내지 못하게 (collab.rs)
-			sandbox={remote ? "allow-scripts" : undefined}
+			// 슬라이드는 늘 이름 없는 출처(sandbox)에서 돈다 — 슬라이드 안 스크립트가 앱 화면 · 앱 명령에 손대거나 이 사람 이름으로 의도를 보내지 못하게.
+			// 2026.11.27 : 전에는 공유 덱 창에서만 걸었다. 사본에서 가져온 쪽 · 앞으로 사본으로 받는 쪽은 남이 쓴 HTML 이라 내 앱 창에서도 건다.
+			// 슬라이드와는 postMessage 로만 주고받고(frames.ts), deck:// 는 Access-Control-Allow-Origin: * 를 달아(lib.rs ok) 그림 · 글꼴이 그대로 읽힌다
+			sandbox={SLIDE_SANDBOX}
 			title={file}
 			width={w}
 			height={h}
