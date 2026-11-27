@@ -1,0 +1,57 @@
+name: automerge
+
+# PR 에서 release 워크플로(check)가 통과하면 그 PR 을 squash 로 넣고, 패치 판 하나를 릴리즈로 낸다.
+# 2026.11.27 : 관리자 결정 — CI 를 통과한 PR 은 사람 승인 없이 넣고, 넣을 때마다 패치 판을 낸다.
+#
+# workflow_run 은 main 에 있는 이 파일로 돌고 쓰기 권한을 가진다. 그래서 PR 의 코드를 받아 돌리지 않고 gh 로 병합 · 태그만 한다.
+# PR 제목 · 본문은 남이 적은 글이므로 스크립트에 끼워 넣지 않고 환경 변수로만 넘긴다.
+# GITHUB_TOKEN 으로 한 병합 · 태그는 다른 워크플로를 깨우지 않는다 — 그래서 릴리즈는 workflow_dispatch 로 직접 부른다.
+# 판 번호는 main 의 파일을 고치지 않는다. 로컬에서 올려 두고 아직 밀지 않은 판과 부딪히지 않게.
+# 태그 · tauri.conf.json 판 중 가장 큰 것의 패치 +1 을 병합 커밋에 태그로 달고, 빌드가 그 판으로 맞춘다(set-version.mjs).
+on:
+  workflow_run:
+    workflows: [release]
+    types: [completed]
+
+permissions:
+  contents: write
+  pull-requests: write
+  actions: write
+
+# PR 둘이 같이 끝나면 판 번호가 겹치지 않게 하나씩 돈다
+concurrency:
+  group: automerge
+  cancel-in-progress: false
+
+jobs:
+  merge:
+    if: github.event.workflow_run.event == 'pull_request' && github.event.workflow_run.conclusion == 'success'
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      SHA: ${{ github.event.workflow_run.head_sha }}
+    steps:
+      - name: PR 찾아 병합
+        id: pr
+        run: |
+          # 포크 PR 은 workflow_run.pull_requests 가 비어 있어 머리 커밋으로 찾는다. 그 사이 새로 push 됐으면 머리가 달라 넘어간다
+          pr=$(gh api "repos/$GH_REPO/pulls?state=open&per_page=100" --jq ".[] | select(.head.sha == \"$SHA\" and .draft == false) | .number" | head -1)
+          if [ -z "$pr" ]; then echo "::notice::머리 커밋 $SHA 의 열린 PR 이 없다 (닫혔거나 새로 push 됐다)"; exit 0; fi
+          gh pr merge "$pr" --squash --match-head-commit "$SHA"
+          echo "number=$pr" >> "$GITHUB_OUTPUT"
+
+      - name: 패치 판 태그 달고 릴리즈 부르기
+        if: steps.pr.outputs.number
+        env:
+          PR: ${{ steps.pr.outputs.number }}
+        run: |
+          merge=$(gh pr view "$PR" --json mergeCommit --jq .mergeCommit.oid)
+          conf=$(gh api "repos/$GH_REPO/contents/src-tauri/tauri.conf.json?ref=$merge" --jq .content | base64 -d | jq -r .version)
+          last=$( { gh api "repos/$GH_REPO/tags" --paginate --jq '.[].name' | sed -n 's/^v\([0-9]*\.[0-9]*\.[0-9]*\)$/\1/p'; echo "$conf"; } | sort -V | tail -1)
+          next="${last%.*}.$(( ${last##*.} + 1 ))"
+          gh api "repos/$GH_REPO/git/refs" -f ref="refs/tags/v$next" -f sha="$merge" > /dev/null
+          # 릴리즈 노트는 PR 제목 한 줄. CHANGELOG 에 이 판 구획이 있으면 그쪽을 쓴다(release-notes.mjs)
+          notes="- $(gh pr view "$PR" --json title --jq .title) (#$PR)"
+          gh workflow run release.yml --ref "v$next" -f notes="$notes"
+          echo "::notice::#$PR 을 넣고 v$next 릴리즈를 불렀다"

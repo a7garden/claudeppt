@@ -7,7 +7,12 @@ on:
     branches: [main]
     tags: ["v*"]
   pull_request:
+  # automerge 가 병합 뒤 패치 태그로 부른다. 태그 push 는 GITHUB_TOKEN 이라 이 워크플로를 깨우지 않기 때문이다
   workflow_dispatch:
+    inputs:
+      notes:
+        description: CHANGELOG 에 이 판 구획이 없을 때 쓸 릴리즈 노트
+        required: false
 
 # 2026.11.25 : 기본은 읽기만. PR(남의 코드)이 도는 check 에 쓰기 권한을 주지 않고, 릴리즈를 올리는 windows 만 쓴다
 permissions:
@@ -50,8 +55,13 @@ jobs:
         with: { workspaces: src-tauri -> target }
       - run: npm ci
       # CHANGELOG.md 의 이번 판 구획이 릴리즈 노트가 되고, latest.json 을 거쳐 앱의 업데이트 알림 · 설정 화면에 보인다.
+      # automerge 의 패치 태그는 main 의 판 번호보다 앞서므로 빌드 전에 태그 판으로 맞춘다
+      - name: 판 번호 맞추기
+        run: node .github/scripts/set-version.mjs
       - name: 릴리즈 노트
         id: notes
+        env:
+          NOTES: ${{ inputs.notes }}
         run: node .github/scripts/release-notes.mjs
       # 2026.11.18 : 서명 키 비밀값이 아직 없다. 없으면 빌드가 서명에서 실패하므로 건너뛰고, 릴리즈는 키가 있는 PC 에서 서명해 손으로 올린다
       #              (README 「배포」). 비밀값을 등록하면 이 단계가 다시 돈다.
