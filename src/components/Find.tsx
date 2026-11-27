@@ -60,7 +60,9 @@ export function FindBar({ win }: { win: React.MutableRefObject<Window | null> })
 	};
 	const replace = async (all: boolean) => {
 		if (!q) return;
-		const n = await replaceText(q, to, cs, all || !slide ? undefined : [slide.id]);
+		// 고칠 수 없는 쪽(팀원 권한 밖 등)이면 쓰기가 실패한다 — 말없이 끝나지 않게 알린다
+		const n = await replaceText(q, to, cs, all || !slide ? undefined : [slide.id]).catch((e) => { setDone(String(e?.message || e)); return null; });
+		if (n == null) return;
 		setDone(t("replaced").replace("{n}", String(n)));
 		setCounts(await findText(q, cs));
 		if (!all && n === 0) next(1);

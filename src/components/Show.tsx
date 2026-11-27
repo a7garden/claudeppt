@@ -45,6 +45,9 @@ export function startShow(from?: number) {
 	// 처음부터면 숨기지 않은 첫 쪽부터
 	if (from != null) { let i = from; while (i < st.deck.slides.length - 1 && st.deck.slides[i]?.skip) i++; st.setCurrent(i); }
 	useView.getState().setShow(true);
+	// 슬라이드 창에 포커스가 남으면 쇼의 키가 무대 슬라이드로 가 고른 것이 옮겨진다 — 앱으로 가져온다
+	(document.activeElement as HTMLElement | null)?.blur?.();
+	window.focus();
 	// 창 전체 화면 — 웹뷰가 받지 않으면 앱 창 안을 채우는 것으로 그친다
 	document.documentElement.requestFullscreen?.().catch(() => {});
 }
@@ -156,7 +159,7 @@ export function SlideShow() {
 	const s = Math.min(box.w / deck.size.w, box.h / deck.size.h);
 	const w = deck.size.w * s, h = deck.size.h * s;
 	return (
-		<div className="show" role="dialog" aria-label={t("slideShow")}
+		<div className="show" role="dialog" aria-label={t("slideShow")} tabIndex={-1} ref={(d) => d?.focus()}
 			onClick={() => go(1)} onContextMenu={(e) => { e.preventDefault(); go(-1); }}
 			onWheel={(e) => go(e.deltaY > 0 ? 1 : -1)}>
 			{ended

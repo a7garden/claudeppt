@@ -60,7 +60,8 @@ function toRuns(runs: any[], f: FontCtx) {
 					fontSize: PT(r.size), bold: fc.bold, italic: r.italic, color: r.color, fontFace: fc.face,
 					charSpacing: r.spacing ? PT(r.spacing) : undefined,
 					highlight: r.highlight || undefined,
-					hyperlink: r.link ? { url: r.link } : undefined,
+					// 쪽 안 이동(#…)은 PowerPoint 주소가 아니다 — 웹 · 메일 주소만 링크로
+					hyperlink: r.link && /^(https?:|mailto:)/i.test(r.link) ? { url: r.link } : undefined,
 					underline: r.underline ? { style: "sng" } : undefined, strike: r.strike ? "sngStrike" : undefined,
 					transparency: r.alpha != null && r.alpha < 1 ? Math.round((1 - r.alpha) * 100) : undefined,
 					breakLine: !!next?.br,

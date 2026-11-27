@@ -165,13 +165,14 @@
 		walk(root);
 		return [...new Set(out)];
 	};
-	/** 모두 고르기 — 쪽을 가득 덮는 틀 하나뿐이면(Claude 가 짓는 쪽에 흔하다) 그 안의 요소들을 고른다 */
-	const selectAll = () => {
+	/** 쪽의 개체들 — 쪽을 가득 덮는 틀 하나뿐이면(Claude 가 짓는 쪽에 흔하다) 그 안의 요소들. 모두 고르기 · Tab 이 쓴다 */
+	const topItems = () => {
 		const S = root.getBoundingClientRect();
 		let all = inside({ x: 0, y: 0, w: S.width, h: S.height });
 		while (all.length === 1 && [...all[0].children].filter((c) => canMove(c) && visible(c)).length > 1 && !all[0].hasAttribute("data-group")) all = [...all[0].children].filter((c) => canMove(c) && visible(c));
-		if (all.length) select(all[0], all.slice(1));
+		return all;
 	};
+	const selectAll = () => { const all = topItems(); if (all.length) select(all[0], all.slice(1)); };
 	/** 요소가 든 묶음 중 가장 바깥 묶음 (묶음 안 요소를 누르면 묶음째 고른다) */
 	const groupOf = (el) => { let g = el; for (let e = el; e && e !== root; e = e.parentElement) if (e.hasAttribute?.("data-group")) g = e; return g; };
 	const movable = (el) => !!el && el !== root && el.nodeType === 1 && ["absolute", "fixed"].includes(css(el).position);
@@ -387,16 +388,16 @@
 		post({ t: "placing", kind: p ? p.kind : null });
 	};
 	const slideXY = (e) => { const S = root.getBoundingClientRect(); return [e.clientX - S.left, e.clientY - S.top]; };
-	/** 그리는 틀 — 선은 가로 · 세로 중 긴 쪽으로 곧게, Shift 면 정사각형. 화살표는 아무 방향이나 (Shift 면 45° 씩) */
+	/** 그리는 틀 — 선 · 화살표는 아무 방향이나 (Shift 면 45° 씩), 상자는 Shift 면 정사각형 · Ctrl 이면 누른 자리를 가운데로 (PowerPoint 와 같다) */
 	const placeRect = (e) => {
 		const [x, y] = slideXY(e), { x0, y0, kind } = place;
 		let w = x - x0, h = y - y0;
-		if (kind === "line") { if (Math.abs(w) >= Math.abs(h)) h = 0; else w = 0; }
-		else if (kind === "arrow") {
+		if (kind === "line" || kind === "arrow") {
 			if (e.shiftKey) { const L = Math.hypot(w, h), a = Math.round(Math.atan2(h, w) / (Math.PI / 4)) * (Math.PI / 4); w = Math.cos(a) * L; h = Math.sin(a) * L; }
 			return { x: Math.min(x0, x0 + w), y: Math.min(y0, y0 + h), w: Math.abs(w), h: Math.abs(h), dx: w, dy: h };
 		}
 		else if (e.shiftKey) { const m = Math.max(Math.abs(w), Math.abs(h)); w = Math.sign(w || 1) * m; h = Math.sign(h || 1) * m; }
+		if (e.ctrlKey) return { x: x0 - Math.abs(w), y: y0 - Math.abs(h), w: Math.abs(w) * 2, h: Math.abs(h) * 2 };
 		return { x: Math.min(x0, x0 + w), y: Math.min(y0, y0 + h), w: Math.abs(w), h: Math.abs(h) };
 	};
 	// 도형 — 글은 안쪽 <p> 에 둔다. 가운데 맞춤을 flex 로 하는데, 글을 flex 상자에 바로 넣으면 Shift+Enter 의 <br> 가 줄을 못 바꾼다.
@@ -422,16 +423,17 @@
 	/** 모양 도형의 크기가 바뀌었으면 다시 깎을 style (아니면 빈 것) */
 	const reshape = (el) => { const k = el.getAttribute?.("data-shape"); return GEOM[k] ? { "clip-path": clipOf(k, el.offsetWidth, el.offsetHeight) } : {}; };
 	// 화살표 — 가로 선 하나에 촉(<i>)을 달고 돌려서 방향을 낸다. 선 · 촉 색은 color 하나(currentColor)라 윤곽선 색을 바꾸면 함께 바뀐다
-	const arrowHtml = (at, len, deg, t = 2) => `<div data-arrow="end" style="${at}width:${P(len)};height:0;color:var(--ink, #222);border-top:${t}px solid currentColor${deg ? `;transform:rotate(${Math.round(deg * 10) / 10}deg)` : ""}"><i style="${arrowHead(t)}"></i></div>`;
+	// 비스듬한 선도 같은 꼴로 촉 없이 그린다 (data-arrow="none") — 테두리 선은 가로 · 세로로만 그을 수 있다
+	const arrowHtml = (at, len, deg, t = 2, head = true) => `<div data-arrow="${head ? "end" : "none"}" style="${at}width:${P(len)};height:0;color:var(--ink, #222);border-top:${t}px solid currentColor${deg ? `;transform:rotate(${Math.round(deg * 10) / 10}deg)` : ""}">${head ? `<i style="${arrowHead(t)}"></i>` : ""}</div>`;
 	const arrowHead = (t) => `position:absolute;right:-1px;top:${P(-(t / 2) - 3 - t * 2)};width:0;height:0;border-left:${P(6 + t * 4)} solid currentColor;border-top:${P(3 + t * 2)} solid transparent;border-bottom:${P(3 + t * 2)} solid transparent`;
 	const makeEl = (kind, r) => {
 		const at = `position:absolute;left:${P(r.x)};top:${P(r.y)};`;
 		const t = document.createElement("template");
 		if (kind === "text") t.innerHTML = `<div style="${at}width:${P(r.w)}"><br></div>`;
-		else if (kind === "arrow") {
-			// 끈 두 점의 가운데에 길이만큼 가로 선을 두고 돌린다 — 가운데를 축으로 도니 양 끝이 끈 자리에 온다
+		else if (kind === "arrow" || (kind === "line" && r.dx && r.dy)) {
+			// 끈 두 점의 가운데에 길이만큼 가로 선을 두고 돌린다 — 가운데를 축으로 도니 양 끝이 끈 자리에 온다. 가로 · 세로 선은 아래의 테두리 선으로
 			const len = Math.max(8, Math.hypot(r.dx, r.dy)), deg = (Math.atan2(r.dy, r.dx) * 180) / Math.PI, cx = r.x + r.w / 2, cy = r.y + r.h / 2;
-			t.innerHTML = arrowHtml(`position:absolute;left:${P(cx - len / 2)};top:${P(cy - 1)};`, len, deg);
+			t.innerHTML = arrowHtml(`position:absolute;left:${P(cx - len / 2)};top:${P(cy - 1)};`, len, deg, 2, kind === "arrow");
 		}
 		else if (GEOM[kind]) t.innerHTML = `<div data-shape="${kind}" style="${at}width:${P(r.w)};height:${P(r.h)};box-sizing:border-box;${SHAPE};clip-path:${clipOf(kind, r.w, r.h)}"><p style="margin:0;width:100%"></p></div>`;
 		else if (kind === "line") t.innerHTML = r.h > r.w
@@ -959,7 +961,9 @@
 	const tfOf = (el) => {
 		const s = el.style?.transform || "";
 		const r = /rotate\((-?[\d.]+)deg\)/.exec(s);
-		return { rest: s.replace(TF, "").trim(), rot: r ? +r[1] : 0, x: /scaleX\(-1\)/.test(s), y: /scaleY\(-1\)/.test(s) };
+		// 인라인 변형이 없으면 스타일시트의 변형(가운데 맞춤 translate 등)을 계산 값으로 이어 받는다 — 안 그러면 돌리는 순간 그 변형이 덮여 상자가 튄다
+		const sheet = !s && el.nodeType === 1 ? css(el).transform : "none";
+		return { rest: s ? s.replace(TF, "").trim() : sheet !== "none" ? sheet : "", rot: r ? +r[1] : 0, x: /scaleX\(-1\)/.test(s), y: /scaleY\(-1\)/.test(s) };
 	};
 	const tfText = (p) => [p.rest, p.rot % 360 ? `rotate(${Math.round(p.rot * 10) / 10}deg)` : "", p.x ? "scaleX(-1)" : "", p.y ? "scaleY(-1)" : ""].filter(Boolean).join(" ");
 	/** 돌린 각도 0~359 */
@@ -1015,7 +1019,7 @@
 	const canGroup = () => { const a = picks(); return a.length > 1 && a.every((x) => movable(x) && x.parentElement === a[0].parentElement); };
 	/** 묶음 풀기 — 묶음으로 만든 것, 또는 바탕 · 테두리 없이 절대 위치 요소만 둔 상자 (가져온 PPTX 의 그룹). 돌린 묶음은 풀면 자식 자리가 어긋난다 */
 	const canUngroup = (el) => {
-		if (!el || !movable(el) || el.children.length < 1 || rotOf(el) || ![...el.children].every((c) => movable(c))) return false;
+		if (!el || !movable(el) || el.children.length < 1 || rotOf(el) || flipOf(el, "x") || flipOf(el, "y") || ![...el.children].every((c) => movable(c))) return false;
 		if (el.hasAttribute("data-group")) return true;
 		const s = css(el);
 		return el.children.length > 1 && !color(s.backgroundColor) && s.backgroundImage === "none" && !["Top", "Right", "Bottom", "Left"].some((k) => s["border" + k + "Style"] !== "none" && parseFloat(s["border" + k + "Width"]) > 0);
@@ -1098,7 +1102,8 @@
 				const force = cmd === "toggle" ? !toggled(sel, v) : undefined;
 				let all = picks();
 				// 맨 앞 · 맨 뒤로 보낼 때 고른 것끼리의 앞뒤는 지킨다
-				if (cmd === "arrange") all = all.sort((a, c) => (a.compareDocumentPosition(c) & Node.DOCUMENT_POSITION_FOLLOWING ? -1 : 1) * (v === "front" || v === "forward" ? 1 : -1));
+				// 맨 앞 · 뒤로는 문서 차례, 맨 뒤 · 앞으로는 거꾸로 — 붙은 둘을 한 칸 옮길 때 앞의 것이 뒤의 것을 뛰어넘지 않게
+				if (cmd === "arrange") all = all.sort((a, c) => (a.compareDocumentPosition(c) & Node.DOCUMENT_POSITION_FOLLOWING ? -1 : 1) * (v === "front" || v === "backward" ? 1 : -1));
 				return together(() => { for (const x of all) one(cmd, v, x, force); });
 			}
 		}
@@ -1187,6 +1192,7 @@
 
 	addEventListener("pointerdown", (e) => {
 		if (mode !== "edit") return;
+		flushNudge();
 		if (place) {
 			if (e.button !== 0) return setPlace(null);
 			[place.x0, place.y0] = slideXY(e);
@@ -1231,15 +1237,17 @@
 			return;
 		}
 		// Shift · Ctrl 누르기 — 고른 것에 더하거나 뺀다 (상자 단위)
-		if ((e.shiftKey || e.ctrlKey) && e.button === 0 && sel && !edit) {
+		if ((e.shiftKey || e.ctrlKey) && e.button === 0 && !edit) {
 			const b = boxOf(t) || (canMove(t) ? t : null);
-			// Ctrl 로 이미 고른 것을 누름 — 끌면 복제해서 옮기고(PowerPoint Ctrl+끌기), 끌지 않고 떼면 고른 것에서 뺀다
-			if (b && e.ctrlKey && !e.shiftKey && picks().includes(b) && picks().every(movable)) {
-				drag = { el: b, x: e.clientX, y: e.clientY, moved: false, copy: true, group: picks().map((x) => ({ el: x, ...posOf(x) })) };
+			// Ctrl(+Shift) 누르고 끌기 — 복제해서 옮긴다 (PowerPoint Ctrl+끌기). 고른 것을 누르면 고른 것 모두, 아니면 누른 것 하나.
+			// 끌지 않고 떼면 고른 것에 더하거나 뺀다
+			const many = b && picks().includes(b) ? picks() : b ? [b] : [];
+			if (b && e.ctrlKey && many.every(movable)) {
+				drag = { el: b, x: e.clientX, y: e.clientY, moved: false, copy: true, group: many.map((x) => ({ el: x, ...posOf(x) })) };
 				e.preventDefault();
 				return;
 			}
-			if (b) { togglePick(b); picked = Date.now(); e.preventDefault(); return; }
+			if (b && sel) { togglePick(b); picked = Date.now(); e.preventDefault(); return; }
 		}
 		const m = boxOf(t);
 		// 여러 개를 고른 채 그중 하나를 누름 — 끌면 모두 함께 옮긴다. 끌지 않고 떼면 그것 하나만 고른다 (pointerup)
@@ -1284,17 +1292,27 @@
 		}
 		if (size) {
 			const d = size.dir, dx = e.clientX - size.x, dy = e.clientY - size.y;
-			let w = size.w + (d.includes("e") ? dx : d.includes("w") ? -dx : 0);
-			let h = size.h + (d.includes("s") ? dy : d.includes("n") ? -dy : 0);
+			// Ctrl 이면 가운데를 두고 양쪽이 함께 (PowerPoint 와 같다)
+			const k2 = e.ctrlKey ? 2 : 1;
+			let w = size.w + k2 * (d.includes("e") ? dx : d.includes("w") ? -dx : 0);
+			let h = size.h + k2 * (d.includes("s") ? dy : d.includes("n") ? -dy : 0);
 			if (d.length === 2 && (e.shiftKey || size.img)) { const k = Math.max(w / size.w, h / size.h); w = size.w * k; h = size.h * k; }
 			w = Math.max(Math.min(8, size.w), w);
 			h = Math.max(Math.min(8, size.h), h);
 			const st = size.el.style;
 			if (/[ew]/.test(d)) { st.width = P(w); size.props.add("width"); }
 			if (/[ns]/.test(d)) { st.height = P(h); size.props.add("height"); }
-			if (d.includes("w")) { st.left = P(size.l + size.w - w); size.props.add("left"); }
-			if (d.includes("n")) { st.top = P(size.t + size.h - h); size.props.add("top"); }
-			if (size.rel && (d.includes("w") || d.includes("n"))) st.position = "relative";
+			if (e.ctrlKey) {
+				if (/[ew]/.test(d)) { st.left = P(size.l - (w - size.w) / 2); size.props.add("left"); }
+				if (/[ns]/.test(d)) { st.top = P(size.t - (h - size.h) / 2); size.props.add("top"); }
+			} else {
+				// 끄는 중 Ctrl 을 떼면 맞은편 변을 제자리로
+				if (d.includes("w")) { st.left = P(size.l + size.w - w); size.props.add("left"); }
+				else if (size.props.has("left")) st.left = P(size.l);
+				if (d.includes("n")) { st.top = P(size.t + size.h - h); size.props.add("top"); }
+				else if (size.props.has("top")) st.top = P(size.t);
+			}
+			if (size.rel && (size.props.has("left") || size.props.has("top"))) st.position = "relative";
 			placeHandles();
 			return;
 		}
@@ -1326,7 +1344,11 @@
 			drag.group = drag.group.map((it) => { const c = clean(it.el); if (it.rel) c.style.position = "relative"; it.el.after(c); return { ...it, el: c, src: it.el }; });
 			drag.el = drag.group[0].el;
 		}
-		if (!drag.moved) drag.z = snapTargets(drag.el, drag.group ? drag.group.map((g) => g.el) : [drag.el]);
+		if (!drag.moved) {
+			drag.z = snapTargets(drag.el, drag.group ? drag.group.map((g) => g.el) : [drag.el]);
+			// Esc 로 끌기를 그만둘 때 되돌릴 인라인 자리
+			drag.orig = (drag.group || [drag]).map((it) => ({ el: it.el, left: it.el.style.left, top: it.el.style.top, position: it.el.style.position }));
+		}
 		drag.moved = true;
 		const g = e.altKey ? null : snapMove(drag.z, dx, dy);
 		if (g) ({ dx, dy } = g);
@@ -1467,6 +1489,17 @@
 	const flushNudge = () => { if (nudge) { clearTimeout(nudge.timer); const f = nudge.fn; nudge = null; f(); } };
 	addEventListener("keydown", (e) => {
 		const k = e.key.toLowerCase(), ctrl = e.ctrlKey && !e.altKey;
+		// 끄는 중 Esc — 끌기를 그만두고 제자리로 (PowerPoint 와 같다). 복제 끌기면 복제본을 걷는다
+		if (e.key === "Escape" && drag?.moved) {
+			for (const o of drag.orig || []) { if (drag.copy) o.el.remove(); else { o.el.style.left = o.left; o.el.style.top = o.top; o.el.style.position = o.position; } }
+			drag = null;
+			showGuides(null, null);
+			placeHandles();
+			e.preventDefault();
+			return;
+		}
+		// Ctrl+M 새 슬라이드 (지금 쪽 다음) — 앱이 한다
+		if (ctrl && !e.shiftKey && k === "m") { if (edit) edit.el.blur(); post({ t: "key", key: "newSlide", bar: true }); e.preventDefault(); return; }
 		// F5 · Shift+F5 는 슬라이드 쇼 (PowerPoint 와 같다) — 웹뷰가 슬라이드 창을 새로 고치지 않게 앱으로 넘긴다
 		if (e.key === "F5") { if (edit) edit.el.blur(); post({ t: "key", key: "F5", shift: e.shiftKey }); e.preventDefault(); return; }
 		// Ctrl+F 찾기 · Ctrl+H 바꾸기 · Ctrl+K 링크는 앱의 칸이 연다. 글을 고치는 중이면 고른 글자를 기억해 둔다(lastRange) — 칸으로 포커스가 가면 고치기가 끝난다
@@ -1516,6 +1549,18 @@
 		if (ctrl && !e.shiftKey && k === "v") { post({ t: "pasteReq" }); e.preventDefault(); return; }
 		// 모두 고르기 (PowerPoint 와 같다)
 		if (ctrl && !e.shiftKey && k === "a") { flushNudge(); selectAll(); e.preventDefault(); return; }
+		// Tab · Shift+Tab — 다음 · 이전 개체 고르기 (PowerPoint 와 같다). 모두 고르기와 같은 단위로 돈다
+		if (e.key === "Tab" && !e.ctrlKey && !e.altKey) {
+			flushNudge();
+			const all = topItems();
+			if (all.length) {
+				const i = all.indexOf(sel), n = all.length;
+				select(all[i < 0 ? (e.shiftKey ? n - 1 : 0) : (i + (e.shiftKey ? -1 : 1) + n) % n]);
+				picked = Date.now();
+			}
+			e.preventDefault();
+			return;
+		}
 		if (!sel) return;
 		if (ctrl && !e.shiftKey && k === "c") { command("copy"); e.preventDefault(); }
 		else if (ctrl && !e.shiftKey && k === "x") { command("cut"); e.preventDefault(); }
@@ -1526,6 +1571,8 @@
 		else if (ctrl && hotkey(e)) e.preventDefault();
 		// Alt+← → 로 15° 씩 돌린다 (PowerPoint 와 같다)
 		else if (e.altKey && !e.ctrlKey && (e.key === "ArrowLeft" || e.key === "ArrowRight")) { command("rotate", e.key === "ArrowLeft" ? -15 : 15); e.preventDefault(); }
+		// Ctrl+방향키 — 1px 씩 조금 옮기기 (PowerPoint 의 미세 이동)
+		else if (ctrl && !e.shiftKey && e.key.startsWith("Arrow") && picks().every(canMove)) nudgeBy(e, 1);
 		else if (e.ctrlKey || e.altKey) return;
 		else if ((e.key === "Enter" || e.key === "F2") && !more.length && textAt(sel, null)) {
 			startEdit(textAt(sel, null), null, true);
@@ -1535,8 +1582,12 @@
 			flushNudge();
 			removeSel();
 			e.preventDefault();
-		} else if (e.key.startsWith("Arrow") && picks().every(canMove)) {
-			const d = e.shiftKey ? 10 : 1, all = picks();
+		} else if (e.key.startsWith("Arrow") && picks().every(canMove)) nudgeBy(e, e.shiftKey ? 10 : 1);
+		else if (e.key === "Escape") select(null);
+	});
+	/** 고른 것을 방향키 쪽으로 d px 민다 — 마지막 키 뒤 잠깐 있다가 묶음 하나로 쓴다 */
+	function nudgeBy(e, d) {
+			const all = picks();
 			for (const el of all) {
 				const { l, t, rel } = posOf(el);
 				if (rel) el.style.position = "relative";
@@ -1547,13 +1598,14 @@
 			}
 			placeHandles();
 			announce();
+			// 다른 것을 밀던 중이면 그것을 먼저 쓴다 — 타이머를 갈아 끼우면 앞의 이동이 파일에 안 남는다
+			if (nudge && (nudge.all.length !== all.length || nudge.all.some((x, i) => x !== all[i]))) flushNudge();
 			if (nudge) clearTimeout(nudge.timer);
 			const first = sel;
 			const fn = () => { keep(first, all.slice(1)); together(() => { for (const el of all) if (el.isConnected) post({ t: "patch", path: pathOf(el), style: posPatch(el, ["left", "top"]) }); }); };
-			nudge = { fn, timer: setTimeout(() => { nudge = null; fn(); }, 400) };
+			nudge = { fn, all, timer: setTimeout(() => { nudge = null; fn(); }, 400) };
 			e.preventDefault();
-		} else if (e.key === "Escape") select(null);
-	});
+	}
 
 	addEventListener("message", async (e) => {
 		const m = e.data;
@@ -1940,7 +1992,7 @@
 						// 글 조각(인라인)의 바탕색 = PowerPoint 의 글자 강조 표시. 문단 · 상자 바탕은 상자가 따로 그린다
 						highlight: s.display.startsWith("inline") && n.parentElement !== el ? color(s.backgroundColor)?.hex || null : null,
 						// 하이퍼링크 — 그 글 덩이 안의 <a href> (PowerPoint 글 하이퍼링크)
-						link: (() => { const a = n.parentElement.closest("a[href]"); return a && el.contains(a) ? a.href : null; })(),
+						link: (() => { const a = n.parentElement.closest("a[href]"); return a && el.contains(a) ? a.getAttribute("href") : null; })(),
 					};
 					let start = 0, soft = false;
 					for (let i = 0; i < raw.length; i++) {
@@ -2016,7 +2068,7 @@
 		const spinOf = (ch) => {
 			if (!ch.style?.transform) return 0;
 			const p = tfOf(ch);
-			if (!p.rot || p.x || p.y || p.rest || ch.querySelector("table")) return 0;
+			if (!p.rot || p.x || p.y || p.rest || ch.tagName === "TABLE" || ch.querySelector("table")) return 0;
 			return p.rot;
 		};
 		const visit = async (el, chain) => {

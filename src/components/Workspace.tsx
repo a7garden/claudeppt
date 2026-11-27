@@ -144,9 +144,11 @@ function toolKey(raw: string): boolean {
 	return true;
 }
 
-/** Ctrl+F 찾기 · Ctrl+H 바꾸기 · Ctrl+K 링크 (PowerPoint 와 같다). 앱 화면에서 누른 것도 슬라이드 창이 넘겨준 것도. 처리했으면 true */
+/** Ctrl+F 찾기 · Ctrl+H 바꾸기 · Ctrl+K 링크 · Ctrl+M 새 슬라이드 (PowerPoint 와 같다). 앱 화면에서 누른 것도 슬라이드 창이 넘겨준 것도. 처리했으면 true */
 function barKey(raw: string): boolean {
 	const k = raw.toLowerCase();
+	// Ctrl+M 새 슬라이드 (지금 쪽 다음)
+	if (k === "m" || k === "newslide") { const st = useDeck.getState(); void st.addSlide(st.current + 1); return true; }
 	const mode = k === "f" || k === "find" ? "find" : k === "h" || k === "replace" ? "replace" : k === "k" || k === "link" ? "link" : null;
 	if (!mode) return false;
 	useFind.getState().show(mode);
