@@ -26,6 +26,9 @@ export interface RemoteInfo {
 	skill: { dir: string; installed: boolean; current: boolean; exe: string; linked: string | null };
 }
 export interface Tool { name: string; path: string | null; version: string }
+/** Claude 구독 한도 (usage.rs) — used 는 0~100 %. state: ok · none(구독 로그인 없음) · expired(토큰 만료) · error */
+export interface UsageWindow { key: string; model: string | null; used: number; resets_at: string | null }
+export interface ClaudeUsage { state: "ok" | "none" | "expired" | "error"; plan: string | null; windows: UsageWindow[]; error: string | null; at: number }
 /** 깔린 글꼴 하나. family = 가족 이름(나라말마다) · full = 전체 이름들 · local = @font-face local() 에 쓸 영어 전체 이름 */
 /** metrics = [winAscent, winDescent, typoAscender, typoDescender, typoLineGap] (em 비율) · typo = USE_TYPO_METRICS */
 export interface FontFace { file: string; family: string[]; full: string[]; local: string; bold: boolean; italic: boolean; weight: number; metrics: number[]; typo: boolean }
@@ -85,6 +88,8 @@ export const api = {
 	claudeDetect: (path: string) => invoke<{ path: string; version: string } | null>("claude_detect", { path }),
 	claudeRun: (spec: { turn: string; dir: string; cwd?: string; prompt: string; system: string; claudePath: string; model: string; effort: string; resume?: string | null; sessionId?: string | null; mode?: "fonts" }) => invoke<{ code: number; stderr: string }>("claude_run", { spec }),
 	claudeStop: (turn: string) => invoke<void>("claude_stop", { turn }),
+	/** force 가 아니면 1분 안의 지난 답을 준다 */
+	claudeUsage: (force = false) => invoke<ClaudeUsage>("claude_usage", { force }),
 	/** 팀원 PC 의 Claude 로 돌린다 (collab.rs claude_run_remote) — claudeRun 과 같은 답 */
 	claudeRunRemote: (spec: { turn: string; dir: string; work?: string; device: string; prompt: string; system: string; resume?: string | null; sessionId?: string | null }) => invoke<{ code: number; stderr: string }>("claude_run_remote", { spec }),
 

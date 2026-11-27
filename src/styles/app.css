@@ -590,6 +590,26 @@ textarea.field { height: auto; padding: 8px 10px; line-height: 1.5; resize: vert
 .upd-chip .mono { font-size: 11px; color: var(--dim); }
 .upd-chip[disabled] { cursor: progress; }
 .upd-pop { width: 320px; }
+/* Claude 남은 사용량 (Usage.tsx) — 막대는 남은 양만큼 찬다. 80% 넘게 쓰면 경고색 */
+.usage { position: relative; display: inline-flex; }
+.talk-head .usage { margin-left: auto; }
+.talk-head .usage + .talk-new { margin-left: 0; }
+.usage-chip { height: 26px; padding: 0 8px; border-radius: var(--r-ctl); display: inline-flex; align-items: center; gap: 6px; color: var(--dim); }
+.usage-chip:hover, .usage-chip.on { color: var(--text); background: var(--hair); }
+.talk-head .usage-chip .mono { color: var(--dim); }
+.usage-meter { position: relative; display: block; width: 28px; height: 5px; border-radius: 3px; background: var(--hair-2); overflow: hidden; flex: none; }
+.usage-meter i { position: absolute; inset: 0 auto 0 0; background: var(--ok); border-radius: 3px; }
+.usage-meter.low i { background: var(--err); }
+.usage-pop { width: 260px; }
+.usage-list { display: grid; gap: 10px; }
+.usage-win { display: grid; gap: 4px; }
+.usage-win .usage-meter { width: 100%; height: 6px; }
+.usage-line { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; font-size: 12px; }
+.usage-line b { font-weight: 600; }
+.usage-line .mono { font-size: 11px; color: var(--dim); }
+.usage-line .low { color: var(--err); }
+.usage-foot { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.note.warn { color: var(--err); }
 .upd-notes { max-height: 220px; overflow-y: auto; font-size: 12px; line-height: 1.55; color: var(--dim); white-space: pre-wrap; user-select: text; }
 .upd-queued { font-size: 12px; color: var(--dim); }
 .rels { display: grid; gap: 2px; max-height: 160px; overflow-y: auto; }
