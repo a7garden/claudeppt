@@ -207,7 +207,10 @@ export function Ribbon({ win, info, placing, off }: { win: React.MutableRefObjec
 	const tabs: [Tab, Key][] = [["home", "rbHome"], ["insert", "rbInsert"], ...(info ? [["shape", "rbShapeFmt"] as [Tab, Key]] : []), ...(inTable ? [["table", "rbTable"] as [Tab, Key]] : [])];
 	const tab: Tab = tabs.some(([k]) => k === saved) ? saved : "home";
 	const c: Ctx = { t, info, send, vars, insert, placing, win, mark, setMark };
-	const go = (k: Tab) => { setTab(k); if (mini) setMini(false); };
+	// 접힌 띠에서 두 번 누르면 첫 누름이 펴고 두 번 누르기가 다시 접었다: 방금 편 것이면 두 번 누르기는 편 채로 둔다
+	const opened = useRef(0);
+	const go = (k: Tab) => { setTab(k); if (mini) { setMini(false); opened.current = Date.now(); } };
+	const dbl = () => { if (Date.now() - opened.current > 600) setMini(!mini); };
 	// 탭 줄은 ← → 로 옮겨 다닌다 (탭 목록의 키보드 규칙)
 	const arrow = (e: React.KeyboardEvent, i: number) => {
 		if (e.key !== "ArrowRight" && e.key !== "ArrowLeft") return;
@@ -223,7 +226,7 @@ export function Ribbon({ win, info, placing, off }: { win: React.MutableRefObjec
 			<div className="rb-tabs" role="tablist">
 				{tabs.map(([k, label], i) => (
 					<button key={k} id={`rb-tab-${k}`} role="tab" className={k === "shape" || k === "table" ? "ctx" : undefined} aria-selected={!mini && tab === k} aria-controls="rb-panel" tabIndex={tab === k ? 0 : -1}
-						title={t("rbTabHint")} onMouseDown={hold} onClick={() => go(k)} onDoubleClick={() => setMini(!mini)} onKeyDown={(e) => arrow(e, i)}>{t(label)}</button>
+						title={t("rbTabHint")} onMouseDown={hold} onClick={() => go(k)} onDoubleClick={dbl} onKeyDown={(e) => arrow(e, i)}>{t(label)}</button>
 				))}
 				{hint && <span className="rb-hint" role="status">{hint}</span>}
 				<button className="rb-close" onClick={() => useRibbon.getState().toggle()} title={`${t("rbHide")} (F)`} aria-label={t("rbHide")}>
