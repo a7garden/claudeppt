@@ -107,7 +107,7 @@ input, textarea, select { font: inherit; color: inherit; }
 .stamp:hover, .stamp.on { background: var(--raise-2); }
 .stamp .caret { font-size: 9px; color: var(--faint); }
 /* 변경 기록 (History.tsx) — 줄 이름 · 변경 번호 아래로 펼친다. 왼쪽 그래프(줄 · 점)와 오른쪽 글이 같은 행 높이(30px)로 맞물린다.
-   2026.11.27 : 판 목록(본 줄 하나의 실)을 그래프로 바꿨다 — 시안 · 보류 · 사람이 한 그림에 보여야 어느 줄의 일인지 읽힌다 */
+   2026.11.27 : 판 목록(본 줄 하나의 실)을 그래프로 바꿨다 — 가지 · 보류 · 사람이 한 그림에 보여야 어느 줄의 일인지 읽힌다 */
 .stampwrap { position: relative; }
 .stamp .line { font-style: normal; font-family: var(--ui); max-width: 14ch; overflow: hidden; text-overflow: ellipsis; color: var(--accent); }
 .stamp .held-dot { font-style: normal; min-width: 16px; height: 16px; padding: 0 4px; border-radius: 8px; background: var(--err); color: #fff; font: 600 10px/16px var(--mono); }

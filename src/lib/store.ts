@@ -10,7 +10,7 @@
 //   쪽 손보기            addSlide · duplicateSlide · moveSlide · removeSlide — 쪽 목록 · 우클릭 메뉴가 같이 쓴다
 //   대화                 send → 작업 사본 맞추기 → claude 한 턴 → 그림 채우기 → 덱 위에 얹기(겹치면 보류) → .claudeppt/talk.json
 //   보류                 refreshHolds · holdRetry · holdTake · holdDrop — 덱에 얹지 못한 턴의 변경 묶음 (vcs.rs 「작업 사본」)
-//   시안 · 사본          newSian · openSian · openMain · mergeSian · updateSian · dropSian · forkDeck · sendToOrigin · fetchFork (branch.rs)
+//   가지 · 사본          newSian · openSian · openMain · mergeSian · updateSian · dropSian · forkDeck · sendToOrigin · fetchFork (branch.rs)
 //   바깥 작업            outside · OUTSIDE_MS — 앱 밖 Claude Code 가 방금 다룬 덱이면 send 가 보내기 전에 한 번 묻는다 (remote.ts touch)
 //   직접 편집            applyDirect → 원본 HTML 에 되쓰고 잠시 뒤 한 판으로 남김. 본 쪽 그림 이후 남이 고쳤으면 받지 않는다(base)
 //   판 · 릴리즈          refreshVersions · preview · restore · release (릴리즈 본체는 파일 끝 makeRelease — 바깥 CLI 도 쓴다)
@@ -125,9 +125,9 @@ interface S {
 	releases: Release[];
 	/** 덱에 들어가지 못한 변경 묶음 — 새것부터 (vcs.rs 보류 갈래) */
 	holds: Hold[];
-	/** 이 덱이 어느 줄인가 (branch.rs) — sian 이 있으면 시안 폴더를 연 것, main 은 본 덱 폴더, origin 은 사본의 원본 */
+	/** 이 덱이 어느 줄인가 (branch.rs) — sian 이 있으면 가지 폴더를 연 것, main 은 본 덱 폴더, origin 은 사본의 원본 */
 	line: Where | null;
-	/** 본 덱의 시안들 — 새것부터 */
+	/** 본 덱의 가지들 — 새것부터 */
 	sians: Sian[];
 	preview: Commit | null;
 	/** 되돌릴 수 있는 걸음 수 · 다시 할 수 있는 걸음 수 — 제목 줄 단추가 켜고 끈다 */
@@ -195,22 +195,22 @@ interface S {
 	/** 보류한 것을 버린다 */
 	holdDrop: (name: string) => Promise<void>;
 	refreshSians: () => Promise<void>;
-	/** 시안을 만들어 연다 — from(변경 하나)에서, 없으면 본안의 지금에서 */
+	/** 가지를 만들어 연다 — from(변경 하나)에서, 없으면 줄기의 지금에서 */
 	newSian: (name: string, from?: string) => Promise<void>;
 	openSian: (id: string) => Promise<void>;
-	/** 시안에서 본안(본 덱)으로 */
+	/** 가지에서 줄기(본 덱)으로 */
 	openMain: () => Promise<void>;
-	/** 시안을 본안에 넣는다. prefer 는 겹쳤을 때 사람이 고른 쪽 (theirs = 시안 것) — 겹쳐서 못 넣었으면 false */
+	/** 가지를 줄기에 넣는다. prefer 는 겹쳤을 때 사람이 고른 쪽 (theirs = 가지 것) — 겹쳐서 못 넣었으면 false */
 	mergeSian: (id: string, prefer?: "ours" | "theirs") => Promise<boolean>;
-	/** 지금 연 시안에 본안의 변경을 받는다. prefer 는 겹쳤을 때 (theirs = 본안 것) */
+	/** 지금 연 가지에 줄기의 변경을 받는다. prefer 는 겹쳤을 때 (theirs = 줄기 것) */
 	updateSian: (prefer?: "ours" | "theirs") => Promise<boolean>;
-	/** 시안을 치운다 (지우지 않고 치워 둔다) */
+	/** 가지를 치운다 (지우지 않고 치워 둔다) */
 	dropSian: (id: string) => Promise<void>;
 	/** 덱을 사본으로 떼어 가 연다 */
 	forkDeck: (dest: string) => Promise<void>;
-	/** 사본의 변경을 원본 덱의 시안으로 보낸다 */
+	/** 사본의 변경을 원본 덱의 가지로 보낸다 */
 	sendToOrigin: (name: string) => Promise<void>;
-	/** 사본 폴더의 변경을 이 덱의 시안으로 가져온다 */
+	/** 사본 폴더의 변경을 이 덱의 가지로 가져온다 */
 	fetchFork: (from: string, name: string) => Promise<void>;
 	exportTo: (path: string, exact?: boolean) => Promise<void>;
 	release: (name: string, notes: string) => Promise<void>;
@@ -773,8 +773,8 @@ async function holdAction(get: () => S, set: (p: Partial<S>) => void, name: stri
 	await get().refreshVersions();
 }
 
-/** 시안 · 사본 일 하나 — 남은 손 편집을 먼저 판으로 남기고(손 편집과 같은 줄에서), 본 덱 폴더로 한다. 끝나면 시안 · 변경 목록을 새로 읽는다.
- *  덱을 바꿔 여는 일(시안 열기 · 본안으로)은 도는 턴이 있으면 하지 않는다 — 닫으면 도는 턴이 멈춘다. same 이면 이 덱에 머문다 */
+/** 가지 · 사본 일 하나 — 남은 손 편집을 먼저 판으로 남기고(손 편집과 같은 줄에서), 본 덱 폴더로 한다. 끝나면 가지 · 변경 목록을 새로 읽는다.
+ *  덱을 바꿔 여는 일(가지 열기 · 줄기로)은 도는 턴이 있으면 하지 않는다 — 닫으면 도는 턴이 멈춘다. same 이면 이 덱에 머문다 */
 async function lineAction(get: () => S, f: (main: string) => Promise<void>, same = false) {
 	const { dir, line } = get();
 	if (!dir) return;
@@ -839,7 +839,7 @@ export const useDeck = create<S>()((set, get) => ({
 		const talkKey = talk.talkKey ?? sessions.at(-1)?.key ?? null;
 		const releases = await readJson<Release[]>(dir, "releases/releases.json", []);
 		clearUndo();
-		// 시안 폴더인가 — 시안은 본 덱의 한 줄이라 최근 덱 목록에 따로 올리지 않는다 (본 덱의 「변경 기록」에서 연다)
+		// 가지 폴더인가 — 가지는 본 덱의 한 줄이라 최근 덱 목록에 따로 올리지 않는다 (본 덱의 「변경 기록」에서 연다)
 		const line = await api.where(dir).catch(() => null);
 		set({ dir, id, deck, rev: {}, current: 0, mode: "edit", tool: "select", pins, assign, turns, sessions, bind: talk.bind ?? {}, talkKey, versions: [], releases, holds: [], line, sians: [], preview: null, vdiff: null });
 		if (!line?.sian) useSettings.getState().remember(dir);
@@ -1173,7 +1173,7 @@ export const useDeck = create<S>()((set, get) => ({
 		return ok;
 	},
 	dropSian: (id) => lineAction(get, async (main) => {
-		// 그 시안을 보고 있으면 본안으로 나간 뒤 치운다 — 연 폴더를 닫지 않으면 지우지 못한다
+		// 그 가지를 보고 있으면 줄기로 나간 뒤 치운다 — 연 폴더를 닫지 않으면 지우지 못한다
 		if (get().line?.sian === id) await get().openProject(main);
 		await api.sianDrop(main, id);
 		get().notify(tNow("sianDropped"), "ok");

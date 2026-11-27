@@ -1,16 +1,16 @@
-// 갈래 — 시안(본안에 손대지 않고 따로 해 보는 줄) · 사본(덱째 떼어 간 것) · 변경 그래프.
+// 갈래 — 가지(줄기에 손대지 않고 따로 해 보는 줄) · 사본(덱째 떼어 간 것) · 변경 그래프.
 // git 을 몰라도 되는 말로 git 의 갈래 · clone 을 그대로 쓴다 — 앱 밖 git 으로 열어도 같은 것이 보인다 (2026.11.27).
 //
-//   본안    덱의 본 줄 (git main). 모두가 보는 덱이다
-//   변경    본안 · 시안에 쌓이는 하나하나 (git 커밋). 2026.11.27 전에는 「판 v<n>」이라 불렀다 — 고칠 때마다 판이 올라가 판이 뜻을 잃었다
-//   시안    git 갈래 cppt/sian/<id> 와 그 작업 폴더(앱 데이터 sian/<덱 지문>/<id>). 작업 폴더는 그대로 덱이라
+//   줄기    덱의 본 줄 (git main). 모두가 보는 덱이다
+//   변경    줄기 · 가지에 쌓이는 하나하나 (git 커밋). 2026.11.27 전에는 「판 v<n>」이라 불렀다 — 고칠 때마다 판이 올라가 판이 뜻을 잃었다
+//   가지    git 갈래 cppt/sian/<id> 와 그 작업 폴더(앱 데이터 sian/<덱 지문>/<id>). 작업 폴더는 그대로 덱이라
 //           앱에서 열어 Claude 에 요청하고 손으로 고친다. 이름 · 만든 이는 갈래 설명(git config branch.<갈래>.description · cpptBy)
-//   넣기    시안을 본안에 합친다 (git merge --no-ff). 겹치면 본안은 그대로 두고 겹친 파일을 알린다.
-//           「본안 받기」는 거꾸로 본안의 변경을 시안에 합친다 — 오래 해 온 시안을 넣기 전에 맞춰 본다
-//   치우기  시안 · 보류를 버리면 지우지 않고 cppt/old/ 로 옮긴다 — 목록에서 사라질 뿐 git 으로 되살린다
-//   사본    덱을 통째로 떼어 간 다른 덱 (git clone). 원본과 이력이 이어져 있어 사본의 변경을 원본의 시안으로 보내고(push),
-//           원본에서 사본 폴더(다른 PC 에서 받은 .cppt 를 푼 것도)를 시안으로 가져온다(fetch)
-//   그래프  본안 · 시안 · 보류의 변경을 한 그림에 — 누가 어느 줄에서 무엇을 했는지 (화면 VersionGraph)
+//   넣기    가지를 줄기에 합친다 (git merge --no-ff). 겹치면 줄기는 그대로 두고 겹친 파일을 알린다.
+//           「줄기 받기」는 거꾸로 줄기의 변경을 가지에 합친다 — 오래 해 온 가지를 넣기 전에 맞춰 본다
+//   치우기  가지 · 보류를 버리면 지우지 않고 cppt/old/ 로 옮긴다 — 목록에서 사라질 뿐 git 으로 되살린다
+//   사본    덱을 통째로 떼어 간 다른 덱 (git clone). 원본과 이력이 이어져 있어 사본의 변경을 원본의 가지로 보내고(push),
+//           원본에서 사본 폴더(다른 PC 에서 받은 .cppt 를 푼 것도)를 가지로 가져온다(fetch)
+//   그래프  줄기 · 가지 · 보류의 변경을 한 그림에 — 누가 어느 줄에서 무엇을 했는지 (화면 VersionGraph)
 
 use crate::vcs::{OLD, Commit, commit_all, git, git_dir, head, lock, plain, run, vcs_init};
 use crate::{Res, err};
@@ -24,7 +24,7 @@ fn new_id() -> String {
 	uuid::Uuid::new_v4().simple().to_string()[..8].to_string()
 }
 
-/// 본안 갈래 — 덱 폴더(본 작업 폴더)가 쥔 갈래. 보통 main
+/// 줄기 갈래 — 덱 폴더(본 작업 폴더)가 쥔 갈래. 보통 main
 fn main_branch(main: &Path) -> String {
 	run(main, &["symbolic-ref", "--short", "-q", "HEAD"]).unwrap_or_else(|_| "main".into())
 }
@@ -34,7 +34,7 @@ fn sian_dir(main: &Path, id: &str) -> Res<PathBuf> {
 	Ok(crate::control::data_dir().join("sian").join(&deck[..16]).join(plain(id)?))
 }
 
-/// 시안 이름 · 사람 이름 — 한 줄로, 너무 길지 않게
+/// 가지 이름 · 사람 이름 — 한 줄로, 너무 길지 않게
 fn clean(s: &str) -> String {
 	s.split_whitespace().collect::<Vec<_>>().join(" ").chars().take(60).collect()
 }
@@ -45,9 +45,9 @@ fn conf(main: &Path, id: &str, key: &str) -> Option<String> {
 
 #[derive(Serialize)]
 pub struct Where {
-	/// 본 덱 폴더 — 시안 폴더면 그 시안이 나온 덱
+	/// 본 덱 폴더 — 가지 폴더면 그 가지가 나온 덱
 	main: String,
-	/// 이 폴더가 시안이면 그 id · 이름
+	/// 이 폴더가 가지면 그 id · 이름
 	sian: Option<String>,
 	name: Option<String>,
 	/// 사본이면 원본 덱 폴더 (git remote origin)
@@ -75,10 +75,10 @@ pub struct Sian {
 	hash: String,
 	/// 마지막 변경 때
 	date: String,
-	/// 본안에 없는 이 시안의 변경 수 · 이 시안이 받지 않은 본안의 변경 수
+	/// 줄기에 없는 이 가지의 변경 수 · 이 가지가 받지 않은 줄기의 변경 수
 	ahead: u32,
 	behind: u32,
-	/// 열어 둔 작업 폴더 — 없으면 아직 열지 않았다(사본에서 보내 온 시안)
+	/// 열어 둔 작업 폴더 — 없으면 아직 열지 않았다(사본에서 보내 온 가지)
 	path: Option<String>,
 }
 
@@ -115,7 +115,7 @@ fn sian_of(main: &Path, id: &str, wt: &[(String, String)]) -> Res<Sian> {
 	})
 }
 
-/// 시안 목록 — 새것부터
+/// 가지 목록 — 새것부터
 #[tauri::command(async)]
 pub fn vcs_sians(dir: String) -> Res<Vec<Sian>> {
 	let d = Path::new(&dir);
@@ -127,7 +127,7 @@ pub fn vcs_sians(dir: String) -> Res<Vec<Sian>> {
 	Ok(refs.lines().filter_map(|r| r.strip_prefix(SIAN)).filter_map(|id| sian_of(d, id, &wt).ok()).collect())
 }
 
-/// 시안을 만든다 — from(변경 하나)에서, 없으면 본안의 지금에서. 작업 폴더까지 열어 돌려준다
+/// 가지를 만든다 — from(변경 하나)에서, 없으면 줄기의 지금에서. 작업 폴더까지 열어 돌려준다
 #[tauri::command(async)]
 pub fn vcs_sian_new(dir: String, name: String, by: Option<String>, from: Option<String>) -> Res<Sian> {
 	vcs_init(dir.clone())?;
@@ -153,7 +153,7 @@ pub fn vcs_sian_new(dir: String, name: String, by: Option<String>, from: Option<
 	sian_of(d, &id, &worktrees(d))
 }
 
-/// 시안의 작업 폴더 — 없으면 연다 (사본이 보내 온 시안 · 지운 폴더)
+/// 가지의 작업 폴더 — 없으면 연다 (사본이 보내 온 가지 · 지운 폴더)
 #[tauri::command(async)]
 pub fn vcs_sian_open(dir: String, id: String) -> Res<String> {
 	let d = Path::new(&dir);
@@ -162,7 +162,7 @@ pub fn vcs_sian_open(dir: String, id: String) -> Res<String> {
 		return Ok(p);
 	}
 	let p = sian_dir(d, &id)?;
-	// 지우는 곳은 앱 데이터 안 시안 자리뿐이다
+	// 지우는 곳은 앱 데이터 안 가지 자리뿐이다
 	let _ = std::fs::remove_dir_all(&p);
 	let _ = run(d, &["worktree", "prune"]);
 	std::fs::create_dir_all(p.parent().unwrap()).map_err(err)?;
@@ -217,7 +217,7 @@ fn merge_into(into: &Path, other: &str, message: &str, author: Option<&str>, pre
 	Ok(Merged { ok: false, commit: None, conflicts: if conflicts.is_empty() { vec![why] } else { conflicts } })
 }
 
-/// 시안을 본안에 넣는다 — 시안 폴더에 판으로 남지 않은 것이 있으면 먼저 남겨 함께 넣는다
+/// 가지를 줄기에 넣는다 — 가지 폴더에 판으로 남지 않은 것이 있으면 먼저 남겨 함께 넣는다
 #[tauri::command(async)]
 pub fn vcs_sian_merge(dir: String, id: String, message: String, author: Option<String>, prefer: Option<String>) -> Res<Merged> {
 	let d = Path::new(&dir);
@@ -225,20 +225,20 @@ pub fn vcs_sian_merge(dir: String, id: String, message: String, author: Option<S
 	if let Some((_, p)) = worktrees(d).into_iter().find(|(x, _)| *x == b) {
 		let p = Path::new(&p);
 		let _l = lock(p)?;
-		commit_all(p, "시안에 남아 있던 변경", None)?;
+		commit_all(p, "가지에 남아 있던 변경", None)?;
 	}
 	merge_into(d, &b, &message, author.as_deref(), prefer.as_deref())
 }
 
-/// 본안의 변경을 시안에 받는다
+/// 줄기의 변경을 가지에 받는다
 #[tauri::command(async)]
 pub fn vcs_sian_update(dir: String, id: String, author: Option<String>, prefer: Option<String>) -> Res<Merged> {
 	let d = Path::new(&dir);
 	let p = PathBuf::from(vcs_sian_open(dir.clone(), id)?);
-	merge_into(&p, &main_branch(d), "본안의 변경을 받음", author.as_deref(), prefer.as_deref())
+	merge_into(&p, &main_branch(d), "줄기의 변경을 받음", author.as_deref(), prefer.as_deref())
 }
 
-/// 시안을 치운다 — 작업 폴더를 닫고 갈래를 cppt/old/ 로 옮긴다 (지우지 않는다)
+/// 가지를 치운다 — 작업 폴더를 닫고 갈래를 cppt/old/ 로 옮긴다 (지우지 않는다)
 #[tauri::command(async)]
 pub fn vcs_sian_drop(dir: String, id: String) -> Res<()> {
 	let d = Path::new(&dir);
@@ -248,7 +248,7 @@ pub fn vcs_sian_drop(dir: String, id: String) -> Res<()> {
 		// 남은 것은 판으로 남겨 함께 치운다
 		let pp = Path::new(&p);
 		if let Ok(_l) = lock(pp) {
-			let _ = commit_all(pp, "시안에 남아 있던 변경", None);
+			let _ = commit_all(pp, "가지에 남아 있던 변경", None);
 		}
 		let _ = run(d, &["worktree", "remove", "--force", &p]);
 	}
@@ -270,7 +270,7 @@ pub struct Node {
 	tags: Vec<String>,
 }
 
-/// 줄 하나의 끝 — main(본안) · sian · hold
+/// 줄 하나의 끝 — main(줄기) · sian · hold
 #[derive(Serialize)]
 pub struct Head {
 	kind: &'static str,
@@ -286,7 +286,7 @@ pub struct Graph {
 	heads: Vec<Head>,
 }
 
-/// 본안 · 시안 · 보류의 변경 그래프 — 치운 것(cppt/old)과 턴의 작업 사본(떠 있는 HEAD)은 뺀다
+/// 줄기 · 가지 · 보류의 변경 그래프 — 치운 것(cppt/old)과 턴의 작업 사본(떠 있는 HEAD)은 뺀다
 #[tauri::command(async)]
 pub fn vcs_graph(dir: String, limit: Option<u32>) -> Res<Graph> {
 	let d = Path::new(&dir);
@@ -356,7 +356,7 @@ pub fn vcs_fork(dir: String, dest: String) -> Res<()> {
 	run(parent, &["clone", "-q", "--no-hardlinks", &src, &to.to_string_lossy()]).map(|_| ())
 }
 
-/// 사본의 변경을 원본 덱의 시안으로 보낸다 — 같은 PC 에 원본 덱이 있을 때. 없으면 CPPT 로 보내 원본에서 가져온다
+/// 사본의 변경을 원본 덱의 가지로 보낸다 — 같은 PC 에 원본 덱이 있을 때. 없으면 CPPT 로 보내 원본에서 가져온다
 #[tauri::command(async)]
 pub fn vcs_fork_send(dir: String, name: String, by: Option<String>) -> Res<String> {
 	let d = Path::new(&dir);
@@ -385,7 +385,7 @@ fn name_sian(main: &Path, b: &str, name: &str, by: Option<&str>, id: &str) -> Re
 	Ok(())
 }
 
-/// 사본 폴더의 변경을 이 덱의 시안으로 가져온다 — 이력이 이어지지 않은 덱(사본이 아닌 덱)이면 받지 않는다
+/// 사본 폴더의 변경을 이 덱의 가지로 가져온다 — 이력이 이어지지 않은 덱(사본이 아닌 덱)이면 받지 않는다
 #[tauri::command(async)]
 pub fn vcs_fork_fetch(dir: String, from: String, name: String, by: Option<String>) -> Res<Sian> {
 	let d = Path::new(&dir);
@@ -420,7 +420,7 @@ mod tests {
 		dir
 	}
 	fn wipe(dir: &str, ids: &[&str]) {
-		// 이 시험 덱의 시안 자리째 — 앱 데이터에 빈 폴더가 쌓이지 않게
+		// 이 시험 덱의 가지 자리째 — 앱 데이터에 빈 폴더가 쌓이지 않게
 		let _ = ids;
 		let _ = std::fs::remove_dir_all(sian_dir(Path::new(dir), "x").unwrap().parent().unwrap());
 		let _ = std::fs::remove_dir_all(dir);
@@ -438,28 +438,28 @@ mod tests {
 		let s = vcs_sian_new(dir.clone(), " 표지\nA안 ".into(), Some("민수".into()), None).unwrap();
 		assert_eq!((s.name.as_str(), s.by.as_str(), s.ahead, s.behind), ("표지 A안", "민수", 0, 0));
 		let p = s.path.clone().unwrap();
-		// 시안 폴더는 그대로 덱 — 판 남기기(잠금 · 커밋)가 된다
+		// 가지 폴더는 그대로 덱 — 판 남기기(잠금 · 커밋)가 된다
 		put(&p, "A1\na2\na3\na4\na5\n");
-		vcs_commit(p.clone(), "시안에서 고침".into(), Some("민수".into())).unwrap().unwrap();
+		vcs_commit(p.clone(), "가지에서 고침".into(), Some("민수".into())).unwrap().unwrap();
 		let w = vcs_where(p.clone()).unwrap();
 		assert_eq!((w.sian.as_deref(), w.name.as_deref()), (Some(s.id.as_str()), Some("표지 A안")));
 		assert_eq!(std::fs::canonicalize(&w.main).unwrap(), std::fs::canonicalize(&dir).unwrap());
 		assert_eq!(vcs_where(dir.clone()).unwrap().sian, None);
-		// 그사이 본안은 다른 줄을 고쳤다 — 겹치지 않으니 둘 다 남는다
+		// 그사이 줄기는 다른 줄을 고쳤다 — 겹치지 않으니 둘 다 남는다
 		put(&dir, "a1\na2\na3\na4\nA5\n");
-		vcs_commit(dir.clone(), "본안에서 고침".into(), None).unwrap();
+		vcs_commit(dir.clone(), "줄기에서 고침".into(), None).unwrap();
 		let l = vcs_sians(dir.clone()).unwrap();
 		assert_eq!((l.len(), l[0].ahead, l[0].behind), (1, 1, 1));
-		let m = vcs_sian_merge(dir.clone(), s.id.clone(), "시안 「표지 A안」 넣음".into(), Some("은지".into()), None).unwrap();
+		let m = vcs_sian_merge(dir.clone(), s.id.clone(), "가지 「표지 A안」 넣음".into(), Some("은지".into()), None).unwrap();
 		assert!(m.ok && m.commit.as_ref().unwrap().author == "은지");
 		assert_eq!(read(&dir), "A1\na2\na3\na4\nA5\n");
-		// 본안의 변경 번호는 본 줄만 센다 — 시안의 변경은 「넣음」 하나
+		// 줄기의 변경 번호는 본 줄만 센다 — 가지의 변경은 「넣음」 하나
 		let log = crate::vcs::vcs_log(dir.clone(), None).unwrap();
-		assert_eq!(log.iter().map(|c| c.subject.as_str()).collect::<Vec<_>>(), ["시안 「표지 A안」 넣음", "본안에서 고침", "첫 변경"]);
+		assert_eq!(log.iter().map(|c| c.subject.as_str()).collect::<Vec<_>>(), ["가지 「표지 A안」 넣음", "줄기에서 고침", "첫 변경"]);
 		assert_eq!(log[0].n, 3);
-		// 그래프에는 시안의 변경과 합친 자리(부모 둘)가 보인다
+		// 그래프에는 가지의 변경과 합친 자리(부모 둘)가 보인다
 		let g = vcs_graph(dir.clone(), None).unwrap();
-		assert!(g.nodes.iter().any(|n| n.subject == "시안에서 고침"));
+		assert!(g.nodes.iter().any(|n| n.subject == "가지에서 고침"));
 		assert_eq!(g.nodes[0].parents.len(), 2);
 		assert!(g.heads.iter().any(|h| h.kind == "sian" && h.name == "표지 A안"));
 		// 치우면 목록 · 그래프에서 빠지지만 갈래는 남는다
@@ -475,26 +475,26 @@ mod tests {
 		let dir = deck("clash");
 		let s = vcs_sian_new(dir.clone(), "B안".into(), None, None).unwrap();
 		let p = s.path.clone().unwrap();
-		put(&p, "a1\n시안\na3\na4\na5\n");
-		vcs_commit(p.clone(), "시안".into(), None).unwrap();
-		put(&dir, "a1\n본안\na3\na4\na5\n");
-		vcs_commit(dir.clone(), "본안".into(), None).unwrap();
+		put(&p, "a1\n가지\na3\na4\na5\n");
+		vcs_commit(p.clone(), "가지".into(), None).unwrap();
+		put(&dir, "a1\n줄기\na3\na4\na5\n");
+		vcs_commit(dir.clone(), "줄기".into(), None).unwrap();
 		let m = vcs_sian_merge(dir.clone(), s.id.clone(), "넣음".into(), None, None).unwrap();
 		assert!(!m.ok);
 		assert_eq!(m.conflicts, ["slides/a.html"]);
-		assert_eq!(read(&dir), "a1\n본안\na3\na4\na5\n");
+		assert_eq!(read(&dir), "a1\n줄기\na3\na4\na5\n");
 		assert!(!git_dir(Path::new(&dir)).join("MERGE_HEAD").exists());
 		assert!(run(Path::new(&dir), &["status", "--porcelain"]).unwrap().is_empty());
-		// 본안 받기도 겹치면 시안은 그대로
+		// 줄기 받기도 겹치면 가지는 그대로
 		let u = vcs_sian_update(dir.clone(), s.id.clone(), None, None).unwrap();
 		assert!(!u.ok);
-		assert_eq!(read(&p), "a1\n시안\na3\na4\na5\n");
-		// 사람이 고르면 겹친 곳만 그쪽 것으로 합친다 — 겹치지 않은 시안의 변경은 남는다
-		put(&p, "a1\n시안\na3\na4\n시안5\n");
-		vcs_commit(p.clone(), "시안 둘째".into(), None).unwrap();
+		assert_eq!(read(&p), "a1\n가지\na3\na4\na5\n");
+		// 사람이 고르면 겹친 곳만 그쪽 것으로 합친다 — 겹치지 않은 가지의 변경은 남는다
+		put(&p, "a1\n가지\na3\na4\n가지5\n");
+		vcs_commit(p.clone(), "가지 둘째".into(), None).unwrap();
 		let m = vcs_sian_merge(dir.clone(), s.id.clone(), "넣음".into(), None, Some("theirs".into())).unwrap();
 		assert!(m.ok);
-		assert_eq!(read(&dir), "a1\n시안\na3\na4\n시안5\n");
+		assert_eq!(read(&dir), "a1\n가지\na3\na4\n가지5\n");
 		assert!(vcs_sian_merge(dir.clone(), s.id.clone(), "넣음".into(), None, Some("-s evil".into())).is_err());
 		wipe(&dir, &[&s.id]);
 	}
@@ -518,7 +518,7 @@ mod tests {
 		let stranger = deck("stranger");
 		assert!(vcs_fork_fetch(dir.clone(), stranger.clone(), "남".into(), None).is_err());
 		assert_eq!(vcs_sians(dir.clone()).unwrap().len(), 2);
-		// 보내 온 시안을 열면 작업 폴더가 생긴다
+		// 보내 온 가지를 열면 작업 폴더가 생긴다
 		let p = vcs_sian_open(dir.clone(), id.clone()).unwrap();
 		assert_eq!(read(&p), "a1\na2\n사본\na4\na5\n");
 		assert!(vcs_fork(dir.clone(), fork.clone()).is_err(), "빈 폴더가 아니면 받지 않는다");

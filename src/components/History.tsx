@@ -1,9 +1,9 @@
-// 변경 기록 — 제목 줄의 줄 이름(본안 · 시안 · 변경 번호)을 누르면 편다. 본안 · 시안 · 보류의 변경을 그래프 하나로 (branch.rs vcs_graph).
-//   갈래로 보기    세로 줄이 본안 · 시안 · 보류. 갈라진 자리와 합친 자리가 선으로 보인다
+// 변경 기록 — 제목 줄의 줄 이름(줄기 · 가지 · 변경 번호)을 누르면 편다. 줄기 · 가지 · 보류의 변경을 그래프 하나로 (branch.rs vcs_graph).
+//   갈래로 보기    세로 줄이 줄기 · 가지 · 보류. 갈라진 자리와 합친 자리가 선으로 보인다
 //   사람별로 보기  세로 줄이 사람. 담당이 나뉜 덱에서 누가 언제 무엇을 했는지
 //   점 색은 사람마다 — 아래 사람 목록을 누르면 그 사람 것만 진하게
-//   행을 누르면 그때를 무대에서 보고, 우클릭은 비교 · 되돌리기 · 여기서 시안 만들기 · (시안 · 보류의 끝이면) 그 줄 다루기
-// 2026.11.27 : 판 목록(목록뿐, 본 줄만)을 이것으로 바꿨다 — 시안 · 보류 · 사람이 섞이면 목록으로는 어느 줄의 일인지 보이지 않는다.
+//   행을 누르면 그때를 무대에서 보고, 우클릭은 비교 · 되돌리기 · 여기서 가지 만들기 · (가지 · 보류의 끝이면) 그 줄 다루기
+// 2026.11.27 : 판 목록(목록뿐, 본 줄만)을 이것으로 바꿨다 — 가지 · 보류 · 사람이 섞이면 목록으로는 어느 줄의 일인지 보이지 않는다.
 //              「판」은 이제 사용자가 내는 확정본(PPTX)만 뜻한다. 고칠 때마다 쌓이는 것은 「변경」이다
 import { open as pickDir, save } from "@tauri-apps/plugin-dialog";
 import { useEffect, useMemo, useRef, useState } from "react";
@@ -22,7 +22,7 @@ const NOBODY = "ClaudePPT";
 
 type Graph = { nodes: GraphNode[]; heads: GraphHead[] };
 type Ask = { kind: "sian"; from?: string } | { kind: "send" } | { kind: "fetch"; from: string };
-/** 넣기 · 본안 받기가 겹쳤다 — 겹친 곳을 어느 쪽 것으로 할지 사람이 고른다 */
+/** 넣기 · 줄기 받기가 겹쳤다 — 겹친 곳을 어느 쪽 것으로 할지 사람이 고른다 */
 type Clash = { kind: "merge" | "update"; id: string };
 
 export function History({ onClose }: { onClose: () => void }) {
@@ -48,7 +48,7 @@ export function History({ onClose }: { onClose: () => void }) {
 
 	useEffect(() => {
 		let live = true;
-		// 공유 덱 창(팀원)은 그래프를 읽지 못한다 — 덱 주인이 올려 준 본안의 변경 목록으로 한 줄만 그린다
+		// 공유 덱 창(팀원)은 그래프를 읽지 못한다 — 덱 주인이 올려 준 줄기의 변경 목록으로 한 줄만 그린다
 		const flat = (): Graph => ({
 			nodes: versions.map((c, i) => ({ hash: c.hash, short: c.short, parents: versions[i + 1] ? [versions[i + 1].hash] : [], author: c.author, date: c.date, subject: c.subject, tags: c.tags })),
 			heads: head ? [{ kind: "main", id: "main", name: "main", hash: head.hash }] : [],
@@ -72,7 +72,7 @@ export function History({ onClose }: { onClose: () => void }) {
 		return [...n].sort((a, b) => b[1] - a[1]).map(([p]) => p);
 	}, [nodes]);
 	// 색은 이름의 가나다 차례로 — 많이 한 차례로 매기면 변경이 쌓일 때마다 같은 사람의 색이 바뀌었고, 이름 해시는 비슷한 색끼리 겹쳤다 (2026.11.27 화면 확인).
-	// 그래프는 본안 · 시안 · 보류를 다 담아 어느 줄에서 열어도 사람이 같으므로 색도 같다
+	// 그래프는 줄기 · 가지 · 보류를 다 담아 어느 줄에서 열어도 사람이 같으므로 색도 같다
 	const named = useMemo(() => people.filter((x) => x !== NOBODY).sort((a, b) => a.localeCompare(b)), [people]);
 	const color = (p: string) => (p === NOBODY ? "var(--faint)" : PEOPLE[named.indexOf(p) % PEOPLE.length]);
 	const lay = useMemo(() => {

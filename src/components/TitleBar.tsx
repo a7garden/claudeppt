@@ -66,7 +66,7 @@ export default function TitleBar({ onSettings, settingsOpen }: { onSettings: () 
 							{head && (
 								<span className="stampwrap">
 								<button className={"stamp" + (list ? " on" : "") + (line?.sian ? " sian" : "")} onClick={() => setList(!list)} title={t("versions")} aria-expanded={list}>
-									{/* 어느 줄인가 — 시안이면 시안 이름. 본안이면 줄 이름은 감추고 변경 번호만 (대부분은 본안만 쓴다) */}
+									{/* 어느 줄인가 — 가지면 가지 이름. 줄기면 줄 이름은 감추고 변경 번호만 (대부분은 줄기만 쓴다) */}
 									{line?.sian && <i className="line">{line.name ?? line.sian}</i>}
 									<b>#{head.n}</b>
 									{/* 마지막 판(확정본) — 변경 기록과 같은 꼬리표. 그 뒤로 변경이 더 쌓였으면 몇 개인지 */}

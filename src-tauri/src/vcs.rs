@@ -104,8 +104,8 @@ impl Drop for Lock {
 	}
 }
 
-/// 이 작업 폴더의 git 폴더 — 덱이면 .git, 시안 · 작업 사본(worktree)이면 .git 파일이 가리키는 곳.
-/// 2026.11.27 : 시안 폴더를 덱으로 열게 되며 더했다 — .git 이 파일이라 그 안에 잠금 · 상태 파일을 둘 수 없다
+/// 이 작업 폴더의 git 폴더 — 덱이면 .git, 가지 · 작업 사본(worktree)이면 .git 파일이 가리키는 곳.
+/// 2026.11.27 : 가지 폴더를 덱으로 열게 되며 더했다 — .git 이 파일이라 그 안에 잠금 · 상태 파일을 둘 수 없다
 pub(crate) fn git_dir(d: &Path) -> PathBuf {
 	let g = d.join(".git");
 	if g.is_file() {
@@ -175,7 +175,7 @@ pub fn vcs_log(dir: String, limit: Option<u32>) -> Res<Vec<Commit>> {
 	if run(d, &["rev-parse", "--verify", "-q", "HEAD"]).is_err() {
 		return Ok(vec![]);
 	}
-	// 본 줄만 센다 (2026.11.27) — 시안을 넣으면(merge) 시안의 변경은 「넣음」 하나로 보이고, 번호가 시안의 변경 수만큼 건너뛰지 않는다
+	// 본 줄만 센다 (2026.11.27) — 가지를 넣으면(merge) 가지의 변경은 「넣음」 하나로 보이고, 번호가 가지의 변경 수만큼 건너뛰지 않는다
 	let total: u32 = run(d, &["rev-list", "--count", "--first-parent", "HEAD"])?.trim().parse().unwrap_or(0);
 	let mut tags: std::collections::HashMap<String, Vec<String>> = Default::default();
 	if let Ok(t) = run(d, &["show-ref", "--tags"]) {
@@ -450,7 +450,7 @@ pub fn vcs_hold_drop(dir: String, name: String) -> Res<()> {
 	run(Path::new(&dir), &["branch", "-M", &format!("{HOLD}{n}"), &format!("{OLD}hold-{n}")]).map(|_| ())
 }
 
-/// 버린 보류 · 시안을 치워 두는 자리 — 목록 · 그래프에 나오지 않는다
+/// 버린 보류 · 가지를 치워 두는 자리 — 목록 · 그래프에 나오지 않는다
 pub(crate) const OLD: &str = "cppt/old/";
 
 #[cfg(test)]
