@@ -1,6 +1,6 @@
 // 팀 협업 화면 조각 — 제목 줄 「공유」(공유 창) · 쪽 목록 · 무대의 「보는 사람」 표시 (상태: lib/collab.ts)
 import { useEffect, useRef, useState } from "react";
-import { collabKick, collabLan, collabLinkNew, collabLinkRemove, collabLock, collabTools, collabTunnel, follow, type InviteLink, type TunnelTools, type Member, startHost, stopHost, useCollab } from "../lib/collab";
+import { collabKick, collabLinkNew, collabLinkRemove, collabLock, collabTools, follow, setVia, type InviteLink, type TunnelTools, type Member, startHost, stopHost, useCollab } from "../lib/collab";
 import { useT } from "../lib/i18n";
 import { useSettings } from "../lib/settings";
 import { useDeck } from "../lib/store";
@@ -139,32 +139,49 @@ function MembersPop() {
 	);
 }
 
-/** 공유 창 — 꺼져 있으면 시작 한 번, 켜져 있으면 초대 링크 하나가 맨 위. 링크 더 만들기 · 브라우저 팀원은 펼쳐서.
- *  「설정 › 협업」도 같은 것을 쓴다(bare: 제목 · 이름 칸은 설정 쪽 줄이 맡는다) — 2026.11.27 : 공유를 제목 줄에만 두니 덱을 열기 전에는 공유를 만들 곳이 없었다 */
+/** 공유 창 — 맨 위에서 링크를 어떻게 내줄지(앱 · 웹 사무실 · 웹 어디서나) 고르고, 그 아래 초대 링크 하나. 꺼져 있으면 고른 길로 시작.
+ *  「설정 › 협업」도 같은 것을 쓴다(bare: 제목 · 이름 칸은 설정 쪽 줄이 맡는다) — 2026.11.27 : 공유를 제목 줄에만 두니 덱을 열기 전에는 공유를 만들 곳이 없었다.
+ *  2026.11.27 : 「브라우저로 들어오게 하기」 펼침(사무실 망 · 바깥 길 따로 켜기)을 세 갈래 고르기로 바꿨다 — 링크가 어느 길 것인지 한눈에 보이고 바꾸기도 한 번이다 */
 export function SharePanel({ bare }: { bare?: boolean }) {
 	const t = useT();
 	const { info, members } = useCollab();
 	const me = useSettings((s) => s.s.me);
+	const via = useSettings((s) => s.s.collab.via);
 	const deck = useDeck((s) => s.deck);
 	const notify = useDeck((s) => s.notify);
 	const [busy, setBusy] = useState(false);
-	const [more, setMore] = useState<"" | "links" | "browser">("");
+	const [more, setMore] = useState(false);
 	const [who, setWho] = useState("");
 	const [hours, setHours] = useState(0);
 	const [tools, setTools] = useState<TunnelTools | null>(null);
-	useEffect(() => { if (more === "browser") collabTools().then(setTools, () => {}); }, [more]);
+	useEffect(() => { collabTools().then(setTools, () => {}); }, []);
 	const run = async (f: () => Promise<unknown>) => {
 		setBusy(true);
 		try { await f(); } catch (e) { notify(String(e), "err"); } finally { setBusy(false); }
 	};
 	const copy = (url: string) => { copyText(url); notify(t("collabCopied"), "ok"); };
 	const setMe = (v: string) => useSettings.getState().set((x) => ({ ...x, me: v }));
+	const noTools = !!tools && !tools.tailscale && !tools.cloudflared;
+
+	const pick = (
+		<div className="share-via" role="radiogroup" aria-label={t("shareVia")}>
+			{(["app", "office", "internet"] as const).map((v) => (
+				<button key={v} role="radio" aria-checked={via === v} disabled={busy || (v === "internet" && noTools && via !== v)} title={v === "internet" && noTools ? t("collabNoTools") : undefined}
+					onClick={() => via !== v && run(() => setVia(v))}>
+					<b>{t(v === "app" ? "shareViaApp" : v === "office" ? "shareViaOffice" : "shareViaInternet")}</b>
+					<span>{t(v === "app" ? "shareViaAppSub" : v === "office" ? "shareViaOfficeSub" : "shareViaInternetSub")}</span>
+				</button>
+			))}
+		</div>
+	);
 
 	if (!info) {
 		return (
 			<>
 				{!bare && <b className="share-h">{t("shareTitle")}</b>}
 				<p className="note">{t("shareIntro")}</p>
+				{pick}
+				{via === "internet" && noTools && <p className="note">{t("collabNoTools")}</p>}
 				{!bare && (
 					<label className="share-name">
 						<span>{t("myName")}</span>
@@ -180,24 +197,33 @@ export function SharePanel({ bare }: { bare?: boolean }) {
 		);
 	}
 
+	// 고른 길이 실제로 열려 있나 — 바깥 길이 끊겼거나 여는 중이면 링크 대신 그 까닭
+	const ready = via === "app" ? !!info.app : via === "office" ? info.lan : !!info.tunnel;
+	const linkOf = (l: InviteLink) => (via === "app" ? l.app : l.url);
 	const pub = info.links.find((l) => !l.name && !l.expired) ?? info.links[0];
-	const browserOpen = info.lan || !!info.tunnel;
+	const link = pub && ready ? linkOf(pub) : null;
 	const online = (id: string) => members.find((m) => m.device === id);
 	const slideNo = (id: string | null) => (deck && id ? deck.slides.findIndex((s) => s.id === id) + 1 : 0);
 	const expiry = (l: InviteLink) => (l.expired ? t("collabExpired") : l.expires ? t("collabUntil").replace("{at}", new Date(l.expires).toLocaleString()) : t("collabNoExpiry"));
 	// 지금 들어와 있는 사람이 위로
 	const people = [...info.devices].sort((a, b) => Number(!!online(b.id)) - Number(!!online(a.id)));
+	const note =
+		via === "app" ? t("shareViaAppNote")
+		: via === "office" ? `${t("shareViaOfficeNote")} ${t("collabFirewall")}`
+		: `${t("shareViaInternetNote")}${info.tunnel?.kind === "cloudflare" ? ` ${t("collabCloudflareNote")}` : ""}`;
 	return (
 		<>
+			{pick}
 			<section className="share-link">
 				<span className="lbl">{t("shareLink")}</span>
-				{pub?.app ? (
+				{link ? (
 					<div className="field-row">
-						<input className="field mono" readOnly value={pub.app} onFocus={(e) => e.currentTarget.select()} aria-label={t("shareLink")} />
-						<button className="send" onClick={() => copy(pub.app!)}>{t("collabCopy")}</button>
+						<input className="field mono" readOnly value={link} onFocus={(e) => e.currentTarget.select()} aria-label={t("shareLink")} />
+						<button className="send" onClick={() => copy(link)}>{t("collabCopy")}</button>
 					</div>
-				) : <p className="note">{t("shareNoApp")}</p>}
-				<p className="note">{t("shareLinkNote")}</p>
+				) : <p className="note">{via === "app" ? t("shareNoApp") : via === "internet" && noTools ? t("collabNoTools") : t("shareViaClosed")}</p>}
+				<p className="note">{note}</p>
+				{via !== "app" && <p className="note">{t("shareViaWebAlso")}</p>}
 			</section>
 
 			<section className="collab-members">
@@ -222,21 +248,22 @@ export function SharePanel({ bare }: { bare?: boolean }) {
 			</section>
 
 			<div className="share-more" role="group">
-				<button aria-expanded={more === "links"} onClick={() => setMore(more === "links" ? "" : "links")}>{t("shareMoreLinks")}</button>
-				<button aria-expanded={more === "browser"} onClick={() => setMore(more === "browser" ? "" : "browser")}>{t("shareBrowser")}{browserOpen && <span className="dot" aria-hidden />}</button>
+				<button aria-expanded={more} onClick={() => setMore(!more)}>{t("shareMoreLinks")}</button>
 			</div>
 
-			{more === "links" && (
+			{more && (
 				<section className="share-sub">
-					{info.links.map((l) => (
-						<div className={"link-row" + (l.expired ? " expired" : "")} key={l.id}>
-							<span className="who">{l.name ? `${t("collabPersonal")} · ${l.name}` : t("collabPublic")}</span>
-							<span className="dim when">{expiry(l)}</span>
-							{l.app && <button onClick={() => copy(l.app!)} disabled={l.expired}>{t("collabCopy")}</button>}
-							{browserOpen && <button onClick={() => copy(l.url)} disabled={l.expired} title={l.url}>{t("shareBrowserCopy")}</button>}
-							<button className="rm" onClick={() => run(() => collabLinkRemove(l.id))} title={t("collabLinkRemoveHint")}>{t("delete")}</button>
-						</div>
-					))}
+					{info.links.map((l) => {
+						const u = ready ? linkOf(l) : null;
+						return (
+							<div className={"link-row" + (l.expired ? " expired" : "")} key={l.id}>
+								<span className="who">{l.name ? `${t("collabPersonal")} · ${l.name}` : t("collabPublic")}</span>
+								<span className="dim when">{expiry(l)}</span>
+								<button onClick={() => u && copy(u)} disabled={l.expired || !u} title={u ?? undefined}>{t("collabCopy")}</button>
+								<button className="rm" onClick={() => run(() => collabLinkRemove(l.id))} title={t("collabLinkRemoveHint")}>{t("delete")}</button>
+							</div>
+						);
+					})}
 					<div className="link-new">
 						<input className="field" placeholder={t("collabPersonalPh")} value={who} onChange={(e) => setWho(e.target.value)} aria-label={t("collabPersonalPh")} />
 						<select className="field" value={hours} onChange={(e) => setHours(Number(e.target.value))} aria-label={t("collabExpiry")}>
@@ -247,32 +274,6 @@ export function SharePanel({ bare }: { bare?: boolean }) {
 						<button disabled={busy} onClick={() => run(async () => { await collabLinkNew(who.trim() || null, hours || null); setWho(""); })}>{who.trim() ? t("collabMakePersonal") : t("collabMakePublic")}</button>
 					</div>
 					<p className="note">{t("collabLinkNote")}</p>
-				</section>
-			)}
-
-			{more === "browser" && (
-				<section className="share-sub">
-					<p className="note">{t("shareBrowserNote")}</p>
-					{browserOpen && pub && (
-						<div className="field-row">
-							<input className="field mono" readOnly value={pub.url} onFocus={(e) => e.currentTarget.select()} aria-label={t("shareBrowser")} />
-							<button onClick={() => copy(pub.url)}>{t("collabCopy")}</button>
-						</div>
-					)}
-					<div className="field-row">
-						<span className={"tun" + (info.lan ? " on" : "")}>{t("shareLan")}</span>
-						<button disabled={busy} onClick={() => run(() => collabLan(!info.lan))}>{info.lan ? t("collabTunnelOff") : t("shareLanOpen")}</button>
-					</div>
-					{info.lan && <p className="note">{t("collabFirewall")} {t("collabLanOnly")}</p>}
-					<div className="field-row">
-						<span className={"tun" + (info.tunnel ? " on" : "")}>{info.tunnel ? (info.tunnel.kind === "tailscale" ? "Tailscale Funnel" : "Cloudflare") : t("collabOutside")}</span>
-						{info.tunnel
-							? <button disabled={busy} onClick={() => run(() => collabTunnel(false))}>{t("collabTunnelOff")}</button>
-							: tools && (tools.tailscale || tools.cloudflared) && <button disabled={busy} onClick={() => run(() => collabTunnel(true))}>{t("collabTunnelOn")}</button>}
-					</div>
-					{(info.tunnel || (tools && !tools.tailscale && !tools.cloudflared)) && (
-						<p className="note">{info.tunnel?.kind === "cloudflare" ? t("collabCloudflareNote") : info.tunnel ? t("collabTunnelNote") : t("collabNoTools")}</p>
-					)}
 				</section>
 			)}
 

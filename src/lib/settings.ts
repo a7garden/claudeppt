@@ -45,6 +45,9 @@ export interface Template {
 	from?: string;
 }
 
+/** 초대 링크를 내주는 길 — app: 앱끼리(p2p.rs) · office: 같은 사무실 망 브라우저(collab_lan) · internet: 어디서나 브라우저(tunnel.rs) */
+export type ShareVia = "app" | "office" | "internet";
+
 export interface Settings {
 	lang: "ko" | "en";
 	theme: "system" | "dark" | "light";
@@ -62,7 +65,8 @@ export interface Settings {
 	remote: { enabled: boolean };
 	/** 「설정 › 협업」(기본 꺼짐). on 이면 팀원 세션 — 쪽마다 처음 고친 세션을 이어 쓰고, 요청 · 판에 보낸 사람이 남는다.
 	 *  꺼져 있으면 전처럼 대화 세션 하나 · 이름 없이 돈다 */
-	collab: { on: boolean };
+	/** via — 초대 링크를 어떻게 내줄지 (2026.11.27, 공유 창 맨 위). 다음 공유도 이것으로 연다 (collab.ts setVia) */
+	collab: { on: boolean; via: ShareVia };
 	/** 이 기기를 쓰는 팀원 이름 — 협업을 켰을 때 대화의 요청과 판(git 작성자)에 남는다. 기기마다 한 번 정한다 */
 	me: string;
 	/** 앱으로 들어간 공유 덱 — 호스트 주소(origin)와 마지막으로 연 때. 기기 쿠키가 앱에 남아 주소만으로 다시 들어간다 (collab.rs collab_join) */
@@ -112,7 +116,7 @@ export const DEFAULTS: Settings = {
 	template: BASIC.id,
 	update: { auto: true, install: true },
 	remote: { enabled: true },
-	collab: { on: false },
+	collab: { on: false, via: "app" },
 	me: "",
 	shared: [],
 };
@@ -142,9 +146,9 @@ const merge = (v: any): Settings => {
 		template: templates.some((x) => x.id === v?.template) ? v.template : templates[0].id,
 		update: { ...DEFAULTS.update, ...(v?.update || {}) },
 		remote: { ...DEFAULTS.remote, ...(v?.remote || {}) },
-		collab: { ...DEFAULTS.collab, ...(v?.collab || {}) },
+		collab: { on: !!v?.collab?.on, via: (["app", "office", "internet"] as const).find((x) => x === v?.collab?.via) ?? "app" },
 		me: typeof v?.me === "string" ? v.me : "",
-		shared: Array.isArray(v?.shared) ? v.shared.filter((x: any) => typeof x?.url === "string" && /^https?:\/\//.test(x.url)).map((x: any) => ({ url: x.url, at: +x.at || 0, mine: !!x.mine, title: typeof x.title === "string" ? x.title.slice(0, 120) : undefined })).slice(0, 12) : [],
+		shared: Array.isArray(v?.shared) ? v.shared.filter((x: any) => typeof x?.url === "string" && /^(https?|claudeppt):\/\//.test(x.url)).map((x: any) => ({ url: x.url, at: +x.at || 0, mine: !!x.mine, title: typeof x.title === "string" ? x.title.slice(0, 120) : undefined })).slice(0, 12) : [],
 	};
 };
 
@@ -166,7 +170,7 @@ export const useSettings = create<Store>()((set, get) => ({
 			let raw: any = null;
 			try { raw = JSON.parse(localStorage.getItem(REMOTE_KEY) || "null"); } catch {}
 			const s = merge(raw);
-			s.collab = { on: true };
+			s.collab = { on: true, via: "app" };
 			if (!raw?.lang && !navigator.language.startsWith("ko")) s.lang = "en";
 			return set({ s, loaded: true });
 		}

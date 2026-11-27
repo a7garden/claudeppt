@@ -11,7 +11,7 @@ import { api, b64FromBytes } from "./api";
 import { attachable, relFor, useAttach } from "./attach";
 import { call, remote, remoteDeck } from "./transport";
 import { tNow } from "./i18n";
-import { useSettings } from "./settings";
+import { type ShareVia, useSettings } from "./settings";
 import { isMine, me, nextSession, persistTalk, type Turn, useDeck } from "./store";
 
 /** runner — 이 기기가 「내 PC 의 Claude」를 붙여 두었다 (runner.rs) */
@@ -126,6 +126,9 @@ export async function startHost(): Promise<CollabInfo> {
 	wireFollow();
 	flush(true);
 	hostView(true);
+	// 지난번에 고른 길로 연다 — 다시 붙을 때(resumeHost)는 이미 열려 있으면 그대로
+	const via = useSettings.getState().s.collab.via;
+	if (via !== "app") setVia(via).catch((e) => useDeck.getState().notify(String(e), "err"));
 	// 2026.11.26 : 바깥 길을 켜자마자 열던 것을 그만뒀다 — 팀원 앱은 앱끼리 잇는 길(p2p.rs)로 들어오고, 브라우저 팀원용 길은 공유 창에서 연다.
 	// 바깥 길은 덱을 인터넷에 내놓는 일이라 사람이 고른다
 	unsub?.();
@@ -148,6 +151,20 @@ export const collabLan = (on: boolean) => call<CollabInfo>("collab_lan", { on })
 /** 바깥 길(터널) — 사무실 밖에서도 같은 링크로 (tunnel.rs) */
 export const collabTunnel = (on: boolean) => call<CollabInfo>("collab_tunnel", { on }).then(setInfo);
 export const collabTools = () => call<TunnelTools>("collab_tools");
+
+/** 초대 링크를 어떻게 내줄지 고른다 (2026.11.27) — 고른 길만 열고 나머지는 닫는다. 앱 팀원은 어느 쪽이든 그대로 붙어 있다(앱끼리 잇는 길은 늘 열려 있다).
+ *  웹을 고르면 그 길이 열린 다음에야 바꾼다 — 바깥 도구가 없거나 못 열면 전 것 그대로. 공유가 꺼져 있으면 고르기만 해 두고 켤 때 연다(startHost) */
+export async function setVia(via: ShareVia) {
+	const info = useCollab.getState().info;
+	if (info) {
+		if (via === "internet" && !info.tunnel) await collabTunnel(true);
+		if (via === "office" && !info.lan) await collabLan(true);
+		if (via !== "internet" && info.tunnel) await collabTunnel(false);
+		// 바깥 길(https)을 열면 사무실 망(http · 암호화 안 됨)은 닫는다 — 바깥 길이 사무실 안에서도 열린다
+		if (via !== "office" && info.lan) await collabLan(false);
+	}
+	useSettings.getState().set((x) => ({ ...x, collab: { ...x.collab, via } }));
+}
 
 /** 호스트 화면을 다시 띄웠는데(새로 고침 · 오류 뒤 다시 그림) 서버가 켜져 있으면 다시 붙는다 — 안 붙으면 브라우저가 멈춘 화면을 본다 */
 export async function resumeHost() {
