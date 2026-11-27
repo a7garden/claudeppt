@@ -20,7 +20,7 @@ import { CommentsButton } from "./Collab";
 import { copyText, openMenu } from "./ContextMenu";
 import { SLIDE_MIME, SlideFrame } from "./Workspace";
 import { useSettings } from "../lib/settings";
-import { bindKey, inPool, isMine, sessionBy, type Turn, useDeck } from "../lib/store";
+import { bindKey, inPool, isMine, me, sessionBy, type Turn, useDeck } from "../lib/store";
 import { noteDraft } from "../lib/updater";
 import { appWindow, remote } from "../lib/transport";
 import { useCollab, useMine, usePool, useRole } from "../lib/collab";
@@ -293,8 +293,23 @@ const TurnView = memo(function TurnView({ turn, head: isHead }: { turn: Turn; he
 	const commit = useDeck((s) => s.versions.find((v) => v.hash === turn.version?.hash));
 	const setPreview = useDeck((s) => s.setPreview);
 	const onVersion = () => { if (commit) setPreview(commit); };
+	// 보낸 것을 요청칸에 되돌린다 — 글 · 핀 · 첨부 모두. 실패 · 멈춘 요청을 고쳐 다시 보낸다.
+	// 2026.11.27 : 전에는 글만 돌아왔다 — 보낼 때 요청칸에서 걷힌 핀 · 첨부는 다시 꽂고 붙여야 했다
+	const retake = () => {
+		const st = useDeck.getState();
+		const live = new Set(st.deck?.slides.map((s) => s.id));
+		for (const p of turn.pins) {
+			if (!live.has(p.slide) || st.pins.some((q) => q.slide === p.slide && q.x === p.x && q.y === p.y && q.text === p.text)) continue;
+			st.addPin({ slide: p.slide, x: p.x, y: p.y, text: p.text, target: p.target, shape: p.shape }, p.by);
+		}
+		if (turn.attach?.length) useAttach.setState({ files: [...new Set([...useAttach.getState().files, ...turn.attach])] });
+		refill(turn.request);
+	};
+	const canRetake = !!(turn.request || turn.pins.length || turn.attach?.length);
+	// 내가 보낸 요청만 내 요청칸으로 (협업에서 남의 요청 · 팀원 PC 의 Claude 로 돈 턴은 빼고)
+	const mineTurn = !turn.runner && (!turn.by || turn.by === me());
 	const menu = (e: React.MouseEvent) => openMenu(e, [
-		{ label: t("rewrite"), run: () => refill(turn.request), disabled: !turn.request },
+		{ label: t("rewrite"), run: retake, disabled: !canRetake },
 		{ label: t("copyReply"), run: () => copyText(turn.reply.trim()), disabled: !turn.reply.trim() },
 		"-",
 		...(commit ? [
@@ -333,7 +348,7 @@ const TurnView = memo(function TurnView({ turn, head: isHead }: { turn: Turn; he
 			{turn.error && <div className="err">{turn.error}</div>}
 			{turn.held && <HeldBox held={turn.held} />}
 			{/* 끝줄 — 이 턴이 남긴 판(지금 판은 채움) · 고친 쪽. 도는 중이면 뛰는 점과 지금 하는 일 */}
-			{(live || turn.version || changed || turn.status === "stopped" || turn.status === "queued" || turn.phase) && (
+			{(live || turn.version || changed || turn.status === "stopped" || turn.status === "failed" || turn.status === "queued" || turn.phase) && (
 				<div className="foot" title={detail}>
 					{/* 기다리는 턴 — 같은 세션의 앞 턴이 끝나면(또는 동시에 도는 수에 자리가 나면) 돈다. 멈춤으로 줄에서 뺄 수 있다 */}
 					{turn.status === "queued" && <><span className="phase">{t("queued")}</span><button className="more" onClick={() => useDeck.getState().stop(turn.id)}>{t("cancel")}</button></>}
@@ -344,6 +359,8 @@ const TurnView = memo(function TurnView({ turn, head: isHead }: { turn: Turn; he
 					{touched.map((no) => <button key={no} className="mention" onClick={() => setCurrent(no - 1)}>{no}{t("slideN") === "쪽" ? "쪽" : ""}</button>)}
 					{others.length > 0 && <span className="more">{others.some((f) => f.endsWith(".css")) ? t("styleFile") : `+${others.length}`}</span>}
 					{turn.status === "stopped" && <span className="more">{t("stopped")}</span>}
+					{/* 실패 · 멈춘 요청은 우클릭 없이 바로 고쳐 다시 보낸다 */}
+					{(turn.status === "stopped" || turn.status === "failed") && canRetake && mineTurn && <button className="more" onClick={retake} title={t("rewriteHint")}>{t("rewrite")}</button>}
 				</div>
 			)}
 		</article>

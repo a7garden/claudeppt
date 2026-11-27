@@ -172,7 +172,7 @@ export default function Home({ onSettings }: { onSettings?: () => void }) {
 							placeholder={t("briefHint")}
 							value={brief}
 							onChange={(e) => setBrief(e.target.value)}
-							onKeyDown={(e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); go(); } }}
+							onKeyDown={(e) => { if (e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing) { e.preventDefault(); go(); } }}
 						/>
 						<button className="send" onClick={go} disabled={working}>{brief.trim() ? t("start") : t("new")}<kbd>↵</kbd></button>
 					</div>
