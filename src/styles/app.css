@@ -525,7 +525,7 @@ span.node.head:hover { color: var(--bg); background: var(--text); box-shadow: no
 textarea.field { height: auto; padding: 8px 10px; line-height: 1.5; resize: vertical; font: 12px/1.5 var(--mono); }
 .seg { display: inline-flex; flex-wrap: wrap; max-width: 100%; border-radius: var(--r-ctl); background: var(--raise); padding: 2px; outline: 1px solid var(--hair); }
 .seg button { padding: 4px 10px; border-radius: 5px; color: var(--dim); white-space: nowrap; }
-.seg button[aria-pressed="true"] { background: var(--raise-2); color: var(--text); box-shadow: 0 1px 2px rgba(0, 0, 0, 0.2); }
+.seg button[aria-pressed="true"], .seg button[aria-checked="true"] { background: var(--raise-2); color: var(--text); box-shadow: 0 1px 2px rgba(0, 0, 0, 0.2); }
 /* 풀이 글은 본문 글꼴로 — 고정폭 글꼴의 한글은 글자 사이가 벌어진다. 경로 · 주소만 .mono 를 더한다 */
 .note { font-size: 11.5px; line-height: 1.5; color: var(--faint); }
 .note.ok { color: var(--ok); }

@@ -16,8 +16,8 @@ import { openMenu } from "./ContextMenu";
 
 const ROW = 30;
 const COL = 14;
-/** 사람 색 — 밝은 바탕 · 어두운 바탕 모두에서 점으로 읽히는 중간 밝기. 이름 없는 변경(ClaudePPT · 바깥 CLI)은 흐린 색 */
-const PEOPLE = ["#3b82f6", "#e5484d", "#12a594", "#e5a000", "#8e4ec6", "#d6409f", "#0d9488", "#f76b15"];
+/** 사람 색 — 밝은 바탕 · 어두운 바탕 모두에서 점으로 읽히는 중간 밝기, 서로 헷갈리지 않는 색만. 이름 없는 변경(ClaudePPT · 바깥 CLI)은 흐린 색 */
+const PEOPLE = ["#3b82f6", "#e5484d", "#12a594", "#e5a000", "#8e4ec6", "#d6409f", "#8d6e4f", "#5b6b7f"];
 const NOBODY = "ClaudePPT";
 
 type Graph = { nodes: GraphNode[]; heads: GraphHead[] };
@@ -71,7 +71,10 @@ export function History({ onClose }: { onClose: () => void }) {
 		for (const x of nodes) n.set(x.author, (n.get(x.author) ?? 0) + 1);
 		return [...n].sort((a, b) => b[1] - a[1]).map(([p]) => p);
 	}, [nodes]);
-	const color = (p: string) => (p === NOBODY ? "var(--faint)" : PEOPLE[people.filter((x) => x !== NOBODY).indexOf(p) % PEOPLE.length]);
+	// 색은 이름의 가나다 차례로 — 많이 한 차례로 매기면 변경이 쌓일 때마다 같은 사람의 색이 바뀌었고, 이름 해시는 비슷한 색끼리 겹쳤다 (2026.11.27 화면 확인).
+	// 그래프는 본안 · 시안 · 보류를 다 담아 어느 줄에서 열어도 사람이 같으므로 색도 같다
+	const named = useMemo(() => people.filter((x) => x !== NOBODY).sort((a, b) => a.localeCompare(b)), [people]);
+	const color = (p: string) => (p === NOBODY ? "var(--faint)" : PEOPLE[named.indexOf(p) % PEOPLE.length]);
 	const lay = useMemo(() => {
 		if (mode === "line") return lanes(nodes, g?.heads ?? []);
 		const col = new Map(nodes.map((n) => [n.hash, people.indexOf(n.author)]));
