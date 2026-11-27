@@ -86,12 +86,17 @@
 		[data-deck-edit] .slide *:hover { outline: 1px solid rgba(229,72,45,.32); outline-offset: 1px; cursor: default }
 		[data-deck-edit] [data-deck-sel] { outline: 1.5px solid #e5482d !important; outline-offset: 1px }
 		[data-deck-edit] [contenteditable=true] { outline: 1.5px solid #e5482d !important; cursor: text }
+		[data-deck-edit][data-deck-cur=text] .slide *:hover { cursor: text }
+		[data-deck-edit][data-deck-cur=move] .slide *:hover { cursor: move }
 		[data-deck-place], [data-deck-place] * { cursor: crosshair !important }
 		[data-deck-paint], [data-deck-paint] * { cursor: copy !important }
 		#deck-ui { position: absolute; left: 0; top: 0; width: 0; height: 0; z-index: 2147483647; pointer-events: none }
 		#deck-ui .h { position: absolute; width: 12px; height: 12px; margin: -6px 0 0 -6px; box-sizing: border-box; background: #fff; border: 1.5px solid #e5482d; border-radius: 2px; pointer-events: auto }
 		#deck-ui .guide { position: absolute; background: #d6336c; display: none }
 		#deck-ui .guide.v { width: 1.5px !important } #deck-ui .guide.h { height: 1.5px !important }
+		#deck-ui .gap { position: absolute; display: none; box-sizing: border-box; border: 0 solid #d6336c }
+		#deck-ui .gap.h { height: 9px; margin-top: -4.5px; border-left-width: 1.5px; border-right-width: 1.5px; background: linear-gradient(#d6336c, #d6336c) center / 100% 1.5px no-repeat }
+		#deck-ui .gap.v { width: 9px; margin-left: -4.5px; border-top-width: 1.5px; border-bottom-width: 1.5px; background: linear-gradient(#d6336c, #d6336c) center / 1.5px 100% no-repeat }
 		#deck-ui .ghost { position: absolute; box-sizing: border-box; border: 1.5px dashed #e5482d; background: rgba(229,72,45,.06) }
 		#deck-ui .spin { border-radius: 50%; cursor: grab }
 		::highlight(deck-find) { background-color: #ffd84d; color: #111 }
@@ -120,6 +125,8 @@
 	ui.appendChild(spin);
 	// 붙기 안내선 — 세로 하나 · 가로 하나
 	const [gx, gy] = ["v", "h"].map((k) => { const g = document.createElement("div"); g.className = "guide " + k; ui.appendChild(g); return g; });
+	// 같은 간격 표시 — 간격마다 양 끝 눈금이 있는 짧은 선 (PowerPoint 의 간격 맞춤 표시). 한 번에 넷까지 (가로 둘 · 세로 둘)
+	const gaps = [0, 1, 2, 3].map(() => { const g = document.createElement("div"); g.className = "gap"; ui.appendChild(g); return g; });
 	document.documentElement.appendChild(ui);
 	const P = (v) => Math.round(v) + "px";
 
@@ -311,9 +318,13 @@
 		for (const m of el.querySelectorAll("[data-bu]")) m.contentEditable = "false";
 		el.focus();
 		const s = getSelection();
-		const r = at ? document.caretRangeFromPoint(at.x, at.y) : all ? document.createRange() : null;
+		// all: true 면 글 전체를 고르고, "end" 면 글 끝에 커서
+		let r = at ? document.caretRangeFromPoint(at.x, at.y) : all ? document.createRange() : null;
+		// 누른 자리가 글 밖(상자 여백)이면 커서가 고치는 요소 밖에 서서 친 글이 엉뚱한 곳에 들어간다 — 글 끝에 둔다
+		if (at && (!r || !el.contains(r.startContainer))) { r = document.createRange(); r.selectNodeContents(el); r.collapse(false); }
 		if (r) {
 			if (all) r.selectNodeContents(el);
+			if (all === "end") r.collapse(false);
 			s.removeAllRanges();
 			s.addRange(r);
 		}
@@ -440,13 +451,16 @@
 		else if (kind === "line") t.innerHTML = r.h > r.w
 			? `<div style="${at}width:0;height:${P(r.h)};border-left:var(--stroke, 2px) solid var(--ink, #222)"></div>`
 			: `<div style="${at}width:${P(r.w)};height:0;border-top:var(--stroke, 2px) solid var(--ink, #222)"></div>`;
-		else t.innerHTML = `<div style="${at}width:${P(r.w)};height:${P(r.h)};${SHAPE}${kind === "round" ? ";border-radius:16px" : kind === "ellipse" ? ";border-radius:50%" : ""}"><p style="margin:0;width:100%"></p></div>`;
+		// border-box: 안쪽 여백이 크기에 더해지지 않게 — 2026.11.27 : 빠져 있어 끌어 그린 네모보다 가로 32 · 세로 24px 크게 들어갔다
+		else t.innerHTML = `<div style="${at}width:${P(r.w)};height:${P(r.h)};box-sizing:border-box;${SHAPE}${kind === "round" ? ";border-radius:16px" : kind === "ellipse" ? ";border-radius:50%" : ""}"><p style="margin:0;width:100%"></p></div>`;
 		return t.content.firstElementChild;
 	};
 	const finishPlace = (e) => {
 		const p = place;
 		let r = placeRect(e);
-		const D = { text: [360, 0], line: [240, 0], arrow: [240, 0], rect: [200, 120], round: [200, 120], ellipse: [160, 160], triangle: [160, 140], rtTriangle: [160, 140], diamond: [160, 160], hexagon: [180, 150], upArrow: [100, 180], downArrow: [100, 180] }[p.kind] || [200, 120];
+		// 누르기만 했을 때의 크기 — PowerPoint 기본값: 1인치(96px) 정사각형, 몇 도형만 제 비율(삼각형 · 육각형 1060704 EMU 너비 등). 선은 1인치.
+		// 2026.11.27 : 200×120 등 종류별 크기 → PowerPoint 와 같게. 글상자는 글에 따라 자라는 폭이 없어 그대로 둔다
+		const D = { text: [360, 0], line: [96, 0], arrow: [96, 0], triangle: [111, 96], hexagon: [111, 96], parallelogram: [128, 96], trapezoid: [96, 128] }[p.kind] || [96, 96];
 		// 누르기만 했다 — 누른 자리를 왼쪽 위로 기본 크기
 		if (r.w < 6 && r.h < 6) r = { x: p.x0, y: p.y0, w: D[0], h: D[1], dx: D[0], dy: D[1] };
 		else if (p.kind === "text") r.w = Math.max(r.w, 40);
@@ -501,23 +515,37 @@
 		const dy = { top: S.top - r.top, middle: S.top + (S.height - r.height) / 2 - r.top, bottom: S.bottom - r.bottom }[how];
 		setStyle(el, { ...(p.rel ? { position: "relative" } : {}), ...(dx != null ? { left: P(p.l + dx) } : { top: P(p.t + dy) }) });
 	};
+	// 똑똑한 복제 (PowerPoint 와 같다) — 복제한 것을 옮겨 두고 다시 Ctrl+D 를 누르면 그 옮긴 만큼씩 이어서 복제한다. 같은 간격으로 늘어놓을 때 쓴다
+	// 요소가 아니라 길(pathOf)로 기억한다 — 파일에 쓴 뒤 쪽을 다시 읽으면 요소가 새것으로 바뀐다
+	let lastDup = null;
+	const xyOf = (el) => ({ x: parseFloat(css(el).left) || el.offsetLeft, y: parseFloat(css(el).top) || el.offsetTop });
+	const dupStep = (all) => {
+		const L = lastDup, now = all.map((x) => pathOf(x).join());
+		if (L && L.copies.length === now.length && now.every((p) => L.copies.includes(p))) {
+			const a = atPath(L.src0), b = atPath(L.copy0);
+			if (a && b) { const p = xyOf(a), q = xyOf(b); return { dx: q.x - p.x, dy: q.y - p.y }; }
+		}
+		return { dx: 20, dy: 20 };
+	};
+	const rememberDup = (srcs, copies) => { lastDup = { src0: pathOf(srcs[0]), copy0: pathOf(copies[0]), copies: copies.map((x) => pathOf(x).join()) }; };
 	const dup = () => {
-		const el = shapeOf(sel), c = clean(el);
-		if (movable(el)) { c.style.left = P((parseFloat(css(el).left) || el.offsetLeft) + 20); c.style.top = P((parseFloat(css(el).top) || el.offsetTop) + 20); }
+		const el = shapeOf(sel), c = clean(el), { dx, dy } = dupStep([el]);
+		if (movable(el)) { const p = xyOf(el); c.style.left = P(p.x + dx); c.style.top = P(p.y + dy); }
 		const path = pathOf(el);
 		el.after(c);
 		keep(c);
 		post({ t: "after", path, html: c.outerHTML });
 		select(c);
+		rememberDup([el], [c]);
 	};
 	/** 여러 개 복제 — 문서 차례대로 하나씩 바로 뒤에 넣고, 새로 생긴 것들을 고른다 */
 	const dupMany = () => {
 		const all = picks().sort((a, c) => (a.compareDocumentPosition(c) & Node.DOCUMENT_POSITION_FOLLOWING ? -1 : 1));
-		const made = [];
+		const made = [], { dx, dy } = dupStep(all);
 		together(() => {
 			for (const el of all) {
 				const c = clean(el);
-				if (movable(el)) { c.style.left = P((parseFloat(css(el).left) || el.offsetLeft) + 20); c.style.top = P((parseFloat(css(el).top) || el.offsetTop) + 20); }
+				if (movable(el)) { const p = xyOf(el); c.style.left = P(p.x + dx); c.style.top = P(p.y + dy); }
 				post({ t: "after", path: pathOf(el), html: c.outerHTML });
 				el.after(c);
 				made.push(c);
@@ -525,6 +553,7 @@
 		});
 		select(made[0], made.slice(1));
 		keep(made[0]);
+		rememberDup(all, made);
 	};
 	/** 복사 — 다른 쪽에 붙여도 같은 자리 · 크기로 서게 절대 위치로 바꿔 넘긴다 (붙여 넣기는 쪽 맨 위에 놓는다). 여러 개면 이어 붙인 HTML 하나로 */
 	const copy = () => {
@@ -1161,7 +1190,7 @@
 	const SNAP = 8;
 	/** 끌기 시작 때 붙을 자리를 모은다 — 쪽, 쪽의 자식들, 끄는 요소의 형제들 (끄는 요소 · 그 조상 · 자손은 빼고) */
 	const snapTargets = (el, group = [el]) => {
-		const S = root.getBoundingClientRect(), xs = [0, S.width / 2, S.width], ys = [0, S.height / 2, S.height];
+		const S = root.getBoundingClientRect(), xs = [0, S.width / 2, S.width], ys = [0, S.height / 2, S.height], rects = [];
 		const near = new Set([...root.children, ...group.flatMap((g) => (g.parentElement ? [...g.parentElement.children] : []))]);
 		for (const o of near) {
 			if (group.some((g) => o === g || o.contains(g) || g.contains(o)) || o.id === "deck-ui" || !visible(o)) continue;
@@ -1169,11 +1198,31 @@
 			if (r.width < 4 && r.height < 4) continue;
 			xs.push(r.left - S.left, r.left - S.left + r.width / 2, r.right - S.left);
 			ys.push(r.top - S.top, r.top - S.top + r.height / 2, r.bottom - S.top);
+			rects.push({ x: [r.left - S.left, r.right - S.left], y: [r.top - S.top, r.bottom - S.top] });
 		}
 		// 여러 개를 함께 끌면 모두를 감싼 네모로 붙는다
 		const rs = group.map((g) => g.getBoundingClientRect());
 		const L = Math.min(...rs.map((r) => r.left)), T = Math.min(...rs.map((r) => r.top)), R = Math.max(...rs.map((r) => r.right)), B = Math.max(...rs.map((r) => r.bottom));
-		return { xs, ys, x0: L - S.left, y0: T - S.top, w: R - L, h: B - T, S };
+		return { xs, ys, rects, x0: L - S.left, y0: T - S.top, w: R - L, h: B - T, S };
+	};
+	/** 같은 간격 자리 (PowerPoint 의 간격 맞춤) — 한 축(a: "x" · "y")에서 끄는 상자의 시작 자리 p 가까이에
+	 *  ① 같은 줄 이웃 둘 사이 간격만큼 그 바깥에 붙는 자리, ② 두 이웃 사이 한가운데(양쪽 간격이 같은 자리)를 찾는다.
+	 *  같은 줄 = 다른 축(c)에서 끄는 상자 [q, q+n] 와 겹치는 요소들. 고친 어긋남 d 와 그릴 간격 선들(segs: [시작, 끝, 다른 축 자리])을 낸다 */
+	const snapGap = (z, a, p, q) => {
+		const c = a === "x" ? "y" : "x", len = a === "x" ? z.w : z.h, n = a === "x" ? z.h : z.w;
+		const row = z.rects.filter((r) => r[c][0] < q + n && r[c][1] > q).sort((u, v) => u[a][0] - v[a][0]);
+		let b = null;
+		const take = (at, segs) => { const d = at - p; if (Math.abs(d) <= SNAP && (!b || Math.abs(d) < Math.abs(b.d))) b = { d, segs }; };
+		const mid = (u, v) => (Math.max(u[c][0], v[c][0], q) + Math.min(u[c][1], v[c][1], q + n)) / 2;
+		for (let i = 0; i + 1 < row.length; i++) {
+			const u = row[i], v = row[i + 1], g = v[a][0] - u[a][1];
+			if (g <= 0) continue;
+			const m = mid(u, v);
+			take(v[a][1] + g, [[u[a][1], v[a][0], m], [v[a][1], v[a][1] + g, m]]);
+			take(u[a][0] - g - len, [[u[a][0] - g, u[a][0], m], [u[a][1], v[a][0], m]]);
+			if (g > len) { const s = (u[a][1] + v[a][0] - len) / 2; take(s, [[u[a][1], s, m], [s + len, v[a][0], m]]); }
+		}
+		return b;
 	};
 	/** 옮긴 만큼(dx, dy)에서 가장 가까운 붙을 자리로 고친 어긋남과 안내선 */
 	const snapMove = (z, dx, dy) => {
@@ -1183,12 +1232,55 @@
 			return b;
 		};
 		const x = z.x0 + dx, y = z.y0 + dy;
-		const bx = best([x, x + z.w / 2, x + z.w], z.xs), by = best([y, y + z.h / 2, y + z.h], z.ys);
-		return { dx: dx + (bx ? bx.d : 0), dy: dy + (by ? by.d : 0), gx: bx?.at, gy: by?.at };
+		let bx = best([x, x + z.w / 2, x + z.w], z.xs), by = best([y, y + z.h / 2, y + z.h], z.ys);
+		// 가장자리 · 가운데 붙기보다 같은 간격 자리가 더 가까우면 그쪽에 붙는다
+		const ex = snapGap(z, "x", x, y), ey = snapGap(z, "y", y, x);
+		const segs = [];
+		if (ex && (!bx || Math.abs(ex.d) < Math.abs(bx.d))) { bx = { d: ex.d }; segs.push(...ex.segs.map((s) => ["h", ...s])); }
+		if (ey && (!by || Math.abs(ey.d) < Math.abs(by.d))) { by = { d: ey.d }; segs.push(...ey.segs.map((s) => ["v", ...s])); }
+		return { dx: dx + (bx ? bx.d : 0), dy: dy + (by ? by.d : 0), gx: bx?.at, gy: by?.at, segs };
+	};
+	/** 크기를 끄는 중 움직이는 변이 붙을 자리 — 붙으면 그때의 너비 · 높이(w · h)와 안내선 자리. k2 는 Ctrl(가운데 기준)이면 2: 한 변이 d 움직이면 크기는 2d 바뀐다 */
+	const snapSize = (s, d, w, h, k2, ratio) => {
+		const z = s.z, out = {};
+		const near = (v, cands) => { let b = null; for (const c of cands) { const dd = c - v; if (Math.abs(dd) <= SNAP && (!b || Math.abs(dd) < Math.abs(b.d))) b = { d: dd, at: c }; } return b; };
+		// 끌기 전 상자(z.x0 · z.y0 · s.w · s.h)에서 움직이는 변의 지금 자리
+		const cx = z.x0 + s.w / 2, cy = z.y0 + s.h / 2;
+		let bx = null, by = null;
+		if (d.includes("e")) { const b = near(k2 === 2 ? cx + w / 2 : z.x0 + w, z.xs); if (b) bx = { ...b, w: w + k2 * b.d }; }
+		else if (d.includes("w")) { const b = near(k2 === 2 ? cx - w / 2 : z.x0 + s.w - w, z.xs); if (b) bx = { ...b, w: w - k2 * b.d }; }
+		if (d.includes("s")) { const b = near(k2 === 2 ? cy + h / 2 : z.y0 + h, z.ys); if (b) by = { ...b, h: h + k2 * b.d }; }
+		else if (d.includes("n")) { const b = near(k2 === 2 ? cy - h / 2 : z.y0 + s.h - h, z.ys); if (b) by = { ...b, h: h - k2 * b.d }; }
+		// 비율을 지키면 가까운 쪽 하나만
+		if (bx && by && ratio) { if (Math.abs(bx.d) <= Math.abs(by.d)) by = null; else bx = null; }
+		if (bx) { out.w = bx.w; out.gx = bx.at; }
+		if (by) { out.h = by.h; out.gy = by.at; }
+		return out;
+	};
+	// 상자 가장자리 띠 — 이 안을 누르면 글이 아니라 상자를 잡는다 (PowerPoint 의 테두리 잡기)
+	const RIM = 6;
+	/** (x, y) 에서 누르면 고칠 글 요소 — 글 요소의 네모 안이고 상자 가장자리 띠 밖일 때만. 아직 고르지 않은 그룹 · 표는 빼고 지금처럼 고르기부터 한다 */
+	const textHit = (t, m, x, y) => {
+		// 그룹은 PowerPoint 처럼 그룹 → 안의 도형 → 글 차례로 들어간다: 그룹 안 도형을 이미 골라 둔 때만 글을 바로 고친다
+		if (!t || t === root || (m && m.hasAttribute("data-group") && !(sel && sel !== m && m.contains(sel) && sel.contains(t)))) return null;
+		const tt = textAt(t, null);
+		if (!tt || !root.contains(tt) || tt.closest("table") || !(tt.innerText || "").trim()) return null;
+		const r = tt.getBoundingClientRect();
+		if (x < r.left || x > r.right || y < r.top || y > r.bottom) return null;
+		const b = (m && m.contains(tt) ? m : tt).getBoundingClientRect();
+		if (x - b.left < RIM || b.right - x < RIM || y - b.top < RIM || b.bottom - y < RIM) return null;
+		return tt;
 	};
 	const showGuides = (z, g) => {
 		Object.assign(gx.style, g?.gx != null ? { display: "block", left: z.S.left + g.gx - 0.5 + "px", top: z.S.top + "px", width: "1px", height: z.S.height + "px" } : { display: "none" });
 		Object.assign(gy.style, g?.gy != null ? { display: "block", top: z.S.top + g.gy - 0.5 + "px", left: z.S.left + "px", height: "1px", width: z.S.width + "px" } : { display: "none" });
+		gaps.forEach((el, i) => {
+			const s = g?.segs?.[i];
+			el.className = "gap" + (s ? " " + s[0] : "");
+			Object.assign(el.style, !s ? { display: "none" } : s[0] === "h"
+				? { display: "block", left: z.S.left + s[1] + "px", top: z.S.top + s[3] + "px", width: s[2] - s[1] + "px", height: "" }
+				: { display: "block", top: z.S.top + s[1] + "px", left: z.S.left + s[3] + "px", height: s[2] - s[1] + "px", width: "" });
+		});
 	};
 
 	addEventListener("pointerdown", (e) => {
@@ -1212,7 +1304,7 @@
 		if (e.target === spin) {
 			if (sel && e.button === 0) {
 				const r = sel.getBoundingClientRect();
-				turn = { el: sel, cx: r.left + r.width / 2, cy: r.top + r.height / 2, tf: tfOf(sel), moved: false };
+				turn = { el: sel, cx: r.left + r.width / 2, cy: r.top + r.height / 2, tf: tfOf(sel), moved: false, style0: sel.getAttribute("style") };
 				spin.setPointerCapture(e.pointerId);
 			}
 			e.preventDefault();
@@ -1223,7 +1315,7 @@
 		if (hd) {
 			if (sel && e.button === 0) {
 				const p = posOf(sel);
-				size = { el: sel, dir: hd.dataset.dir, x: e.clientX, y: e.clientY, l: p.l, t: p.t, rel: p.rel, w: sel.offsetWidth, h: sel.offsetHeight, img: sel.tagName === "IMG", props: new Set() };
+				size = { el: sel, dir: hd.dataset.dir, x: e.clientX, y: e.clientY, l: p.l, t: p.t, rel: p.rel, w: sel.offsetWidth, h: sel.offsetHeight, img: sel.tagName === "IMG", props: new Set(), z: snapTargets(sel), style0: sel.getAttribute("style"), tf: tfOf(sel), text: !!(sel.innerText || "").trim() };
 				hd.setPointerCapture(e.pointerId);
 			}
 			e.preventDefault();
@@ -1262,6 +1354,14 @@
 				return;
 			}
 		}
+		// 글 위를 누름 — 고르지 않은 상자라도 바로 그 자리에 커서를 두고 고친다. 끌면 글자를 고른다 (PowerPoint 와 같다).
+		// 누름의 기본 동작을 막지 않아야 웹뷰가 커서를 놓고 끌어 고르기를 이어 간다. 상자를 옮기려면 가장자리 띠 · 글 밖 여백을 잡는다.
+		// 2026.11.27 : 전에는 첫 누름은 상자 고르기, 450ms 뒤 한 번 더 눌러야 고쳤다
+		const tt = e.button === 0 && !e.shiftKey && !e.ctrlKey && !edit ? textHit(t, m, e.clientX, e.clientY) : null;
+		if (tt) {
+			picked = Date.now();
+			return startEdit(tt, { x: e.clientX, y: e.clientY });
+		}
 		// 고른 상자를 다시 누름 — 끌면 옮기고, 끌지 않고 떼면 누른 자리 글 고치기. 두 번 누르기의 둘째 누름과 가르려고 시간을 본다
 		if (m && m === sel && e.button === 0 && Date.now() - picked > 450) {
 			drag = { el: m, x: e.clientX, y: e.clientY, ...posOf(m), moved: false, again: true, hit: t };
@@ -1297,9 +1397,20 @@
 			const k2 = e.ctrlKey ? 2 : 1;
 			let w = size.w + k2 * (d.includes("e") ? dx : d.includes("w") ? -dx : 0);
 			let h = size.h + k2 * (d.includes("s") ? dy : d.includes("n") ? -dy : 0);
-			if (d.length === 2 && (e.shiftKey || size.img)) { const k = Math.max(w / size.w, h / size.h); w = size.w * k; h = size.h * k; }
-			w = Math.max(Math.min(8, size.w), w);
-			h = Math.max(Math.min(8, size.h), h);
+			const ratio = d.length === 2 && (e.shiftKey || size.img);
+			if (ratio) { const kx = w / size.w, ky = h / size.h, k = Math.abs(kx) >= Math.abs(ky) ? kx : ky; w = size.w * k; h = size.h * k; }
+			// 움직이는 변을 쪽 · 이웃 요소의 가장자리 · 가운데에 붙인다 (PowerPoint 는 크기를 끌 때도 붙는다). Alt 면 붙지 않는다.
+			// 비율을 지키는 중이면 더 가까운 한 변만 붙이고 다른 변은 비율로 따라간다 — 둘 다 붙이면 비율이 깨진다
+			const g = !e.altKey && size.z ? snapSize(size, d, w, h, k2, ratio) : null;
+			if (g?.w != null || g?.h != null) {
+				if (ratio) { const k = g.w != null ? g.w / size.w : g.h / size.h; w = size.w * k; h = size.h * k; }
+				else { if (g.w != null) w = g.w; if (g.h != null) h = g.h; }
+			}
+			showGuides(size.z, g);
+			// 맞은편 변 너머로 끌면 반대쪽으로 넘어간다 (PowerPoint 는 그 축을 뒤집는다). 너비 · 높이가 음수면 넘어간 것이다
+			const fx = /[ew]/.test(d) && w < 0, fy = /[ns]/.test(d) && h < 0;
+			w = Math.max(Math.min(8, size.w), Math.abs(w));
+			h = Math.max(Math.min(8, size.h), Math.abs(h));
 			const st = size.el.style;
 			if (/[ew]/.test(d)) { st.width = P(w); size.props.add("width"); }
 			if (/[ns]/.test(d)) { st.height = P(h); size.props.add("height"); }
@@ -1307,11 +1418,18 @@
 				if (/[ew]/.test(d)) { st.left = P(size.l - (w - size.w) / 2); size.props.add("left"); }
 				if (/[ns]/.test(d)) { st.top = P(size.t - (h - size.h) / 2); size.props.add("top"); }
 			} else {
-				// 끄는 중 Ctrl 을 떼면 맞은편 변을 제자리로
-				if (d.includes("w")) { st.left = P(size.l + size.w - w); size.props.add("left"); }
+				// 붙박인 맞은편 변을 기준으로 놓는다: w 손잡이면 오른쪽 변, e 손잡이면 왼쪽 변. 끄는 중 Ctrl 을 떼면 맞은편 변을 제자리로
+				const left = d.includes("w") ? (fx ? size.l + size.w : size.l + size.w - w) : d.includes("e") && fx ? size.l - w : null;
+				if (left != null) { st.left = P(left); size.props.add("left"); }
 				else if (size.props.has("left")) st.left = P(size.l);
-				if (d.includes("n")) { st.top = P(size.t + size.h - h); size.props.add("top"); }
+				const top = d.includes("n") ? (fy ? size.t + size.h : size.t + size.h - h) : d.includes("s") && fy ? size.t - h : null;
+				if (top != null) { st.top = P(top); size.props.add("top"); }
 				else if (size.props.has("top")) st.top = P(size.t);
+			}
+			// 글이 없는 도형 · 그림만 실제로 뒤집는다 — 글을 품은 상자를 HTML 로 뒤집으면 글자가 거울상이 된다(PowerPoint 는 글을 뒤집지 않는다)
+			if (!size.text && (fx || fy || size.props.has("transform"))) {
+				st.transform = tfText({ ...size.tf, x: size.tf.x !== fx, y: size.tf.y !== fy });
+				size.props.add("transform");
 			}
 			if (size.rel && (size.props.has("left") || size.props.has("top"))) st.position = "relative";
 			placeHandles();
@@ -1335,7 +1453,15 @@
 			Object.assign(ghost.style, { display: "", left: S.left + band.r.x + "px", top: S.top + band.r.y + "px", width: band.r.w + "px", height: band.r.h + "px" });
 			return;
 		}
-		if (!drag) return;
+		if (!drag) {
+			// 손을 떼고 움직이는 중 — 누르면 무엇이 될지 커서로 보인다: 글 위는 I자(고치기), 상자 가장자리 띠는 이동
+			if (mode === "edit" && !edit && !e.buttons) {
+				const t = e.target, m = t && t !== root && root.contains(t) ? boxOf(t) : null;
+				const cur = textHit(t, m, e.clientX, e.clientY) ? "text" : m && canMove(m) && !(m.hasAttribute("data-group") && m !== sel) ? "move" : "";
+				if (document.documentElement.dataset.deckCur !== cur) document.documentElement.dataset.deckCur = cur;
+			}
+			return;
+		}
 		let dx = e.clientX - drag.x, dy = e.clientY - drag.y;
 		if (!drag.moved && Math.hypot(dx, dy) < 3) return;
 		// Shift 를 누르고 끌면 가로 · 세로 한쪽으로만 (PowerPoint 와 같다)
@@ -1371,6 +1497,7 @@
 				post({ t: "patch", path: pathOf(size.el), style: { ...posPatch(size.el, size.props), ...cut } });
 			}
 			size = null;
+			showGuides(null, null);
 			// 서식 띠의 크기 · 위치 칸이 끈 뒤의 값을 보이게 (전에는 다른 것을 고를 때까지 옛 값이 남았다)
 			announce();
 			return;
@@ -1389,6 +1516,20 @@
 			const all = b.add ? [...picks(), ...got.filter((x) => !picks().some((p) => p === x || p.contains(x) || x.contains(p)))] : got;
 			if (all.length) { select(all[0], all.slice(1)); picked = Date.now(); }
 			return;
+		}
+		// 복제냐 옮기기냐는 놓는 순간의 Ctrl 로 정한다 (PowerPoint 와 같다): 끄는 도중 Ctrl 을 누르면 복제, 놓기 전에 떼면 옮기기
+		if (drag?.moved) {
+			const items = drag.group || [drag];
+			if (drag.copy && !e.ctrlKey) {
+				// 복제본이 선 자리로 원본을 옮기고 복제본은 걷는다
+				for (const it of items) { for (const k of ["left", "top", "position"]) it.src.style[k] = it.el.style[k]; it.el.remove(); it.el = it.src; }
+				drag.copy = false;
+				drag.el = items[0].el;
+			} else if (!drag.copy && e.ctrlKey && items.every((it) => movable(it.el))) {
+				// 옮긴 자리에 복제본을 만들고 원본은 제자리로
+				const group = items.map((it, i) => { const c = clean(it.el), o = drag.orig[i]; it.el.style.left = o.left; it.el.style.top = o.top; it.el.style.position = o.position; return { el: c, src: it.el }; });
+				drag = { el: group[0].el, moved: true, copy: true, group };
+			}
 		}
 		if (drag?.copy) {
 			showGuides(null, null);
@@ -1499,6 +1640,17 @@
 			e.preventDefault();
 			return;
 		}
+		// 크기 · 회전을 끄는 중 Esc — 끌기 전 style 그대로 돌린다 (PowerPoint 와 같다)
+		if (e.key === "Escape" && (size || turn)) {
+			const o = size || turn;
+			if (o.style0 == null) o.el.removeAttribute("style"); else o.el.setAttribute("style", o.style0);
+			size = turn = null;
+			showGuides(null, null);
+			placeHandles();
+			announce();
+			e.preventDefault();
+			return;
+		}
 		// Ctrl+M 새 슬라이드 (지금 쪽 다음) — 앱이 한다
 		if (ctrl && !e.shiftKey && k === "m") { if (edit) edit.el.blur(); post({ t: "key", key: "newSlide", bar: true }); e.preventDefault(); return; }
 		// F5 · Shift+F5 는 슬라이드 쇼 (PowerPoint 와 같다) — 웹뷰가 슬라이드 창을 새로 고치지 않게 앱으로 넘긴다
@@ -1573,7 +1725,7 @@
 		// Alt+← → 로 15° 씩 돌린다 (PowerPoint 와 같다)
 		else if (e.altKey && !e.ctrlKey && (e.key === "ArrowLeft" || e.key === "ArrowRight")) { command("rotate", e.key === "ArrowLeft" ? -15 : 15); e.preventDefault(); }
 		// Ctrl+방향키 — 1px 씩 조금 옮기기 (PowerPoint 의 미세 이동)
-		else if (ctrl && !e.shiftKey && e.key.startsWith("Arrow") && picks().every(canMove)) nudgeBy(e, 1);
+		else if (ctrl && e.key.startsWith("Arrow") && picks().every(canMove)) nudgeBy(e, 1);
 		else if (e.ctrlKey || e.altKey) return;
 		else if ((e.key === "Enter" || e.key === "F2") && !more.length && textAt(sel, null)) {
 			startEdit(textAt(sel, null), null, true);
@@ -1583,13 +1735,33 @@
 			flushNudge();
 			removeSel();
 			e.preventDefault();
-		} else if (e.key.startsWith("Arrow") && picks().every(canMove)) nudgeBy(e, e.shiftKey ? 10 : 1);
+		} else if (e.key.startsWith("Arrow") && picks().every(canMove)) nudgeBy(e, NUDGE);
 		else if (e.key === "Escape") select(null);
+		// 고른 것이 하나고 글을 품었으면 글자 키로 바로 글 끝에 이어 쓴다 (PowerPoint 와 같다: 바꿔 쓰지 않고 끝에 붙는다).
+		// 한글은 첫 키가 조합 중(Process)으로 온다 — 그때도 고치기를 열어 두면 조합이 그 글로 들어간다
+		else if (!more.length && (e.key.length === 1 || e.key === "Process") && textAt(sel, null)) {
+			flushNudge();
+			startEdit(textAt(sel, null), null, "end");
+		}
 	});
-	/** 고른 것을 방향키 쪽으로 d px 민다 — 마지막 키 뒤 잠깐 있다가 묶음 하나로 쓴다 */
+	// 방향키 한 번에 미는 거리 — PowerPoint 기본 격자(1/12인치)와 같다. Ctrl 이면 1px.
+	// 2026.11.27 : 1px(Shift 10px) → 8px. PowerPoint 에서 Shift+방향키는 이동이 아니라 크기 바꾸기다
+	const NUDGE = 8;
+	/** 고른 것을 방향키 쪽으로 d px 민다 — 마지막 키 뒤 잠깐 있다가 묶음 하나로 쓴다.
+	 *  Shift 면 옮기지 않고 크기를 바꾼다: → 넓게 · ← 좁게 · ↑ 높게 · ↓ 낮게, 왼쪽 위는 그대로 (PowerPoint 와 같다) */
 	function nudgeBy(e, d) {
-			const all = picks();
+			const all = picks(), grow = e.shiftKey, keys = grow ? ["width", "height"] : ["left", "top"];
 			for (const el of all) {
+				if (grow) {
+					const w = el.offsetWidth, h = el.offsetHeight, img = el.tagName === "IMG";
+					const dw = e.key === "ArrowRight" ? d : e.key === "ArrowLeft" ? -d : 0, dh = e.key === "ArrowUp" ? d : e.key === "ArrowDown" ? -d : 0;
+					// 그림은 비율을 지킨다 (손잡이로 끌 때와 같다)
+					const nw = Math.max(8, img && dh ? w * (h + dh) / h : w + dw), nh = Math.max(8, img && dw ? h * (w + dw) / w : h + dh);
+					el.style.width = P(nw);
+					el.style.height = P(nh);
+					for (const [k, v] of Object.entries(reshape(el))) el.style.setProperty(k, v);
+					continue;
+				}
 				const { l, t, rel } = posOf(el);
 				if (rel) el.style.position = "relative";
 				if (e.key === "ArrowLeft") el.style.left = l - d + "px";
@@ -1602,9 +1774,9 @@
 			// 다른 것을 밀던 중이면 그것을 먼저 쓴다 — 타이머를 갈아 끼우면 앞의 이동이 파일에 안 남는다
 			if (nudge && (nudge.all.length !== all.length || nudge.all.some((x, i) => x !== all[i]))) flushNudge();
 			if (nudge) clearTimeout(nudge.timer);
-			const first = sel;
-			const fn = () => { keep(first, all.slice(1)); together(() => { for (const el of all) if (el.isConnected) post({ t: "patch", path: pathOf(el), style: posPatch(el, ["left", "top"]) }); }); };
-			nudge = { fn, all, timer: setTimeout(() => { nudge = null; fn(); }, 400) };
+			const first = sel, props = new Set([...(nudge?.props || []), ...keys]);
+			const fn = () => { keep(first, all.slice(1)); together(() => { for (const el of all) if (el.isConnected) post({ t: "patch", path: pathOf(el), style: { ...posPatch(el, [...props]), ...(props.has("width") ? reshape(el) : {}) } }); }); };
+			nudge = { fn, all, props, timer: setTimeout(() => { nudge = null; fn(); }, 400) };
 			e.preventDefault();
 	}
 
