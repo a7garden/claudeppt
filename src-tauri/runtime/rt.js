@@ -93,6 +93,9 @@
 		#deck-ui .h { position: absolute; width: 12px; height: 12px; margin: -6px 0 0 -6px; box-sizing: border-box; background: #fff; border: 1.5px solid #e5482d; border-radius: 2px; pointer-events: auto }
 		#deck-ui .guide { position: absolute; background: #d6336c; display: none }
 		#deck-ui .guide.v { width: 1.5px !important } #deck-ui .guide.h { height: 1.5px !important }
+		#deck-ui .gap { position: absolute; display: none; box-sizing: border-box; border: 0 solid #d6336c }
+		#deck-ui .gap.h { height: 9px; margin-top: -4.5px; border-left-width: 1.5px; border-right-width: 1.5px; background: linear-gradient(#d6336c, #d6336c) center / 100% 1.5px no-repeat }
+		#deck-ui .gap.v { width: 9px; margin-left: -4.5px; border-top-width: 1.5px; border-bottom-width: 1.5px; background: linear-gradient(#d6336c, #d6336c) center / 1.5px 100% no-repeat }
 		#deck-ui .ghost { position: absolute; box-sizing: border-box; border: 1.5px dashed #e5482d; background: rgba(229,72,45,.06) }
 		#deck-ui .spin { border-radius: 50%; cursor: grab }
 		::highlight(deck-find) { background-color: #ffd84d; color: #111 }
@@ -121,6 +124,8 @@
 	ui.appendChild(spin);
 	// 붙기 안내선 — 세로 하나 · 가로 하나
 	const [gx, gy] = ["v", "h"].map((k) => { const g = document.createElement("div"); g.className = "guide " + k; ui.appendChild(g); return g; });
+	// 같은 간격 표시 — 간격마다 양 끝 눈금이 있는 짧은 선 (PowerPoint 의 간격 맞춤 표시). 한 번에 넷까지 (가로 둘 · 세로 둘)
+	const gaps = [0, 1, 2, 3].map(() => { const g = document.createElement("div"); g.className = "gap"; ui.appendChild(g); return g; });
 	document.documentElement.appendChild(ui);
 	const P = (v) => Math.round(v) + "px";
 
@@ -1184,7 +1189,7 @@
 	const SNAP = 8;
 	/** 끌기 시작 때 붙을 자리를 모은다 — 쪽, 쪽의 자식들, 끄는 요소의 형제들 (끄는 요소 · 그 조상 · 자손은 빼고) */
 	const snapTargets = (el, group = [el]) => {
-		const S = root.getBoundingClientRect(), xs = [0, S.width / 2, S.width], ys = [0, S.height / 2, S.height];
+		const S = root.getBoundingClientRect(), xs = [0, S.width / 2, S.width], ys = [0, S.height / 2, S.height], rects = [];
 		const near = new Set([...root.children, ...group.flatMap((g) => (g.parentElement ? [...g.parentElement.children] : []))]);
 		for (const o of near) {
 			if (group.some((g) => o === g || o.contains(g) || g.contains(o)) || o.id === "deck-ui" || !visible(o)) continue;
@@ -1192,11 +1197,31 @@
 			if (r.width < 4 && r.height < 4) continue;
 			xs.push(r.left - S.left, r.left - S.left + r.width / 2, r.right - S.left);
 			ys.push(r.top - S.top, r.top - S.top + r.height / 2, r.bottom - S.top);
+			rects.push({ x: [r.left - S.left, r.right - S.left], y: [r.top - S.top, r.bottom - S.top] });
 		}
 		// 여러 개를 함께 끌면 모두를 감싼 네모로 붙는다
 		const rs = group.map((g) => g.getBoundingClientRect());
 		const L = Math.min(...rs.map((r) => r.left)), T = Math.min(...rs.map((r) => r.top)), R = Math.max(...rs.map((r) => r.right)), B = Math.max(...rs.map((r) => r.bottom));
-		return { xs, ys, x0: L - S.left, y0: T - S.top, w: R - L, h: B - T, S };
+		return { xs, ys, rects, x0: L - S.left, y0: T - S.top, w: R - L, h: B - T, S };
+	};
+	/** 같은 간격 자리 (PowerPoint 의 간격 맞춤) — 한 축(a: "x" · "y")에서 끄는 상자의 시작 자리 p 가까이에
+	 *  ① 같은 줄 이웃 둘 사이 간격만큼 그 바깥에 붙는 자리, ② 두 이웃 사이 한가운데(양쪽 간격이 같은 자리)를 찾는다.
+	 *  같은 줄 = 다른 축(c)에서 끄는 상자 [q, q+n] 와 겹치는 요소들. 고친 어긋남 d 와 그릴 간격 선들(segs: [시작, 끝, 다른 축 자리])을 낸다 */
+	const snapGap = (z, a, p, q) => {
+		const c = a === "x" ? "y" : "x", len = a === "x" ? z.w : z.h, n = a === "x" ? z.h : z.w;
+		const row = z.rects.filter((r) => r[c][0] < q + n && r[c][1] > q).sort((u, v) => u[a][0] - v[a][0]);
+		let b = null;
+		const take = (at, segs) => { const d = at - p; if (Math.abs(d) <= SNAP && (!b || Math.abs(d) < Math.abs(b.d))) b = { d, segs }; };
+		const mid = (u, v) => (Math.max(u[c][0], v[c][0], q) + Math.min(u[c][1], v[c][1], q + n)) / 2;
+		for (let i = 0; i + 1 < row.length; i++) {
+			const u = row[i], v = row[i + 1], g = v[a][0] - u[a][1];
+			if (g <= 0) continue;
+			const m = mid(u, v);
+			take(v[a][1] + g, [[u[a][1], v[a][0], m], [v[a][1], v[a][1] + g, m]]);
+			take(u[a][0] - g - len, [[u[a][0] - g, u[a][0], m], [u[a][1], v[a][0], m]]);
+			if (g > len) { const s = (u[a][1] + v[a][0] - len) / 2; take(s, [[u[a][1], s, m], [s + len, v[a][0], m]]); }
+		}
+		return b;
 	};
 	/** 옮긴 만큼(dx, dy)에서 가장 가까운 붙을 자리로 고친 어긋남과 안내선 */
 	const snapMove = (z, dx, dy) => {
@@ -1206,8 +1231,13 @@
 			return b;
 		};
 		const x = z.x0 + dx, y = z.y0 + dy;
-		const bx = best([x, x + z.w / 2, x + z.w], z.xs), by = best([y, y + z.h / 2, y + z.h], z.ys);
-		return { dx: dx + (bx ? bx.d : 0), dy: dy + (by ? by.d : 0), gx: bx?.at, gy: by?.at };
+		let bx = best([x, x + z.w / 2, x + z.w], z.xs), by = best([y, y + z.h / 2, y + z.h], z.ys);
+		// 가장자리 · 가운데 붙기보다 같은 간격 자리가 더 가까우면 그쪽에 붙는다
+		const ex = snapGap(z, "x", x, y), ey = snapGap(z, "y", y, x);
+		const segs = [];
+		if (ex && (!bx || Math.abs(ex.d) < Math.abs(bx.d))) { bx = { d: ex.d }; segs.push(...ex.segs.map((s) => ["h", ...s])); }
+		if (ey && (!by || Math.abs(ey.d) < Math.abs(by.d))) { by = { d: ey.d }; segs.push(...ey.segs.map((s) => ["v", ...s])); }
+		return { dx: dx + (bx ? bx.d : 0), dy: dy + (by ? by.d : 0), gx: bx?.at, gy: by?.at, segs };
 	};
 	/** 크기를 끄는 중 움직이는 변이 붙을 자리 — 붙으면 그때의 너비 · 높이(w · h)와 안내선 자리. k2 는 Ctrl(가운데 기준)이면 2: 한 변이 d 움직이면 크기는 2d 바뀐다 */
 	const snapSize = (s, d, w, h, k2, ratio) => {
@@ -1243,6 +1273,13 @@
 	const showGuides = (z, g) => {
 		Object.assign(gx.style, g?.gx != null ? { display: "block", left: z.S.left + g.gx - 0.5 + "px", top: z.S.top + "px", width: "1px", height: z.S.height + "px" } : { display: "none" });
 		Object.assign(gy.style, g?.gy != null ? { display: "block", top: z.S.top + g.gy - 0.5 + "px", left: z.S.left + "px", height: "1px", width: z.S.width + "px" } : { display: "none" });
+		gaps.forEach((el, i) => {
+			const s = g?.segs?.[i];
+			el.className = "gap" + (s ? " " + s[0] : "");
+			Object.assign(el.style, !s ? { display: "none" } : s[0] === "h"
+				? { display: "block", left: z.S.left + s[1] + "px", top: z.S.top + s[3] + "px", width: s[2] - s[1] + "px", height: "" }
+				: { display: "block", top: z.S.top + s[1] + "px", left: z.S.left + s[3] + "px", height: s[2] - s[1] + "px", width: "" });
+		});
 	};
 
 	addEventListener("pointerdown", (e) => {
