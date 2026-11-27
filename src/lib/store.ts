@@ -75,8 +75,9 @@ export interface Turn {
  * owner — 그 세션을 쓰는 팀원 기기 (2026.11.27). 없으면 덱 주인 묶음(덱 주인 · 브라우저 팀원).
  *   덱 주인이 「세션 공유」를 켜지 않으면(기본) 앱 팀원은 자기 PC 의 Claude 로 자기 세션 묶음만 쓴다 — 고르기 · 확정 · 「지금 대화」 모두 묶음 안에서 (routeOf pool).
  *   켜면 전처럼 묶음 없이 모두가 한 세션들을 이어 쓴다
+ * by — 그 세션을 연 사람의 이름 (2026.11.27). 세션 공유면 owner 가 비어 누구 대화인지 알 길이 없었다. 옛 세션은 첫 턴의 by 로 본다 (sessionBy)
  */
-export interface Session { key: string; claude: string | null; at: number; owner?: string }
+export interface Session { key: string; claude: string | null; at: number; owner?: string; by?: string }
 /** 협업 브라우저에서 온 요청 — by 는 서버가 정한 기기 이름. onStart 는 턴이 만들어지자마자(끝나기 전에) 부른다 */
 export interface SendFrom { by: string; current: string | null; talkKey: string | null; pins: Pin[]; onStart?: (r: { key: string; via?: number; turn: string }) => void;
 	/** 보낸 팀원의 PC 에서 Claude 를 돌린다 — 그 기기 id (collab.ts 가 그 기기가 붙어 있는지 본다) */
@@ -376,7 +377,9 @@ export const persistTalk = (dir: string, st: Pick<S, "turns" | "sessions" | "bin
 	return api.writeText(dir, ".claudeppt/talk.json", JSON.stringify(file, null, 1)).catch(() => {});
 };
 /** 다음 세션 — s1 · s2 … (번호는 묶음과 상관없이 덱 하나에서 이어 간다). pool 이 팀원 기기면 그 사람 세션 */
-export const nextSession = (list: Session[], pool?: string): Session => ({ key: "s" + (Math.max(0, ...list.map((x) => Number(x.key.slice(1)) || 0)) + 1), claude: null, at: Date.now(), ...(pool ? { owner: pool } : {}) });
+export const nextSession = (list: Session[], pool?: string, by?: string): Session => ({ key: "s" + (Math.max(0, ...list.map((x) => Number(x.key.slice(1)) || 0)) + 1), claude: null, at: Date.now(), ...(pool ? { owner: pool } : {}), ...(by ? { by } : {}) });
+/** 세션을 연 사람 — 적어 둔 이름, 없으면(옛 세션) 그 세션 첫 턴을 보낸 사람 */
+export const sessionBy = (s: Session, turns: Turn[], first?: string) => s.by || turns.find((x) => (x.session ?? first) === s.key && x.by)?.by || "";
 /** 덱 주인 화면이 쓰는 묶음 — 세션 공유를 켰으면 묶음 없이, 아니면 덱 주인 묶음("") */
 export const hostPool = (): string | undefined => (useSettings.getState().s.collab.shareClaude ? undefined : "");
 /** 그 묶음의 세션인가 — pool 이 없으면(세션 공유) 모두 */
@@ -617,7 +620,7 @@ async function sendTurn(get: () => S, set: (p: Partial<S>) => void, text: string
 	let { sessions } = get();
 	let key = route.key;
 	if (!key) {
-		const ns = nextSession(sessions, pool);
+		const ns = nextSession(sessions, pool, from ? from.by : me());
 		sessions = [...sessions, ns];
 		key = ns.key;
 		set({ sessions });
@@ -1045,7 +1048,7 @@ export const useDeck = create<S>()((set, get) => ({
 		if (!dir) return;
 		// 지금 대화가 아직 한 번도 쓰이지 않았으면 새로 만들지 않는다 — 빈 세션이 쌓이지 않게
 		const cur = sessions.find((x) => x.key === talkKey);
-		const ns = cur && inPool(cur, hostPool()) && !cur.claude && !turns.some((t) => t.session === cur.key) ? cur : nextSession(sessions, hostPool());
+		const ns = cur && inPool(cur, hostPool()) && !cur.claude && !turns.some((t) => t.session === cur.key) ? cur : nextSession(sessions, hostPool(), me());
 		if (ns !== cur) set({ sessions: [...sessions, ns], talkKey: ns.key });
 		persistTalk(dir, get());
 		get().notify(tNow("newTalkDone").replace("{n}", ns.key.slice(1)), "ok");

@@ -374,7 +374,7 @@ onIntent("newTalk", async (from, a) => {
 	const pool = useSettings.getState().s.collab.shareClaude ? undefined : m?.app && from.device ? from.device : "";
 	const cur = st.sessions.find((x) => x.key === a.talkKey);
 	if (cur && inPool(cur, pool) && !cur.claude && !st.turns.some((t) => t.session === cur.key)) return { key: cur.key };
-	const ns = nextSession(st.sessions, pool);
+	const ns = nextSession(st.sessions, pool, from.name);
 	useDeck.setState({ sessions: [...st.sessions, ns] });
 	persistTalk(st.dir, useDeck.getState());
 	return { key: ns.key };

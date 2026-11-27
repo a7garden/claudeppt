@@ -20,7 +20,7 @@ import { CommentsButton } from "./Collab";
 import { copyText, openMenu } from "./ContextMenu";
 import { SLIDE_MIME, SlideFrame } from "./Workspace";
 import { useSettings } from "../lib/settings";
-import { bindKey, inPool, isMine, routeOf, type Turn, useDeck } from "../lib/store";
+import { bindKey, inPool, isMine, sessionBy, type Turn, useDeck } from "../lib/store";
 import { noteDraft } from "../lib/updater";
 import { appWindow, remote } from "../lib/transport";
 import { useCollab, useMine, usePool, useRole } from "../lib/collab";
@@ -33,7 +33,12 @@ function usePoolSessions() {
 	const raw = useDeck((s) => s.talkKey);
 	const sessions = useMemo(() => all.filter((x) => inPool(x, pool)), [all, pool]);
 	const talkKey = raw && sessions.some((x) => x.key === raw) ? raw : sessions.at(-1)?.key ?? null;
-	return { pool, sessions, talkKey, all };
+	// 세션을 연 사람 (2026.11.27) — 보이는 세션을 연 사람이 둘 이상일 때만 이름을 붙인다. 혼자 쓰면 모두 같은 이름이라 군말이다
+	const turns = useDeck((s) => s.turns);
+	const owners = useMemo(() => new Map(sessions.map((x) => [x.key, sessionBy(x, turns, all[0]?.key)])), [sessions, turns, all]);
+	const mixed = new Set([...owners.values()].filter(Boolean)).size > 1;
+	const ownerOf = (key: string | null) => (mixed && key ? owners.get(key) || "" : "");
+	return { pool, sessions, talkKey, all, ownerOf };
 }
 
 /** 사이드바 접힘 — 보는 사람의 편의라 이 PC 에만 남긴다. seen 은 접을 때 본 마지막 턴(그 뒤 끝난 턴이 「새 답」) */
@@ -59,7 +64,7 @@ export function openTalk(focus = true) {
 export default function Talk() {
 	const t = useT();
 	const all = useDeck((s) => s.turns);
-	const { pool, sessions, talkKey, all: allSessions } = usePoolSessions();
+	const { pool, sessions, talkKey, all: allSessions, ownerOf } = usePoolSessions();
 	const versions = useDeck((s) => s.versions);
 	const folded = useTalkFold((s) => s.folded);
 	const [list, setList] = useState(false);
@@ -98,9 +103,9 @@ export default function Talk() {
 					{/* 지금 보는 대화 — 누르면 대화 목록(지난 대화로 돌아간다). 대화가 하나뿐이면 이름만 */}
 					{talkKey && sessions.length > 1 ? (
 						<button className={"talk-sess" + (list ? " on" : "")} onClick={() => setList(!list)} aria-expanded={list} title={t("sessionList")}>
-							{t("sessionN").replace("{n}", talkKey.slice(1))}<span aria-hidden>▾</span>
+							{t("sessionN").replace("{n}", talkKey.slice(1))}{ownerOf(talkKey) && <em className="who">{ownerOf(talkKey)}</em>}<span aria-hidden>▾</span>
 						</button>
-					) : <b>{t("talk")}</b>}
+					) : <b>{t("talk")}{ownerOf(talkKey) && <em className="who">{ownerOf(talkKey)}</em>}</b>}
 					{/* 지금 판 번호는 제목 줄에 있다 — 여기서는 이 대화의 턴 수만 */}
 					{turns.length > 0 && <span className="mono">{turns.length}{t("talkTurns")}</span>}
 					{/* 협업 중이면 덱의 열린 의견 — 누가 · 몇 쪽 · 무엇 (Collab.tsx) */}
@@ -205,7 +210,7 @@ function EmptyTalk() {
  *  누르면 그 세션의 대화를 보고, 처음 고치는 쪽은 그 세션으로 간다 */
 function SessionList({ onClose }: { onClose: () => void }) {
 	const t = useT();
-	const { pool, sessions, talkKey, all: allSessions } = usePoolSessions();
+	const { pool, sessions, talkKey, all: allSessions, ownerOf } = usePoolSessions();
 	const turns = useDeck((s) => s.turns);
 	const bind = useDeck((s) => s.bind);
 	const deck = useDeck((s) => s.deck)!;
@@ -232,7 +237,7 @@ function SessionList({ onClose }: { onClose: () => void }) {
 				return (
 					<button key={s.key} role="option" aria-selected={on} className={on ? "on" : ""} onClick={() => { useDeck.getState().viewSession(s.key); onClose(); }}>
 						<span className="s">
-							<b>{t("sessionN").replace("{n}", s.key.slice(1))}</b>
+							<b>{t("sessionN").replace("{n}", s.key.slice(1))}{ownerOf(s.key) && <em className="who">{ownerOf(s.key)}</em>}</b>
 							<span>{first ? first.slice(0, 60) : t("sessionEmpty")}{nos.length ? ` · ${nos.join(" · ")}${t("slideN") === "쪽" ? "쪽" : ""}` : ""}</span>
 						</span>
 						<span className="d">{last ? `${last.by ? last.by + " · " : ""}${when(last.at)} · ${mine.length}${t("talkTurns")}` : ""}</span>
@@ -410,9 +415,6 @@ function Composer() {
 	const myName = useSettings((x) => x.s.me).trim();
 	const needName = team && !myName;
 	const saveName = (v: string) => { if (v.trim()) useSettings.getState().set((x) => ({ ...x, me: v.trim() })); };
-	// 보낼 곳 — 보내기와 같은 규칙(routeOf). 보고 있는 대화와 다른 세션으로 가면 그 까닭(그 쪽을 처음 고친 세션)을 보인다
-	const bind = useDeck((s) => s.bind);
-	const { pool, sessions, talkKey } = usePoolSessions();
 	// 쪽 목록 · 이어 보기에서 쪽을 끌어 요청칸 위에 올린 동안 — 놓으면 @쪽 이 들어간다
 	const [dropping, setDropping] = useState(false);
 	const mentionSlide = useDeck((s) => s.mentionSlide);
@@ -512,10 +514,10 @@ function Composer() {
 		return () => removeEventListener("keydown", k);
 	}, []);
 
-	// 보낼 글 — 범위를 앞에 붙인다. 세션 고르기(routeOf) · 보내기 모두 이 글로
+	// 보낼 글 — 범위를 앞에 붙인다
+	// 2026.11.27 : 요청칸 아래 「→ 대화 n」(보낼 대화 미리 보기)을 지웠다. 바꿀 수 없는 표시라 보내기 단추의 일부로 읽혔다.
+	//   보낼 대화는 보낼 때 routeOf 가 고르고, 보던 대화와 다르면 그 대화로 넘어가며 알림(routedTo)이 뜬다
 	const full = scope.length ? `${scope.join(" ")} ${text}` : text;
-	const route = useMemo(() => routeOf({ deck, current, pins, bind, sessions, talkKey }, full, pool), [deck, current, pins, bind, sessions, talkKey, full, team, pool]);
-	const routeText = !route.key ? t("routeNew") : (route.via ? t("routeVia").replace("{no}", String(route.via)) : t("routeTalk")).replace("{n}", route.key.slice(1));
 	// 협업을 켜면 세션마다 줄을 서므로 도는 중에도 보낼 수 있다. 꺼져 있으면 전처럼 도는 동안은 막는다
 	// 브라우저 팀원이 호스트와 끊겼으면 보내지 않는다 — 보낸 글이 어디에도 닿지 않고 사라졌다
 	const offline = useCollab((c) => remote && (!c.connected || c.ended));
@@ -637,13 +639,6 @@ function Composer() {
 					onKeyUp={(e) => { if (["ArrowLeft", "ArrowRight", "Home", "End"].includes(e.key)) sense(text, e.currentTarget.selectionStart); }} />
 				<div className="bar">
 					<ScopeLine text={text} setText={setText} ta={ta} scope={scope} setScope={setScope} addScope={addScope} toScope={toScope} />
-					{/* 보낼 곳(세션). 범위 줄이 「어디에」면 이것은 「어느 세션으로」. 세션이 생긴 뒤부터 보이고, 보고 있는 대화와 다른 세션으로 가면 진하게.
-					    줄에는 세션 번호만, 까닭(어느 쪽을 처음 고친 세션인지)은 툴팁에. 까닭까지 적으면 좁은 사이드바에서 범위 줄이 두 줄로 밀린다 */}
-					{team && sessions.length > 0 && (
-						<span className={"route" + (route.key && route.key !== talkKey ? " away" : "")} title={`${routeText}\n${t("sessionHint")}`}>
-							{route.key ? `→ ${t("sessionN").replace("{n}", route.key.slice(1))}` : `→ ${t("newTalk")}`}
-						</span>
-					)}
 					{ownOnly ? (
 						<span className={"runner-pick" + (hasRunner ? " on" : " lost")} title={hasRunner ? t("runnerOwnHint") : t("runnerNeed")}>{hasRunner ? t("runnerMine") : t("runnerLost")}</span>
 					) : hasRunner ? (

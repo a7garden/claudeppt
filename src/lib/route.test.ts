@@ -4,7 +4,7 @@ import { beforeAll, describe, expect, it, vi } from "vitest";
 // store 가 부르는 슬라이드 창 도구는 브라우저 창이 있어야 한다 — 여기서 쓰지 않으므로 비워 둔다
 vi.mock("./frames", () => ({ ask: vi.fn(), offscreen: vi.fn(), onFrame: vi.fn() }));
 import { DEFAULTS, useSettings } from "./settings";
-import { bindKey, inPool, nextSession, routeOf, type Session } from "./store";
+import { bindKey, inPool, nextSession, routeOf, sessionBy, type Session, type Turn } from "./store";
 import type { Deck } from "./deck";
 
 const deck: Deck = { format: "1", title: "t", size: { w: 1280, h: 720 }, slides: [{ id: "a", file: "slides/a.html" }, { id: "b", file: "slides/b.html" }] as Deck["slides"], theme: "theme.css", created: "", updated: "" };
@@ -40,5 +40,15 @@ describe("세션 묶음", () => {
 	it("새 세션은 그 사람 것으로, 번호는 덱 하나에서 이어 간다", () => {
 		expect(nextSession(sessions, "dev1")).toMatchObject({ key: "s4", owner: "dev1" });
 		expect(nextSession(sessions, "").owner).toBeUndefined();
+	});
+
+	it("세션을 연 사람은 적어 둔 이름, 옛 세션은 첫 턴을 보낸 사람", () => {
+		expect(nextSession(sessions, undefined, "정원")).toMatchObject({ key: "s4", by: "정원" });
+		expect(nextSession(sessions, undefined, "").by).toBeUndefined();
+		const turns = [{ id: "t1", session: "s2", by: "은채" }, { id: "t2", by: "정원" }] as Turn[];
+		expect(sessionBy({ key: "s2", claude: null, at: 0 }, turns, "s1")).toBe("은채");
+		expect(sessionBy({ key: "s1", claude: null, at: 0 }, turns, "s1")).toBe("정원");
+		expect(sessionBy({ key: "s3", claude: null, at: 0, by: "민수" }, turns, "s1")).toBe("민수");
+		expect(sessionBy({ key: "s3", claude: null, at: 0 }, turns, "s1")).toBe("");
 	});
 });

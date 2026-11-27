@@ -273,6 +273,8 @@ input, textarea, select { font: inherit; color: inherit; }
 .talk-head { position: relative; }
 .talk-sess { display: inline-flex; align-items: center; gap: 3px; height: 24px; padding: 0 7px; border-radius: var(--r-ctl); font-size: 12px; color: var(--text); outline: 1px solid var(--hair-2); outline-offset: -1px; }
 .talk-sess span { font-size: 9px; color: var(--faint); }
+/* 세션을 연 사람 — 연 사람이 둘 이상일 때만 대화 이름 뒤에 붙는다 */
+.talk-head .who, .pop.sessions .who { margin-left: 5px; font-style: normal; font-weight: 400; color: var(--dim); }
 .talk-sess:hover, .talk-sess.on { background: var(--hair); }
 .pop.sessions { top: 36px; left: 8px; right: 8px; width: auto; max-height: 50vh; overflow-y: auto; padding: 6px 4px; gap: 0; }
 .pop.sessions button { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 8px; align-items: center; padding: 7px 8px; border-radius: 6px; text-align: left; }
@@ -339,9 +341,8 @@ span.node.head:hover { color: var(--bg); background: var(--text); box-shadow: no
 /* 이름을 정하기 전 — 요청칸 위 한 줄. 정하면 사라진다 */
 .whoami { display: flex; align-items: center; gap: 8px; padding: 0 2px 8px; font-size: 12px; color: var(--dim); }
 .whoami .field { flex: 1; max-width: 200px; }
-/* 보낼 곳 — 요청칸 위 한 줄. 보고 있는 대화와 다른 세션으로 가면 진하게 */
-.box .bar .route { margin-left: auto; flex: none; white-space: nowrap; font-size: 11px; color: var(--faint); cursor: default; }
-.box .bar .route.away { color: var(--text); }
+/* 범위 줄은 왼쪽, Claude 고르기 · 보내기는 오른쪽에 붙인다 (보낼 대화 표시가 밀어 주던 자리) */
+.box .bar .runner-pick { margin-left: auto; }
 
 /* 접힌 대화 — 등뼈. 위: 펴기 · 가운데: 판 마디(새 판이 아래) · 아래: 핀 수 · 쓰기 */
 .spine { display: flex; flex-direction: column; align-items: center; gap: 6px; padding: 6px 0 12px; min-height: 0; }
