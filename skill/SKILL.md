@@ -116,7 +116,9 @@ $CPPT help
 | `<table>` | 표 |
 | `<img>` · 인라인 `<svg>` | 그림 (그림 · 아이콘 · 차트는 SVG 로) |
 | 그라데이션 · 바탕 그림 · 그림자 · `::before/::after` · 고르지 않은 모서리/테두리 · 목록 표식 | 바탕만 그림으로 굳고 그 위 글자는 편집 가능 |
-| transform/회전 · filter · blend · clip-path · text-shadow | **자식째** 그림으로 굳는다 (글자 편집 불가) |
+| 인라인 `transform: rotate(Ndeg)` 하나만 (표 없이) | 편집 가능한 도형 · 글을 PowerPoint 회전으로 |
+| `data-shape="triangle"` 등 + px `clip-path` (서식 띠 도형) · `data-arrow` 선 | PowerPoint 기본 도형 · 화살표 선 |
+| 그 밖의 transform · filter · blend · clip-path · text-shadow | **자식째** 그림으로 굳는다 (글자 편집 불가) |
 
 - 납작한 색 · 실선 · 글머리는 `<span>` 으로 — 그래야 글이 편집 가능하게 남는다.
 - PowerPoint 는 이 PC 에 깔린 글꼴만 쓴다 — `var(--font)` 를 쓰고 다른 글꼴을 들이지 않는다.

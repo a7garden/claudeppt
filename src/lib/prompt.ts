@@ -33,6 +33,7 @@ The exporter measures the rendered DOM and rebuilds it in PowerPoint:
 - <table> becomes a native PowerPoint table — use it for tabular data.
 - <img> and inline <svg> become pictures. Use SVG for illustrations, icons, charts and complex shapes.
 - Anything PowerPoint cannot draw natively is baked into a picture that looks identical but is no longer editable: gradients, background images, box-shadow, ::before/::after, uneven corners or borders, list markers, and — together with all their children — transforms/rotation, filters, blend modes, clip-path, text-shadow. Prefer flat colors, solid borders and explicit bullet spans so text stays editable.
+- Hand edits in the app leave markers: keep them when you edit. data-group (a group: children are absolutely positioned inside it), data-shape="<PowerPoint preset>" with a px clip-path (a triangle, block arrow …; resize by changing width/height and recomputing the polygon, or ask the user to resize it in the app), data-arrow (a line with an arrowhead). An inline transform that is only rotate(Ndeg) exports as a native rotated shape and stays editable.
 - PowerPoint only has fonts installed on this PC. Use the theme fonts (var(--font), var(--font-head)); do not introduce other web fonts.
 - Lay out with flex/grid or absolute positioning inside .slide; nothing may overflow 1280×720 or scroll.
 

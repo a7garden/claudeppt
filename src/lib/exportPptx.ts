@@ -8,6 +8,8 @@ import { installedNames } from "./fonts";
 import { ask, offscreen } from "./frames";
 
 const IN = (px: number) => px / 96;
+/** 서식 띠가 넣는 모양 도형 — rt.js GEOM 과 같은 이름 (PowerPoint 기본 도형 이름) */
+const GEOMS = new Set(["triangle", "rtTriangle", "diamond", "parallelogram", "trapezoid", "hexagon", "chevron", "homePlate", "rightArrow", "leftArrow", "upArrow", "downArrow"]);
 const PT = (px: number) => Math.round(px * 0.75 * 10) / 10;
 
 // PowerPoint 는 「정확히」 줄 간격에서 첫 줄 기준선을 글상자 위에서 약 0.716 × 줄 높이 + 0.089 × 글자 크기 아래에 둔다.
@@ -137,7 +139,9 @@ export async function buildPptx(deck: Deck, projectId: string, progress: (i: num
 			if (["box", "line", "image", "text", "table"].includes(it.type)) chains.push(it.g || []);
 			if (it.type === "box") {
 				const isRound = it.round;
-				const shape = isRound ? pptx.ShapeType.ellipse : it.radius > 0.5 ? pptx.ShapeType.roundRect : pptx.ShapeType.rect;
+				// 모양 도형(서식 띠의 삼각형 · 화살표 …)은 data-shape 이름이 곧 PowerPoint 도형 이름이다 (rt.js GEOM)
+				const geom = it.geom && GEOMS.has(it.geom) ? (it.geom as any) : null;
+				const shape = geom ?? (isRound ? pptx.ShapeType.ellipse : it.radius > 0.5 ? pptx.ShapeType.roundRect : pptx.ShapeType.rect);
 				// 선은 PowerPoint 가 도형 테두리 가운데에 긋는다 — CSS border(안쪽)와 같은 자리가 되게 도형을 선 두께 반만큼 줄인다.
 				// 2026.11.24 : 줄이지 않아 테두리 있는 상자가 PPTX 에서 선 두께만큼 커졌다
 				const g = it.line ? it.line.w / 2 : 0;
@@ -145,7 +149,8 @@ export async function buildPptx(deck: Deck, projectId: string, progress: (i: num
 					x: IN(it.x + g), y: IN(it.y + g), w: IN(Math.max(0, it.w - g * 2)), h: IN(Math.max(0, it.h - g * 2)),
 					fill: it.fill ? { color: it.fill.hex, transparency: Math.round((1 - it.fill.alpha) * 100) } : { type: "none" },
 					line: it.line ? { color: it.line.hex, width: PT(it.line.w), dashType: dashOf(it.line.dash), transparency: Math.round((1 - it.line.alpha) * 100) } : { type: "none" },
-					rectRadius: !isRound && it.radius > 0.5 ? IN(Math.max(0, Math.min(it.radius, Math.min(it.w, it.h) / 2) - g)) : undefined,
+					rectRadius: !geom && !isRound && it.radius > 0.5 ? IN(Math.max(0, Math.min(it.radius, Math.min(it.w, it.h) / 2) - g)) : undefined,
+					rotate: it.rot || undefined,
 					// 바깥 그림자 — 거리 · 방향은 x · y 어긋남에서, 흐림은 CSS blur 그대로 (가져오기가 blurRad 를 그대로 blur 로 썼다)
 					shadow: it.shadow ? {
 						type: "outer", color: it.shadow.hex, opacity: it.shadow.alpha, blur: PT(it.shadow.blur),
@@ -153,12 +158,14 @@ export async function buildPptx(deck: Deck, projectId: string, progress: (i: num
 					} : undefined,
 				} as any);
 			} else if (it.type === "line") {
+				// 선은 상자의 왼쪽 위 → 오른쪽 아래로 그어진다. 다른 방향(돌린 선 · 화살표)은 뒤집어 처음 · 끝을 맞춘다 — 화살촉이 끝에 서야 한다
 				slide.addShape(pptx.ShapeType.line, {
 					x: IN(Math.min(it.x1, it.x2)), y: IN(Math.min(it.y1, it.y2)), w: IN(Math.abs(it.x2 - it.x1)), h: IN(Math.abs(it.y2 - it.y1)),
-					line: { color: it.color, width: PT(it.w), dashType: dashOf(it.dash) },
-				});
+					flipH: it.x2 < it.x1 - 0.01 || undefined, flipV: it.y2 < it.y1 - 0.01 || undefined,
+					line: { color: it.color, width: PT(it.w), dashType: dashOf(it.dash), endArrowType: it.arrow === "end" || it.arrow === "both" ? "triangle" : undefined, beginArrowType: it.arrow === "both" ? "triangle" : undefined },
+				} as any);
 			} else if (it.type === "image") {
-				slide.addImage({ data: it.data.replace(/^data:/, ""), x: IN(it.x), y: IN(it.y), w: IN(it.w), h: IN(it.h), altText: it.alt || undefined });
+				slide.addImage({ data: it.data.replace(/^data:/, ""), x: IN(it.x), y: IN(it.y), w: IN(it.w), h: IN(it.h), altText: it.alt || undefined, rotate: it.rot || undefined });
 			} else if (it.type === "text") {
 				// PowerPoint 는 같은 글꼴도 브라우저보다 조금 넓게 그린다 — 줄바꿈이 달라지지 않게 너비를 4% 넓힌다 (정렬 방향 반대쪽으로)
 				const extra = it.w * 0.04;
@@ -174,6 +181,7 @@ export async function buildPptx(deck: Deck, projectId: string, progress: (i: num
 					x: IN(x), y: IN(it.y + shift), w: IN(it.w + extra), h: IN(Math.max(it.h, 1)),
 					margin: 0, valign: it.valign, align: it.align === "justify" ? "justify" : it.align, fit: "none", wrap: true,
 					lineSpacing: it.lineHeight ? PT(it.lineHeight) : undefined,
+					rotate: it.rot || undefined,
 				} as any);
 			} else if (it.type === "table") {
 				const rows = it.rows.map((row: any[]) => row.map((c) => ({

@@ -942,6 +942,10 @@ textarea.field { height: auto; padding: 8px 10px; line-height: 1.5; resize: vert
 .ribbon .rb-grid button[aria-pressed="true"] { background: color-mix(in srgb, var(--accent) 30%, transparent); outline-color: var(--accent); }
 .rb-sym { display: grid; grid-template-columns: repeat(8, 1fr); gap: 2px; }
 .ribbon .rb-sym button { height: 26px; min-width: 0; padding: 0; font-size: 14px; color: var(--text); }
+/* 도형 갤러리: 색 칸(rb-grid)보다 큰 단추에 선 그림 */
+.rb-shapes { grid-template-columns: repeat(6, 1fr); gap: 2px; margin-bottom: 10px; }
+.ribbon .rb-shapes button { height: 30px; outline: none; color: var(--text); }
+.ribbon .rb-shapes button svg { width: 18px; height: 18px; }
 .rb-pop { position: relative; display: inline-flex; }
 .rb-chip { position: relative; }
 .rb-bar { position: absolute; left: 7px; right: 16px; bottom: 3px; height: 3px; border-radius: 1px; outline: 1px solid var(--hair); }

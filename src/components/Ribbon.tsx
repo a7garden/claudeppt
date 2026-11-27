@@ -84,6 +84,9 @@ export interface SelInfo {
 	text: boolean;
 	/** 글자를 골랐다: 고치는 중 고른 글자, 또는 마치기 전에 골라 둔 글자 */
 	ranged: boolean;
+	/** 모양 도형 이름 (data-shape) · 화살표 */
+	geom: string | null;
+	arrow: boolean;
 	/** 함께 고른 수 (Shift · Ctrl 누르기 · 범위 끌기 · Ctrl+A). 서식 띠에 보이는 값은 첫째 것 */
 	count: number;
 	/** 그룹으로 묶을 수 있다 · 그룹을 풀 수 있다 */
@@ -114,6 +117,32 @@ const SPACINGS: [number, Key][] = [[-3, "rbSpVTight"], [-1.5, "rbSpTight"], [0, 
 const RADII: [string, Key][] = [["0", "rbRadius0"], ["6px", "rbRadiusS"], ["16px", "rbRadiusM"], ["32px", "rbRadiusL"], ["9999px", "rbRadiusFull"]];
 // 슬라이드에 자주 넣는 기호: 한글 문서에서 쓰는 원 번호 · 낫표 · 단위를 함께 둔다
 const SYMBOLS = "• · ※ → ← ↑ ↓ ↔ ⇒ ▶ ▷ ◀ ■ □ ● ○ ◆ ◇ ▲ △ ★ ☆ ✓ ✔ ✗ ① ② ③ ④ ⑤ ⑥ ㉠ ㉡ ㉢ ± × ÷ ≠ ≤ ≥ ° ℃ ㎡ ㎞ … 「 」 『 』".split(" ");
+// 도형 갤러리 — [넣을 것, 이름, 16×16 그림]. 모양 도형 이름은 PowerPoint 기본 도형 이름 그대로다 (rt.js GEOM · exportPptx GEOMS)
+const SHAPE_SETS: [Key, [string, Key, string][]][] = [
+	["rbShLines", [
+		["line", "rbLine", "M2 8h12"],
+		["arrow", "rbArrowLine", "M2 13L13 3M8 3h5v5"],
+	]],
+	["rbShBasic", [
+		["rect", "rbRect", "M2 3.5h12v9H2z"],
+		["round", "rbRound", "M5 3.5h6a3 3 0 0 1 3 3v3a3 3 0 0 1-3 3H5a3 3 0 0 1-3-3v-3a3 3 0 0 1 3-3z"],
+		["ellipse", "rbEllipse", "M8 3a6 5 0 1 1 0 10A6 5 0 1 1 8 3z"],
+		["triangle", "rbTriangle", "M8 2.5l6 11H2z"],
+		["rtTriangle", "rbRtTriangle", "M2.5 2.5v11h11z"],
+		["diamond", "rbDiamond", "M8 2l6 6-6 6-6-6z"],
+		["parallelogram", "rbParallelogram", "M5 3.5h9l-3 9H2z"],
+		["trapezoid", "rbTrapezoid", "M5 3.5h6l3 9H2z"],
+		["hexagon", "rbHexagon", "M2 8l3-5h6l3 5-3 5H5z"],
+	]],
+	["rbShArrows", [
+		["rightArrow", "rbRightArrow", "M2 6h7V3l5 5-5 5v-3H2z"],
+		["leftArrow", "rbLeftArrow", "M14 6H7V3L2 8l5 5v-3h7z"],
+		["upArrow", "rbUpArrow", "M6 14V7H3l5-5 5 5h-3v7z"],
+		["downArrow", "rbDownArrow", "M6 2v7H3l5 5 5-5h-3V2z"],
+		["homePlate", "rbHomePlate", "M2 4h8l4 4-4 4H2z"],
+		["chevron", "rbChevron", "M2 4h8l4 4-4 4H2l4-4z"],
+	]],
+];
 /** 쪽 1px → cm (96px = 1in = 2.54cm) */
 const CM = 2.54 / 96;
 const SHOWN_KEY = "claudeppt.ribbon";
@@ -514,15 +543,25 @@ function InsertTab({ t, info, send, insert, placing, win }: Ctx) {
 				<button className="wide" aria-pressed={placing === "text"} onClick={() => insert("text")} title={t("rbTextbox")}>
 					<Icon><rect x="2.5" y="3" width="11" height="10" rx="1" /><path d="M5.5 6h5M8 6v5" /></Icon>{t("rbTextbox")}
 				</button>
-				<button className="wide" aria-pressed={!!placing && placing !== "text"} title={t("rbShape")}
-					onClick={(e) => openMenu(e, [
-						{ label: t("rbRect"), checked: placing === "rect", run: () => insert("rect") },
-						{ label: t("rbRound"), checked: placing === "round", run: () => insert("round") },
-						{ label: t("rbEllipse"), checked: placing === "ellipse", run: () => insert("ellipse") },
-						{ label: t("rbLine"), checked: placing === "line", run: () => insert("line") },
-					])}>
-					<Icon><rect x="2" y="2.5" width="7" height="7" rx="1" /><circle cx="10.5" cy="10.5" r="3.5" /></Icon>{t("rbShape")}<Caret />
-				</button>
+				{/* 도형 갤러리 (PowerPoint 「도형」처럼 그림으로 고른다). 고른 뒤 쪽에서 끌어 그린다 */}
+				<Pop label={t("rbShape")} wide={<>{t("rbShape")}</>} current={null} icon={<Icon><rect x="2" y="2.5" width="7" height="7" rx="1" /><circle cx="10.5" cy="10.5" r="3.5" /></Icon>}>
+					{(close) => (
+						<>
+							{SHAPE_SETS.map(([head, list]) => (
+								<div key={head}>
+									<h4>{t(head)}</h4>
+									<div className="rb-grid rb-shapes">
+										{list.map(([k, name, d]) => (
+											<button key={k} aria-pressed={placing === k} onMouseDown={hold} onClick={() => { insert(k); close(); }} title={t(name)} aria-label={t(name)}>
+												<Icon d={d} />
+											</button>
+										))}
+									</div>
+								</div>
+							))}
+						</>
+					)}
+				</Pop>
 			</Grp>
 			<Grp label={t("rbSymbol")}>
 				{/* 기호는 글이 들어갈 자리가 있을 때만: 고르지 않았거나 글 덩이가 여럿인 상자면 넣을 곳이 없다 */}
@@ -579,7 +618,8 @@ function ShapeTab({ t, info, send, vars }: Ctx) {
 				<ColorPop label={t("rbFill")} current={info?.fill} disabled={none} vars={vars} onPick={(v) => send("fill", v)} onNone={() => send("fill", "transparent")}>
 					<Icon d="M3 9l5-5 5 5-5 5zM12.5 11.5c0 1 .7 1.5 1 1.5" />
 				</ColorPop>
-				<ColorPop label={t("rbOutline")} current={info?.line?.hex} disabled={none} vars={vars} onPick={(v) => send("line", { color: v })} onNone={() => send("line", { none: true })}
+				{/* 모양 도형(삼각형 · 화살표 …)은 잘라 그려서 테두리를 그을 수 없다 */}
+				<ColorPop label={t("rbOutline")} current={info?.arrow ? info.color : info?.line?.hex} disabled={none || !!info?.geom} vars={vars} onPick={(v) => send("line", { color: v })} onNone={() => send("line", { none: true })}
 					extra={
 						<>
 							<h4>{t("rbWeight")}</h4>

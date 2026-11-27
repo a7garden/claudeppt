@@ -238,6 +238,7 @@
 			cell: (!!el.closest?.("td, th") && root.contains(el.closest("td, th"))) || (!!lastCell && lastCell.isConnected && el.contains(lastCell)), painter: !!painter,
 			text: !!edit || !!textAt(el, null), ranged: ranged() || !!lastRange,
 			tag: el.tagName.toLowerCase(), editing: !!edit, box: canMove(b), abs: movable(b), flex: bs.display.includes("flex"), image: b.tagName === "IMG",
+			geom: b.getAttribute?.("data-shape") || null, arrow: b.hasAttribute?.("data-arrow") || false,
 			count: edit ? 1 : picks().length, groupable: !edit && canGroup(), grouped: !edit && !more.length && canUngroup(sel),
 			x: Math.round(br.x), y: Math.round(br.y), rot: rotOf(b), flipH: flipOf(b, "x"), flipV: flipOf(b, "y"),
 			size: parseFloat(s.fontSize), lh: Math.round((parseFloat(s.lineHeight) / parseFloat(s.fontSize)) * 100) / 100 || null, bold: +s.fontWeight >= 600, italic: s.fontStyle === "italic", underline: s.textDecorationLine.includes("underline"),
@@ -384,21 +385,53 @@
 		post({ t: "placing", kind: p ? p.kind : null });
 	};
 	const slideXY = (e) => { const S = root.getBoundingClientRect(); return [e.clientX - S.left, e.clientY - S.top]; };
-	/** 그리는 틀 — 선은 가로 · 세로 중 긴 쪽으로 곧게, Shift 면 정사각형 */
+	/** 그리는 틀 — 선은 가로 · 세로 중 긴 쪽으로 곧게, Shift 면 정사각형. 화살표는 아무 방향이나 (Shift 면 45° 씩) */
 	const placeRect = (e) => {
 		const [x, y] = slideXY(e), { x0, y0, kind } = place;
 		let w = x - x0, h = y - y0;
 		if (kind === "line") { if (Math.abs(w) >= Math.abs(h)) h = 0; else w = 0; }
+		else if (kind === "arrow") {
+			if (e.shiftKey) { const L = Math.hypot(w, h), a = Math.round(Math.atan2(h, w) / (Math.PI / 4)) * (Math.PI / 4); w = Math.cos(a) * L; h = Math.sin(a) * L; }
+			return { x: Math.min(x0, x0 + w), y: Math.min(y0, y0 + h), w: Math.abs(w), h: Math.abs(h), dx: w, dy: h };
+		}
 		else if (e.shiftKey) { const m = Math.max(Math.abs(w), Math.abs(h)); w = Math.sign(w || 1) * m; h = Math.sign(h || 1) * m; }
 		return { x: Math.min(x0, x0 + w), y: Math.min(y0, y0 + h), w: Math.abs(w), h: Math.abs(h) };
 	};
 	// 도형 — 글은 안쪽 <p> 에 둔다. 가운데 맞춤을 flex 로 하는데, 글을 flex 상자에 바로 넣으면 Shift+Enter 의 <br> 가 줄을 못 바꾼다.
 	// 내보낼 때 바깥 상자는 PowerPoint 도형, <p> 는 그 위 글상자가 되어 한 그룹으로 묶인다
 	const SHAPE = "display:flex;align-items:center;justify-content:center;text-align:center;padding:12px 16px;background:var(--accent, #2f6fde);color:var(--paper, #fff)";
+	// 모양 도형 — PowerPoint 기본 도형과 같은 꼭짓점을 px 로 잘라 그린다 (clip-path). 내보낼 때 data-shape 이름 그대로 PowerPoint 도형이 되어 PowerPoint 에서도 고칠 수 있다.
+	// 꼭짓점은 PowerPoint 도형 정의의 기본 조절값을 따랐다 (화살촉 · 모서리는 짧은 변 s 의 비율). 크기를 바꾸면 다시 깎는다 (reshape)
+	const GEOM = {
+		triangle: (w, h) => [[w / 2, 0], [w, h], [0, h]],
+		rtTriangle: (w, h) => [[0, h], [0, 0], [w, h]],
+		diamond: (w, h) => [[w / 2, 0], [w, h / 2], [w / 2, h], [0, h / 2]],
+		parallelogram: (w, h, s) => [[0, h], [s / 4, 0], [w, 0], [w - s / 4, h]],
+		trapezoid: (w, h, s) => [[0, h], [s / 4, 0], [w - s / 4, 0], [w, h]],
+		hexagon: (w, h, s) => [[0, h / 2], [s / 4, 0], [w - s / 4, 0], [w, h / 2], [w - s / 4, h], [s / 4, h]],
+		chevron: (w, h, s) => [[0, 0], [w - s / 2, 0], [w, h / 2], [w - s / 2, h], [0, h], [s / 2, h / 2]],
+		homePlate: (w, h, s) => [[0, 0], [w - s / 2, 0], [w, h / 2], [w - s / 2, h], [0, h]],
+		rightArrow: (w, h, s) => [[0, h / 4], [w - s / 2, h / 4], [w - s / 2, 0], [w, h / 2], [w - s / 2, h], [w - s / 2, (h * 3) / 4], [0, (h * 3) / 4]],
+		leftArrow: (w, h, s) => [[0, h / 2], [s / 2, 0], [s / 2, h / 4], [w, h / 4], [w, (h * 3) / 4], [s / 2, (h * 3) / 4], [s / 2, h]],
+		upArrow: (w, h, s) => [[0, s / 2], [w / 2, 0], [w, s / 2], [(w * 3) / 4, s / 2], [(w * 3) / 4, h], [w / 4, h], [w / 4, s / 2]],
+		downArrow: (w, h, s) => [[w / 4, 0], [(w * 3) / 4, 0], [(w * 3) / 4, h - s / 2], [w, h - s / 2], [w / 2, h], [0, h - s / 2], [w / 4, h - s / 2]],
+	};
+	const clipOf = (kind, w, h) => `polygon(${GEOM[kind](w, h, Math.min(w, h)).map(([x, y]) => `${Math.round(x * 10) / 10}px ${Math.round(y * 10) / 10}px`).join(", ")})`;
+	/** 모양 도형의 크기가 바뀌었으면 다시 깎을 style (아니면 빈 것) */
+	const reshape = (el) => { const k = el.getAttribute?.("data-shape"); return GEOM[k] ? { "clip-path": clipOf(k, el.offsetWidth, el.offsetHeight) } : {}; };
+	// 화살표 — 가로 선 하나에 촉(<i>)을 달고 돌려서 방향을 낸다. 선 · 촉 색은 color 하나(currentColor)라 윤곽선 색을 바꾸면 함께 바뀐다
+	const arrowHtml = (at, len, deg, t = 2) => `<div data-arrow="end" style="${at}width:${P(len)};height:0;color:var(--ink, #222);border-top:${t}px solid currentColor${deg ? `;transform:rotate(${Math.round(deg * 10) / 10}deg)` : ""}"><i style="${arrowHead(t)}"></i></div>`;
+	const arrowHead = (t) => `position:absolute;right:-1px;top:${P(-(t / 2) - 3 - t * 2)};width:0;height:0;border-left:${P(6 + t * 4)} solid currentColor;border-top:${P(3 + t * 2)} solid transparent;border-bottom:${P(3 + t * 2)} solid transparent`;
 	const makeEl = (kind, r) => {
 		const at = `position:absolute;left:${P(r.x)};top:${P(r.y)};`;
 		const t = document.createElement("template");
 		if (kind === "text") t.innerHTML = `<div style="${at}width:${P(r.w)}"><br></div>`;
+		else if (kind === "arrow") {
+			// 끈 두 점의 가운데에 길이만큼 가로 선을 두고 돌린다 — 가운데를 축으로 도니 양 끝이 끈 자리에 온다
+			const len = Math.max(8, Math.hypot(r.dx, r.dy)), deg = (Math.atan2(r.dy, r.dx) * 180) / Math.PI, cx = r.x + r.w / 2, cy = r.y + r.h / 2;
+			t.innerHTML = arrowHtml(`position:absolute;left:${P(cx - len / 2)};top:${P(cy - 1)};`, len, deg);
+		}
+		else if (GEOM[kind]) t.innerHTML = `<div data-shape="${kind}" style="${at}width:${P(r.w)};height:${P(r.h)};box-sizing:border-box;${SHAPE};clip-path:${clipOf(kind, r.w, r.h)}"><p style="margin:0;width:100%"></p></div>`;
 		else if (kind === "line") t.innerHTML = r.h > r.w
 			? `<div style="${at}width:0;height:${P(r.h)};border-left:var(--stroke, 2px) solid var(--ink, #222)"></div>`
 			: `<div style="${at}width:${P(r.w)};height:0;border-top:var(--stroke, 2px) solid var(--ink, #222)"></div>`;
@@ -408,9 +441,9 @@
 	const finishPlace = (e) => {
 		const p = place;
 		let r = placeRect(e);
-		const D = { text: [360, 0], line: [240, 0], rect: [200, 120], round: [200, 120], ellipse: [160, 160] }[p.kind] || [200, 120];
+		const D = { text: [360, 0], line: [240, 0], arrow: [240, 0], rect: [200, 120], round: [200, 120], ellipse: [160, 160], triangle: [160, 140], rtTriangle: [160, 140], diamond: [160, 160], hexagon: [180, 150], upArrow: [100, 180], downArrow: [100, 180] }[p.kind] || [200, 120];
 		// 누르기만 했다 — 누른 자리를 왼쪽 위로 기본 크기
-		if (r.w < 6 && r.h < 6) r = { x: p.x0, y: p.y0, w: D[0], h: D[1] };
+		if (r.w < 6 && r.h < 6) r = { x: p.x0, y: p.y0, w: D[0], h: D[1], dx: D[0], dy: D[1] };
 		else if (p.kind === "text") r.w = Math.max(r.w, 40);
 		setPlace(null);
 		const el = makeEl(p.kind, r);
@@ -559,6 +592,13 @@
 	 *  늘 묶음 속성(border · border-top …) 전체를 다시 쓴다. `border: 1px solid var(--line)` 처럼 CSS 변수가 든 묶음에서
 	 *  border-top-width 하나만 바꾸면 브라우저가 나머지 낱 속성을 빈 값으로 만들어 원본에 `border-top-style: ;` 가 남고 선이 사라진다 (2026.11.25 실측) */
 	const setLine = (el, v) => {
+		// 화살표: 선 · 촉이 color 하나를 같이 쓴다. 두께는 선과 촉 크기를 함께, 없음은 고르지 않는다(지우기로)
+		if (el.hasAttribute("data-arrow")) {
+			if (v.color) setStyle(el, { color: v.color });
+			if (v.dash) setStyle(el, { "border-top-style": v.dash });
+			if (v.width) together(() => { const head = el.querySelector(":scope > i"); setStyle(el, { "border-top-width": P(v.width) }); if (head) { head.setAttribute("style", arrowHead(v.width)); rewrite(el); } });
+			return;
+		}
 		if (v.none) return setStyle(el, { border: "none" });
 		const s = css(el), all = ["top", "right", "bottom", "left"];
 		const on = all.filter((k) => s.getPropertyValue(`border-${k}-style`) !== "none" && parseFloat(s.getPropertyValue(`border-${k}-width`)) > 0);
@@ -999,7 +1039,12 @@
 		// 그림자는 바깥 그림자 하나: 내보낼 때 PowerPoint 도형 그림자로 그대로 간다 (simpleShadow)
 		else if (cmd === "shadow") setStyle(b, { "box-shadow": v ? "0 4px 14px rgba(0,0,0,0.22)" : "none" });
 		else if (cmd === "opacity") setStyle(b, { opacity: v >= 100 ? "" : String(v / 100) });
-		else if (cmd === "dim") { if (canMove(b)) setStyle(b, Object.fromEntries(Object.entries(v).map(([k, x]) => [k, P(x)]))); }
+		else if (cmd === "dim") {
+			if (!canMove(b)) return;
+			// 칸의 값은 그린 크기(테두리 · 안쪽 여백 포함)다. 안쪽 여백이 있는 상자에 그대로 쓰면 여백만큼 커진다 — 지금 그린 크기와의 차이만큼 고친다
+			for (const [k, x] of Object.entries(v)) { const cur = k === "width" ? b.offsetWidth : b.offsetHeight; b.style.setProperty(k, P((parseFloat(css(b)[k]) || 0) + x - cur)); }
+			setStyle(b, { ...Object.fromEntries(Object.keys(v).map((k) => [k, b.style.getPropertyValue(k)])), ...reshape(b) });
+		}
 		else if (cmd === "cut") { if (sel) { copy(); removeSel(); } }
 		else if (cmd === "color") { if (ranged()) exec("foreColor", rgbOf(v)); else textStyle(el, { color: v }); }
 		// 글자 크기는 pt 로 받는다 (PowerPoint 와 같은 수). 쪽 1px = 0.75pt
@@ -1194,7 +1239,12 @@
 	addEventListener("pointerup", (e) => {
 		if (place && place.x0 != null) return finishPlace(e);
 		if (size) {
-			if (size.props.size) { keep(size.el); post({ t: "patch", path: pathOf(size.el), style: posPatch(size.el, size.props) }); }
+			if (size.props.size) {
+				const cut = reshape(size.el);
+				for (const [k, v] of Object.entries(cut)) size.el.style.setProperty(k, v);
+				keep(size.el);
+				post({ t: "patch", path: pathOf(size.el), style: { ...posPatch(size.el, size.props), ...cut } });
+			}
 			size = null;
 			// 서식 띠의 크기 · 위치 칸이 끈 뒤의 값을 보이게 (전에는 다른 것을 고를 때까지 옛 값이 남았다)
 			announce();
@@ -1651,7 +1701,7 @@
 	const needsDeep = (el, s) =>
 		["IMG", "CANVAS", "VIDEO", "PICTURE", "svg"].includes(el.tagName) ||
 		s.transform !== "none" || s.filter !== "none" || (s.backdropFilter && s.backdropFilter !== "none") || s.mixBlendMode !== "normal" ||
-		s.clipPath !== "none" || (s.maskImage && s.maskImage !== "none") || (s.webkitMaskImage && s.webkitMaskImage !== "none") ||
+		(s.clipPath !== "none" && !GEOM[el.getAttribute?.("data-shape")]) || (s.maskImage && s.maskImage !== "none") || (s.webkitMaskImage && s.webkitMaskImage !== "none") ||
 		s.textShadow !== "none" || s.writingMode !== "horizontal-tb" || s.backgroundClip === "text" || s.webkitBackgroundClip === "text" ||
 		(s.display === "list-item" && s.listStyleType !== "none");
 	/** 바깥 그림자 하나(안쪽 · 퍼짐 없음) — PowerPoint 도형 그림자로 그대로 옮긴다. 그 밖의 그림자는 null (상자를 굽는다).
@@ -1782,6 +1832,23 @@
 		// PowerPoint 그룹으로 묶는다 (exportPptx.ts groupSlides). 카드 하나가 상자 · 제목 · 본문으로 흩어지면 옮길 때 하나씩 끌어야 했다
 		const groups = {};
 		let gid = 0;
+		/** 도형 하나를 (cx, cy) 를 축으로 deg 만큼 돌린다 — 가운데 자리를 옮기고 PowerPoint 회전 각을 더한다. 선은 두 끝을 옮긴다 */
+		const turnItem = (it, cx, cy, deg) => {
+			const a = (deg * Math.PI) / 180, cs = Math.cos(a), sn = Math.sin(a);
+			const rot = (x, y) => [cx + (x - cx) * cs - (y - cy) * sn, cy + (x - cx) * sn + (y - cy) * cs];
+			if (it.type === "line") { [it.x1, it.y1] = rot(it.x1, it.y1); [it.x2, it.y2] = rot(it.x2, it.y2); return; }
+			const [nx, ny] = rot(it.x + it.w / 2, it.y + it.h / 2);
+			it.x = nx - it.w / 2;
+			it.y = ny - it.h / 2;
+			it.rot = (((it.rot || 0) + deg) % 360 + 360) % 360;
+		};
+		/** 돌리기만 한 요소의 각도 — 인라인 transform 이 rotate() 하나뿐이고 표가 없을 때. 아니면 0 (전처럼 굽는다) */
+		const spinOf = (ch) => {
+			if (!ch.style?.transform) return 0;
+			const p = tfOf(ch);
+			if (!p.rot || p.x || p.y || p.rest || ch.querySelector("table")) return 0;
+			return p.rot;
+		};
 		const visit = async (el, chain) => {
 			for (const ch of el.children) {
 				if (!(ch instanceof Element) || ch.tagName === "SCRIPT" || ch.tagName === "STYLE" || !visible(ch)) continue;
@@ -1795,9 +1862,26 @@
 				for (let k = start; k < items.length; k++) if (!items[k].g) items[k].g = me;
 			}
 		};
-		const one = async (ch, me) => {
+		const one = async (ch, me, spun) => {
+			// 돌린 요소 (회전 손잡이 · 서식 띠가 단 rotate 하나) — 돌리기를 잠시 풀고 재어, 그 안에서 나온 도형을 가운데를 축으로 돌려 PowerPoint 회전으로 넘긴다.
+			// 그림으로 굽지 않으니 PowerPoint 에서도 글 · 도형을 고칠 수 있다. 뒤집기 · 다른 변형이 섞였거나 표가 들었으면 전처럼 통째로 굽는다 (2026.11.27)
+			const deg = spun ? 0 : spinOf(ch);
+			if (deg) {
+				const old = ch.style.transform, c0 = ch.getBoundingClientRect(), cx = c0.left + c0.width / 2 - S.left, cy = c0.top + c0.height / 2 - S.top;
+				const start = items.length;
+				ch.style.transform = "none";
+				try { await one(ch, me, true); } finally { ch.style.transform = old; }
+				for (let k = start; k < items.length; k++) turnItem(items[k], cx, cy, deg);
+				return;
+			}
 			const s = css(ch), r = R(ch.getBoundingClientRect()), op = opacityOf(ch);
 			if (r.w < 0.5 || r.h < 0.5) return;
+			// 화살표 — 끝에 촉이 달린 PowerPoint 선 하나 (촉 <i> 는 따로 넘기지 않는다)
+			if (ch.hasAttribute("data-arrow")) {
+				const c = color(s.color) || color(s.borderTopColor), w = parseFloat(s.borderTopWidth) || 2;
+				if (c) items.push({ type: "line", x1: r.x, y1: r.y + w / 2, x2: r.x + r.w, y2: r.y + w / 2, color: c.hex, w, dash: s.borderTopStyle, arrow: ch.getAttribute("data-arrow") });
+				return;
+			}
 			// 통째로 굽기 — 그 요소와 자식이 한 장의 그림이 된다
 			if (needsDeep(ch, s)) {
 				const pad = overflowOf(s), box = clipped(ch, { x: r.x - pad, y: r.y - pad, w: r.w + pad * 2, h: r.h + pad * 2 });
@@ -1817,7 +1901,8 @@
 			const sides = ["Top", "Right", "Bottom", "Left"].map((k) => (parseFloat(s["border" + k + "Width"]) || 0) > 0 && s["border" + k + "Style"] !== "none");
 			const full = sides.every(Boolean);
 			if (!shallow && (fill || (full && bc && bw))) {
-				items.push({ type: "box", ...r, fill: fill ? { ...fill, alpha: fill.alpha * op } : null, line: full && bc && bw ? { ...bc, w: bw, dash: s.borderTopStyle } : null, radius: parseFloat(s.borderTopLeftRadius) || 0, round: s.borderTopLeftRadius.includes("%") && parseFloat(s.borderTopLeftRadius) >= 50, shadow: simpleShadow(s) });
+				const geom = GEOM[ch.getAttribute("data-shape")] ? ch.getAttribute("data-shape") : undefined;
+				items.push({ type: "box", ...r, geom, fill: fill ? { ...fill, alpha: fill.alpha * op } : null, line: !geom && full && bc && bw ? { ...bc, w: bw, dash: s.borderTopStyle } : null, radius: parseFloat(s.borderTopLeftRadius) || 0, round: s.borderTopLeftRadius.includes("%") && parseFloat(s.borderTopLeftRadius) >= 50, shadow: simpleShadow(s) });
 			}
 			// 한 변만 그은 선 (구분선 · 밑줄 강조)
 			if (!shallow && !full) {
