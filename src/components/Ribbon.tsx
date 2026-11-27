@@ -85,6 +85,8 @@ export interface SelInfo {
 	text: boolean;
 	/** 글자를 골랐다: 고치는 중 고른 글자, 또는 마치기 전에 골라 둔 글자 */
 	ranged: boolean;
+	/** 표 칸이 합쳐져 있다 (나누기) */
+	merged: boolean;
 	/** 모양 도형 이름 (data-shape) · 화살표 */
 	geom: string | null;
 	arrow: boolean;
@@ -703,9 +705,30 @@ function TableTab({ t, info, send, vars }: Ctx) {
 					<Icon d="M3 4.5h10M6.5 4.5V3h3v1.5M4.5 4.5l.6 9h5.8l.6-9" />{t("rbTableDel")}
 				</button>
 			</Grp>
+			<Grp label={t("rbMerge")}>
+				{b("mergeRight", "rbMergeRight", "M2.5 4.5h11v7h-11zM6 8h4M8.5 6.5L10 8l-1.5 1.5")}
+				{b("mergeDown", "rbMergeDown", "M4.5 2.5h7v11h-7zM8 6v4M6.5 8.5L8 10l1.5-1.5")}
+				<button className="wide" disabled={!cell || !info?.merged} onMouseDown={hold} onClick={() => send("tbl", "split")} title={t("rbSplit")}>
+					<Icon d="M2.5 4.5h11v7h-11zM8 4.5v7" />{t("rbSplit")}
+				</button>
+			</Grp>
 			<Grp label={t("rbCellFill")}>
 				<ColorPop label={t("rbCellFill")} current={info?.fill} disabled={!cell} vars={vars} onPick={(v) => send("fill", v)} onNone={() => send("fill", "transparent")}>
 					<Icon d="M3 9l5-5 5 5-5 5zM12.5 11.5c0 1 .7 1.5 1 1.5" />
+				</ColorPop>
+				{/* 표 테두리 — 모든 칸의 네 변을 같게. 없음 · 색 · 두께 */}
+				<ColorPop label={t("rbTblBorder")} current={null} disabled={!cell} vars={vars} onPick={(v) => send("tbl", { border: { color: v } })} onNone={() => send("tbl", { border: { none: true } })}
+					extra={
+						<>
+							<h4>{t("rbWeight")}</h4>
+							<div className="rb-row">
+								{[1, 2, 3, 4].map((w) => (
+									<button key={w} className="rb-w" onMouseDown={hold} onClick={() => send("tbl", { border: { width: w } })} title={`${w}px`}><span style={{ height: w }} /></button>
+								))}
+							</div>
+						</>
+					}>
+					<Icon d="M2.5 2.5h11v11h-11zM2.5 8h11M8 2.5v11" />
 				</ColorPop>
 			</Grp>
 		</>

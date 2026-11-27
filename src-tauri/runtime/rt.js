@@ -240,6 +240,7 @@
 			text: !!edit || !!textAt(el, null), ranged: ranged() || !!lastRange,
 			tag: el.tagName.toLowerCase(), editing: !!edit, box: canMove(b), abs: movable(b), flex: bs.display.includes("flex"), image: b.tagName === "IMG",
 			geom: b.getAttribute?.("data-shape") || null, arrow: b.hasAttribute?.("data-arrow") || false,
+			merged: (() => { const td = el.closest?.("td, th") || (lastCell?.isConnected && el.contains(lastCell) ? lastCell : null); return !!td && (td.colSpan > 1 || td.rowSpan > 1); })(),
 			count: edit ? 1 : picks().length, groupable: !edit && canGroup(), grouped: !edit && !more.length && canUngroup(sel),
 			x: Math.round(br.x), y: Math.round(br.y), rot: rotOf(b), flipH: flipOf(b, "x"), flipV: flipOf(b, "y"),
 			size: parseFloat(s.fontSize), lh: Math.round((parseFloat(s.lineHeight) / parseFloat(s.fontSize)) * 100) / 100 || null, bold: +s.fontWeight >= 600, italic: s.fontStyle === "italic", underline: s.textDecorationLine.includes("underline"),
@@ -726,6 +727,21 @@
 		post({ t: "append", html: el.outerHTML });
 		select(el);
 	};
+	/** 표의 눈금 — 합친 칸이 덮는 자리까지 map[행][열] 에 그 칸을, pos 에 칸마다 시작 자리를 */
+	const grid = (table) => {
+		const map = [], pos = new Map();
+		[...table.rows].forEach((tr, r) => {
+			map[r] ||= [];
+			let c = 0;
+			for (const cell of tr.cells) {
+				while (map[r][c]) c++;
+				pos.set(cell, { r, c });
+				for (let dr = 0; dr < cell.rowSpan; dr++) for (let dc = 0; dc < cell.colSpan; dc++) (map[r + dr] ||= [])[c + dc] = cell;
+				c += cell.colSpan;
+			}
+		});
+		return { map, pos };
+	};
 	const tableOp = (how) => {
 		const at = edit ? edit.el : sel;
 		const td = at?.closest?.("td, th") || (lastCell?.isConnected && at?.contains(lastCell) ? lastCell : null);
@@ -753,6 +769,43 @@
 		} else if (how === "colDel") {
 			if (Math.max(...rows.map((x) => x.cells.length)) < 2) { post({ t: "remove", path: pathOf(table) }); table.remove(); return select(null); }
 			for (const row of rows) row.cells[ci]?.remove();
+		} else if (how === "mergeRight" || how === "mergeDown") {
+			// 오른쪽 · 아래로 붙은 칸들과 합친다 (PowerPoint 「셀 병합」). 붙은 칸들이 지금 칸의 높이(너비)를 꼭 맞게 덮고 같은 두께일 때만 — 그래야 네모가 된다.
+			// 글은 줄을 바꿔 잇는다
+			const g = grid(table), at = g.pos.get(td), right = how === "mergeRight";
+			const span = right ? td.rowSpan : td.colSpan, line = right ? at.c + td.colSpan : at.r + td.rowSpan;
+			const nbs = [...new Set(Array.from({ length: span }, (_, k) => (right ? g.map[at.r + k]?.[line] : g.map[line]?.[at.c + k])))];
+			const fits = nbs.length && nbs.every((x) => {
+				if (!x || x === td) return false;
+				const p = g.pos.get(x);
+				return right ? p.c === line && p.r >= at.r && p.r + x.rowSpan <= at.r + span && x.colSpan === nbs[0].colSpan
+					: p.r === line && p.c >= at.c && p.c + x.colSpan <= at.c + span && x.rowSpan === nbs[0].rowSpan;
+			});
+			if (!fits) return;
+			if (right) td.colSpan += nbs[0].colSpan; else td.rowSpan += nbs[0].rowSpan;
+			for (const nb of nbs) {
+				if ((nb.innerText || "").trim()) { if ((td.innerText || "").trim()) td.append(document.createElement("br")); td.append(...nb.childNodes); }
+				nb.remove();
+			}
+		} else if (how === "split") {
+			// 합친 칸을 다시 나눈다 — 칸마다 빈 칸을 채워 넣는다
+			if (td.colSpan < 2 && td.rowSpan < 2) return;
+			const g = grid(table), at = g.pos.get(td), cs = td.colSpan, rs = td.rowSpan;
+			td.colSpan = 1;
+			td.rowSpan = 1;
+			for (let k = 1; k < cs; k++) td.after(blank(td));
+			for (let r = at.r + 1; r < at.r + rs; r++) {
+				const row = rows[r];
+				if (!row) continue;
+				// 그 행에서 이 칸보다 오른쪽에서 시작하는 첫 칸 앞에 끼운다
+				const after = [...row.cells].find((c) => g.pos.get(c)?.c > at.c);
+				for (let k = 0; k < cs; k++) { const x = blank(td); if (after) after.before(x); else row.appendChild(x); }
+			}
+		} else if (how && typeof how === "object" && how.border) {
+			// 표 테두리 — 칸마다 네 변을 같게 (PowerPoint 표도 칸 테두리로 나간다). none 이면 걷는다
+			const v = how.border, s0 = css(td);
+			const w = v.width ?? (parseFloat(s0.borderBottomWidth) || 1), c = v.color ?? (s0.borderBottomStyle !== "none" ? s0.borderBottomColor : "var(--line, #c8c8c8)");
+			for (const c2 of table.querySelectorAll("td, th")) { if (v.none) c2.style.setProperty("border", "none"); else c2.style.setProperty("border", `${w}px solid ${c}`); }
 		}
 		select(table);
 		keep(table);
