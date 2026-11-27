@@ -455,6 +455,8 @@ function Stage() {
 		if (now && m.t === "key") return void (navKey(m.key) || toolKey(m.key));
 		if (now && m.t === "sel") { selNow.current = m.info; return setSelInfo(m.info); }
 		if (now && m.t === "placing") return setPlacing(m.kind);
+		// 고치는 중 띠의 잘라내기 · 복사: 고른 글자를 클립보드에 쓴다. 단추를 누른 직후라 사용자 활성이 남아 있어 쓸 수 있다
+		if (now && m.t === "clip") return void navigator.clipboard.writeText(String(m.text ?? "")).catch(() => {});
 		if (preview) return;
 		if (m.t === "undo") return void useDeck.getState().undo();
 		if (m.t === "redo") return void useDeck.getState().redo();

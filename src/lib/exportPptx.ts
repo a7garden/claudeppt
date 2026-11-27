@@ -166,7 +166,10 @@ export async function buildPptx(deck: Deck, projectId: string, progress: (i: num
 				// 위 맞춤일 때만 옮긴다 — 가운데 · 아래 맞춤은 PowerPoint 가 줄 묶음 전체를 상자 안에서 다시 놓는다
 				const shift = it.baseline != null && it.lineHeight && it.valign === "top" ? it.baseline - (PPT_BASE_LH * it.lineHeight + PPT_BASE_SZ * it.size0 + PPT_BASE_PX) : 0;
 				const runs = toRuns(it.runs, fonts);
-				if (it.bullet && runs[0]) (runs[0] as any).options.bullet = true;
+				// 글머리 문단 (서식 띠의 글머리 기호 · 번호): 내어쓰기는 rt.js 가 잰 표지 너비. 번호는 문단마다 글상자가 따로라 시작 번호를 준다
+				if (it.bullet && runs[0]) (runs[0] as any).options.bullet = it.bullet.num
+					? { type: "number", numberStartAt: it.bullet.num, indent: PT(it.bullet.indent) }
+					: { characterCode: (it.bullet.char.codePointAt(0) ?? 0x2022).toString(16).toUpperCase().padStart(4, "0"), indent: PT(it.bullet.indent) };
 				slide.addText(runs as any, {
 					x: IN(x), y: IN(it.y + shift), w: IN(it.w + extra), h: IN(Math.max(it.h, 1)),
 					margin: 0, valign: it.valign, align: it.align === "justify" ? "justify" : it.align, fit: "none", wrap: true,

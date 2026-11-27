@@ -891,8 +891,17 @@ textarea.field { height: auto; padding: 8px 10px; line-height: 1.5; resize: vert
 .share-foot button:hover { color: var(--err); }
 
 /* 서식 띠 (Ribbon.tsx) — 무대 맨 위 한 줄. 좁으면 다음 줄로 접힌다. 처음에는 접혀 있고 도구 띠의 「서식」(F)으로 편다 */
-.ribbon { position: relative; z-index: 4; display: flex; flex-wrap: wrap; align-items: center; gap: 1px; padding: 5px 6px 5px 8px; background: var(--raise); border-bottom: 1px solid var(--hair); animation: in 0.12s ease-out; }
-.ribbon.off > :not(.rb-close) { opacity: 0.4; pointer-events: none; }
+.ribbon { position: relative; z-index: 4; background: var(--raise); border-bottom: 1px solid var(--hair); animation: in 0.12s ease-out; }
+/* 탭 줄 · 도구 줄 (2026.11.27 PowerPoint 리본처럼 탭으로 나눴다) */
+.rb-tabs { display: flex; align-items: flex-end; gap: 2px; padding: 3px 6px 0 8px; }
+.ribbon .rb-tabs [role="tab"] { height: 26px; padding: 0 11px; border-radius: var(--r-ctl) var(--r-ctl) 0 0; font-size: 12.5px; color: var(--dim); box-shadow: inset 0 -2px 0 transparent; }
+.ribbon .rb-tabs [role="tab"][aria-selected="true"] { color: var(--text); background: transparent; box-shadow: inset 0 -2px 0 var(--accent); }
+/* 상황 탭(도형 서식 · 표): 글자색은 다른 탭과 같고, 위쪽 가는 강조 띠로 가른다. 고른 탭의 밑줄과 다투지 않게 */
+.ribbon .rb-tabs [role="tab"].ctx { position: relative; }
+.ribbon .rb-tabs [role="tab"].ctx::before { content: ""; position: absolute; left: 8px; right: 8px; top: 0; height: 2px; border-radius: 0 0 2px 2px; background: color-mix(in srgb, var(--accent) 55%, transparent); }
+.ribbon .rb-tabs .rb-close { align-self: center; height: 26px; }
+.rb-tools { display: flex; flex-wrap: wrap; align-items: center; gap: 2px 14px; min-height: 40px; padding: 4px 6px 4px 8px; border-top: 1px solid var(--hair); }
+.ribbon.off .rb-tools, .ribbon.off .rb-tabs [role="tab"] { opacity: 0.4; pointer-events: none; }
 .ribbon button { height: 30px; min-width: 28px; padding: 0 5px; border-radius: var(--r-ctl); display: inline-flex; align-items: center; justify-content: center; gap: 5px; color: var(--dim); font-size: 12.5px; white-space: nowrap; }
 .ribbon button:hover:not([disabled]) { color: var(--text); background: var(--hair); }
 .ribbon button[aria-pressed="true"], .ribbon button[aria-expanded="true"] { color: var(--text); background: var(--hair-2); }
@@ -905,8 +914,33 @@ textarea.field { height: auto; padding: 8px 10px; line-height: 1.5; resize: vert
 .ribbon .size { width: 42px; height: 26px; margin-right: 2px; text-align: center; font: 12.5px var(--mono); color: var(--text); background: var(--bg); border: 1px solid var(--hair); border-radius: var(--r-ctl); }
 .ribbon .size:disabled { opacity: 0.4; }
 .ribbon .rb-sizes { min-width: 16px; padding: 0 3px; margin: 0 2px 0 -2px; }
-.ribbon .rb-hint { padding: 0 8px; font-size: 12px; color: var(--accent); white-space: nowrap; }
+.ribbon .rb-hint { align-self: center; padding: 0 8px; font-size: 12px; color: var(--accent); white-space: nowrap; }
 .ribbon .rb-close { margin-left: auto; }
+.ribbon button.wide, .ribbon .rb-chip.wide { padding: 0 8px 0 6px; }
+.ribbon .sep.thin { margin: 0 2px; background: transparent; }
+/* 묶음: 좁으면 묶음째 다음 줄로 간다. 묶음 사이는 구분선 대신 여백: 접힌 줄 끝에 구분선이 남지 않는다 */
+.rb-grp { display: inline-flex; flex-wrap: nowrap; align-items: center; gap: 1px; }
+.ribbon.mini .rb-tabs { padding-bottom: 2px; }
+.rb-fonts { width: 260px; }
+.rb-find { width: 100%; height: 28px; margin-bottom: 6px; padding: 0 8px; font-size: 12.5px; color: var(--text); background: var(--bg); border: 1px solid var(--hair); border-radius: var(--r-ctl); }
+.rb-flist { display: flex; flex-direction: column; max-height: 300px; overflow-y: auto; }
+.ribbon .rb-flist button { justify-content: flex-start; flex: none; height: 28px; padding: 0 8px; font-size: 14px; color: var(--text); overflow: hidden; text-overflow: ellipsis; }
+.ribbon .rb-flist button[aria-selected="true"] { background: var(--hair-2); }
+.rb-empty { padding: 8px; font-size: 12px; color: var(--faint); }
+.ribbon .font { width: 132px; height: 26px; margin-right: 3px; padding: 0 7px; font-size: 12.5px; color: var(--text); background: var(--bg); border: 1px solid var(--hair); border-radius: var(--r-ctl); }
+.ribbon .font::placeholder { color: var(--faint); }
+.ribbon .font:disabled { opacity: 0.4; }
+.rb-dim { display: inline-flex; align-items: center; gap: 4px; margin: 0 4px; font-size: 12px; color: var(--dim); }
+.rb-dim input { width: 52px; height: 26px; text-align: right; padding: 0 6px; font: 12.5px var(--mono); color: var(--text); background: var(--bg); border: 1px solid var(--hair); border-radius: var(--r-ctl); }
+.rb-dim input:disabled { opacity: 0.4; }
+.rb-dim .unit { color: var(--faint); }
+.ribbon .rb-dash { width: 44px; padding: 0 6px; }
+.ribbon .rb-dash span { display: block; width: 100%; border-top: 2px currentColor; }
+.rb-grid { display: grid; grid-template-columns: repeat(8, 1fr); gap: 3px; }
+.ribbon .rb-grid button { height: 20px; min-width: 0; padding: 0; border-radius: 2px; outline: 1px solid var(--hair-2); outline-offset: -1px; }
+.ribbon .rb-grid button[aria-pressed="true"] { background: color-mix(in srgb, var(--accent) 30%, transparent); outline-color: var(--accent); }
+.rb-sym { display: grid; grid-template-columns: repeat(8, 1fr); gap: 2px; }
+.ribbon .rb-sym button { height: 26px; min-width: 0; padding: 0; font-size: 14px; color: var(--text); }
 .rb-pop { position: relative; display: inline-flex; }
 .rb-chip { position: relative; }
 .rb-bar { position: absolute; left: 7px; right: 16px; bottom: 3px; height: 3px; border-radius: 1px; outline: 1px solid var(--hair); }

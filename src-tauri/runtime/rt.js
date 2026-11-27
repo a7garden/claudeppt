@@ -4,6 +4,7 @@
 // 목차
 //   pathOf · label        요소 ↔ 자식 번호 길 (원본 HTML 에 되쓸 때 같은 요소를 찾는다)
 //   편집                  고르기 · 글자 고치기 · 옮기기 · 크기 손잡이 · 넣기 · 순서 · 맞춤 · 복제 · 복사 · 서식 (서식 띠 명령 cmd)
+//                         · 글머리 기호 · 번호 · 표 넣기와 행 · 열 · 서식 복사 · 서식 지우기 · 기호
 //   message               부모 창이 보낸 말 처리
 //   굽기                  bake — 브라우저가 그린 그대로 PNG (PowerPoint 가 같게 못 그리는 것 · 비교 검사)
 //   PPTX 좌표 뽑기        color · runsOf(글자 조각과 줄 바꿈 자리) · extract — 도형으로 같게 그릴 수 있으면 도형, 아니면 굽기
@@ -60,6 +61,11 @@
 	// 2026.11.25 : 두 번 누르기만 있었고 Enter 가 <div> 를 끼워 넣고 Esc 도 저장했다 — 제목을 고치다 Enter 로 마치려 하면 구조가 깨졌다
 	// 2026.11.25 : 서식 띠 · 넣기 · 손잡이 · 복제 · 복사를 더했다. 상자를 먼저 고르게 바꿨다 — 누른 글 조각만 골라져 도형 · 카드를 끌 수 없었다
 	let mode = "view", sel = null, drag = null, edit = null, picked = 0, place = null, size = null, fresh = null;
+	// 서식 복사: 띠의 붓을 누르면 고른 것의 서식을 들고 있다가, 다음에 누른 요소에 입힌다 (PowerPoint 서식 복사와 같이 한 번만)
+	let painter = null;
+	// 마지막으로 고친 표 칸 · 고치다 마친 자리에서 골라 둔 글자: 띠의 입력칸 · 메뉴를 누르면 고치기가 끝나(포커스가 떠나) 칸 · 고른 글자를 잃는다.
+	// 그 뒤에 온 표 · 글꼴 명령이 그 자리에 닿게 기억해 둔다. 쪽을 다시 누르거나 다른 것을 고르면 버린다 (2026.11.27)
+	let lastCell = null, lastRange = null;
 	// 글을 고치는 동안 서식 띠가 바꾼 서식 (요소 → style). 고치는 중에 파일을 쓰면 앱이 쪽을 다시 읽어 고치던 글이 끊긴다 — 마칠 때 함께 쓴다
 	const pending = new Map();
 	const style = document.createElement("style");
@@ -68,6 +74,7 @@
 		[data-deck-edit] [data-deck-sel] { outline: 1.5px solid #e5482d !important; outline-offset: 1px }
 		[data-deck-edit] [contenteditable=true] { outline: 1.5px solid #e5482d !important; cursor: text }
 		[data-deck-place], [data-deck-place] * { cursor: crosshair !important }
+		[data-deck-paint], [data-deck-paint] * { cursor: copy !important }
 		#deck-ui { position: absolute; left: 0; top: 0; width: 0; height: 0; z-index: 2147483647; pointer-events: none }
 		#deck-ui .h { position: absolute; width: 12px; height: 12px; margin: -6px 0 0 -6px; box-sizing: border-box; background: #fff; border: 1.5px solid #e5482d; border-radius: 2px; pointer-events: auto }
 		#deck-ui .guide { position: absolute; background: #d6336c; display: none }
@@ -98,6 +105,8 @@
 
 	const select = (el) => {
 		if (sel) sel.removeAttribute("data-deck-sel");
+		lastRange = null;
+		if (lastCell && !(el && (el === lastCell || el.contains(lastCell)))) lastCell = null;
 		sel = el;
 		if (sel) sel.setAttribute("data-deck-sel", "");
 		placeHandles();
@@ -139,6 +148,9 @@
 		let x = t;
 		while (x && x !== lim && x !== root && INLINE.has(x.tagName)) x = x.parentElement;
 		while (x && x.children.length === 1 && !ownText(x) && !INLINE.has(x.children[0].tagName) && !x.children[0].matches(NOTEXT)) x = x.children[0];
+		// 목록 문단이면 목록 전체를 고친다: Enter 로 다음 항목을 이어 쓰려면 문단들을 담은 그릇이 고치는 자리여야 한다
+		const li = x?.closest?.("[data-li]");
+		if (li && li.parentElement && li.parentElement !== root && root.contains(li) && editable(li.parentElement)) x = li.parentElement;
 		return editable(x) ? x : null;
 	};
 	/** 원본에 쓸 HTML — 런타임이 붙인 표시(고름 · 고치는 중)를 걷는다 */
@@ -154,7 +166,15 @@
 		if (mode !== "edit" || !el || !el.isConnected) return post({ t: "sel", info: null });
 		const b = shapeOf(el), s = css(el), bs = css(b);
 		const side = ["Top", "Right", "Bottom", "Left"].find((k) => bs["border" + k + "Style"] !== "none" && parseFloat(bs["border" + k + "Width"]) > 0);
+		const br = b.getBoundingClientRect(), mk = listOf(el);
 		post({ t: "sel", info: {
+			font: s.fontFamily.split(",")[0].replace(/["']/g, "").trim(), strike: s.textDecorationLine.includes("line-through"),
+			ls: Math.round((parseFloat(s.letterSpacing) || 0) * 0.75 * 10) / 10, tt: s.textTransform,
+			list: mk ? (/\d/.test(mk.getAttribute("data-bu")) ? "num" : "bu") : null,
+			w: Math.round(br.width), h: Math.round(br.height), radius: parseFloat(bs.borderTopLeftRadius) || 0, round: bs.borderTopLeftRadius.includes("%"),
+			shadow: bs.boxShadow !== "none", opacity: Math.round((+bs.opacity || 1) * 100), dash: side ? bs["border" + side + "Style"] : null,
+			cell: (!!el.closest?.("td, th") && root.contains(el.closest("td, th"))) || (!!lastCell && lastCell.isConnected && el.contains(lastCell)), painter: !!painter,
+			text: !!edit || !!textAt(el, null), ranged: ranged() || !!lastRange,
 			tag: el.tagName.toLowerCase(), editing: !!edit, box: canMove(b), abs: movable(b), flex: bs.display.includes("flex"), image: b.tagName === "IMG",
 			size: parseFloat(s.fontSize), lh: Math.round((parseFloat(s.lineHeight) / parseFloat(s.fontSize)) * 100) / 100 || null, bold: +s.fontWeight >= 600, italic: s.fontStyle === "italic", underline: s.textDecorationLine.includes("underline"),
 			color: color(s.color)?.hex || null, align: s.textAlign,
@@ -207,6 +227,8 @@
 		// 빈 요소는 높이가 없어 커서가 서지 않는다 — 고치는 동안만 <br> 로 한 줄을 세운다 (마칠 때 글이 없으면 걷는다)
 		if (!el.innerHTML.trim()) el.innerHTML = "<br>";
 		el.contentEditable = "true";
+		// 글머리 표지는 고치지 못하게: 표지 바로 뒤에 커서를 두고 글을 치면 웹뷰가 글을 표지 span 안에 넣는다 (마칠 때 걷는다)
+		for (const m of el.querySelectorAll("[data-bu]")) m.contentEditable = "false";
 		el.focus();
 		const s = getSelection();
 		const r = at ? document.caretRangeFromPoint(at.x, at.y) : all ? document.createRange() : null;
@@ -220,9 +242,11 @@
 	};
 	const finishEdit = () => {
 		if (!edit) return;
+		const rg = ranged() ? getSelection().getRangeAt(0).cloneRange() : null;
 		const { el, before, cancel } = edit;
 		edit = null;
 		el.removeAttribute("contenteditable");
+		for (const m of el.querySelectorAll("[data-bu]")) m.removeAttribute("contenteditable");
 		if (cancel) el.innerHTML = before;
 		if (!(el.innerText || "").trim() && !el.querySelector(NOTEXT)) el.innerHTML = "";
 		if (fresh) {
@@ -236,13 +260,18 @@
 			if (!sel) select(box);
 			return;
 		}
+		renumber(el);
 		flushPending();
 		// 상자(도형 · 글상자 · 카드) 안 글을 마쳤으면 그 상자를 고른 채로 둔다 — 이어서 채우기 · 옮기기를 한다 (PowerPoint 와 같다)
 		const box = boxOf(el) || el;
 		if (el.innerHTML !== before) { keep(box); post({ t: "edit", path: pathOf(el), html: el.innerHTML }); }
 		// Enter · Esc 로 마쳤으면 그 요소를 고른 채로 둔다. 다른 요소를 눌러 마쳤으면 그 요소가 이미 골라져 있다 — 덮지 않는다
 		if (!sel) select(box);
-		else announce();
+		// 칸 · 고른 글자는 고르기(select) 뒤에 적는다: select 가 지난 것을 버린다
+		const td = el.closest("td, th");
+		if (td && root.contains(td)) lastCell = td;
+		if (rg && !cancel && el.innerHTML === before) lastRange = { el, range: rg };
+		announce();
 	};
 	/** 글자만 끼운다 — 줄은 <br> 로 */
 	const insertPlain = (text) => {
@@ -252,6 +281,9 @@
 			if (l) document.execCommand("insertText", false, l);
 		});
 	};
+	// 고치는 중 고른 글자가 생기고 사라질 때 띠에 알린다: 잘라내기 · 복사 단추가 고른 글자가 있을 때만 켜진다
+	let selTick = 0;
+	document.addEventListener("selectionchange", () => { if (edit && !selTick) selTick = requestAnimationFrame(() => { selTick = 0; announce(); }); });
 	addEventListener("paste", (e) => {
 		if (!edit) return;
 		e.preventDefault();
@@ -402,11 +434,18 @@
 		return c;
 	};
 	const toggle = (what) => {
-		if (ranged()) return exec(what);
+		if (ranged()) return exec(what === "strike" ? "strikeThrough" : what);
 		const el = edit ? edit.el : sel, s = css(el);
+		// 밑줄 · 취소선은 한 속성(text-decoration)을 나눠 쓴다: 하나를 켜고 끌 때 다른 하나를 지우지 않는다
+		const deco = (k) => {
+			const on = new Set(s.textDecorationLine.split(/\s+/).filter((x) => x && x !== "none"));
+			if (on.has(k)) on.delete(k); else on.add(k);
+			return on.size ? [...on].join(" ") : "none";
+		};
 		if (what === "bold") setStyle(el, { "font-weight": +s.fontWeight >= 600 ? "400" : "700" });
 		else if (what === "italic") setStyle(el, { "font-style": s.fontStyle === "italic" ? "normal" : "italic" });
-		else setStyle(el, { "text-decoration": s.textDecorationLine.includes("underline") ? "none" : "underline" });
+		else if (what === "strike") setStyle(el, { "text-decoration": deco("line-through") });
+		else setStyle(el, { "text-decoration": deco("underline") });
 	};
 	/** 윤곽선 — 한 변만 그은 요소(선 · 밑줄 띠)는 그 변만 바꾼다. 네 변을 다 켜면 선이 상자가 된다.
 	 *  늘 묶음 속성(border · border-top …) 전체를 다시 쓴다. `border: 1px solid var(--line)` 처럼 CSS 변수가 든 묶음에서
@@ -415,24 +454,299 @@
 		if (v.none) return setStyle(el, { border: "none" });
 		const s = css(el), all = ["top", "right", "bottom", "left"];
 		const on = all.filter((k) => s.getPropertyValue(`border-${k}-style`) !== "none" && parseFloat(s.getPropertyValue(`border-${k}-width`)) > 0);
-		const of = (k) => `${v.width ? v.width + "px" : on.length ? s.getPropertyValue(`border-${k}-width`) : "2px"} ${on.length ? s.getPropertyValue(`border-${k}-style`) : "solid"} ${v.color || (on.length ? s.getPropertyValue(`border-${k}-color`) : "var(--ink, #222)")}`;
+		const of = (k) => `${v.width ? v.width + "px" : on.length ? s.getPropertyValue(`border-${k}-width`) : "2px"} ${v.dash || (on.length ? s.getPropertyValue(`border-${k}-style`) : "solid")} ${v.color || (on.length ? s.getPropertyValue(`border-${k}-color`) : "var(--ink, #222)")}`;
 		if (!on.length || on.length === 4) return setStyle(el, { border: of(on[0] || "top") });
 		setStyle(el, Object.fromEntries(on.map((k) => [`border-${k}`, of(k)])));
 	};
+
+	// ── 글머리 기호 · 번호 ── 문단마다 data-li 를 달고 맨 앞에 표지(span data-bu)를 둔다. 내어쓰기는 padding-left 와 음수 text-indent.
+	// 표지를 글자(::marker · list-style)로 두지 않는 까닭: 목록 항목(list-item)은 내보낼 때 통째로 그림이 된다 (extract needsDeep).
+	// 표지 span 이 있으면 내보내기가 그 문단을 PowerPoint 글머리 문단으로 바꾼다 (extract 「글자」) (2026.11.27)
+	const MARK = "display:inline-block;min-width:1.3em;text-indent:0";
+	const listOf = (el) => (el.closest?.("[data-li]") && root.contains(el.closest("[data-li]")) ? el.closest("[data-li]").querySelector(":scope > [data-bu]") : el.querySelector?.("[data-li] > [data-bu]")) || null;
+	/** 목록을 다는 그릇: 외동 덩이 자식만 둔 상자(도형의 <p>)면 그 자식까지 내려간다. 고른 것이 목록 문단이면 그 부모 */
+	const listHost = (el) => {
+		const li = el.closest?.("[data-li]");
+		if (li && root.contains(li) && li.parentElement) return li.parentElement;
+		let h = el;
+		while (h.children.length === 1 && !ownText(h) && !INLINE.has(h.children[0].tagName) && !h.children[0].matches(NOTEXT)) h = h.children[0];
+		return h;
+	};
+	/** 고친 그릇을 원본에 되쓴다: 글을 고치는 중이면 마칠 때 innerHTML 째로 쓰이므로 따로 보내지 않는다 */
+	const rewrite = (host) => {
+		if (edit && edit.el.contains(host)) return announce();
+		keep(sel || host);
+		post({ t: "edit", path: pathOf(host), html: host.innerHTML });
+		placeHandles();
+		announce();
+	};
+	const setList = (el, kind) => {
+		const host = listHost(el);
+		let items = [...host.children].filter((c) => c.hasAttribute("data-li"));
+		const mk = items[0]?.querySelector(":scope > [data-bu]");
+		const cur = mk ? (/\d/.test(mk.getAttribute("data-bu")) ? "num" : "bu") : null;
+		if (cur === kind) {
+			// 끄기: 표지와 내어쓰기만 걷는다. 줄마다 나눈 문단은 그대로 둔다
+			for (const li of items) {
+				li.querySelector(":scope > [data-bu]")?.remove();
+				li.removeAttribute("data-li");
+				li.style.removeProperty("padding-left");
+				li.style.removeProperty("text-indent");
+				if (!li.getAttribute("style")) li.removeAttribute("style");
+			}
+			return rewrite(host);
+		}
+		if (!items.length) {
+			const blocks = [...host.children].filter((c) => !INLINE.has(c.tagName) && !c.matches(NOTEXT) && !css(c).display.startsWith("inline"));
+			const loose = [...host.childNodes].some((n) => (n.nodeType === 3 && n.nodeValue.trim()) || (n.nodeType === 1 && !blocks.includes(n) && n.tagName !== "BR"));
+			if (blocks.length && !loose) items = blocks;
+			else {
+				// 줄 바꿈(<br>)으로만 나뉜 글: 줄마다 문단으로. 빈 줄은 뺀다
+				const lines = host.innerHTML.split(/<br\s*\/?>/i).filter((l) => l.replace(/<[^>]*>|&nbsp;|\s/g, ""));
+				host.innerHTML = (lines.length ? lines : [""]).map((l) => `<div>${l}</div>`).join("");
+				items = [...host.children];
+			}
+		}
+		items.forEach((li, i) => {
+			const m0 = kind === "num" ? `${i + 1}.` : "•";
+			li.setAttribute("data-li", "");
+			if (!li.style.paddingLeft) li.style.paddingLeft = "1.3em";
+			li.style.textIndent = "-1.3em";
+			let m = li.querySelector(":scope > [data-bu]");
+			if (!m) { m = document.createElement("span"); m.setAttribute("style", MARK); li.prepend(m); }
+			m.setAttribute("data-bu", m0);
+			m.textContent = m0;
+		});
+		rewrite(host);
+	};
+	/** 번호 목록이면 차례대로 다시 매긴다: 항목을 지우거나 Enter 로 늘린 뒤 */
+	const renumber = (host) => {
+		for (const h of new Set([...host.querySelectorAll("[data-li]")].map((li) => li.parentElement))) {
+			const items = [...h.children].filter((c) => c.hasAttribute("data-li"));
+			if (!/\d/.test(items[0]?.querySelector(":scope > [data-bu]")?.getAttribute("data-bu") || "")) continue;
+			items.forEach((li, i) => { const m = li.querySelector(":scope > [data-bu]"); if (m) { m.setAttribute("data-bu", `${i + 1}.`); m.textContent = `${i + 1}.`; } });
+		}
+	};
+	/** 목록을 고치는 중 Enter: 다음 항목을 연다 (PowerPoint 와 같다). 빈 항목에서 누르면 그 항목을 걷고 마친다. 목록 밖이면 false */
+	const listEnter = () => {
+		const s = getSelection(), at = s.anchorNode && (s.anchorNode.nodeType === 1 ? s.anchorNode : s.anchorNode.parentElement);
+		const li = at?.closest?.("[data-li]");
+		if (!li || !edit.el.contains(li) || li === edit.el) return false;
+		const mk = li.querySelector(":scope > [data-bu]");
+		const rest = [...li.childNodes].filter((n) => n !== mk).map((n) => n.textContent).join("").trim();
+		if (!rest) { if ([...li.parentElement.children].length > 1) li.remove(); edit.el.blur(); return true; }
+		document.execCommand("insertParagraph");
+		// 웹뷰가 새로 연 문단: 속성(data-li · 내어쓰기)을 앞 항목에서 받고, 표지를 맨 앞에 둔다
+		const s2 = getSelection(), now = s2.anchorNode && (s2.anchorNode.nodeType === 1 ? s2.anchorNode : s2.anchorNode.parentElement);
+		let nl = now;
+		while (nl && nl.parentElement !== li.parentElement) nl = nl.parentElement;
+		if (nl && nl !== li) {
+			for (const a of ["data-li", "style"]) if (!nl.hasAttribute(a) && li.hasAttribute(a)) nl.setAttribute(a, li.getAttribute(a));
+			let m = nl.querySelector(":scope > [data-bu]");
+			if (m && m !== nl.firstElementChild) { m.remove(); m = null; }
+			if (!m && mk) { m = mk.cloneNode(true); nl.prepend(m); }
+			if (m) m.contentEditable = "false";
+			// 커서를 표지 뒤로: 표지 안에서 글을 쓰면 표지가 늘어난다
+			if (m) { const r = document.createRange(); r.setStartAfter(m); r.collapse(true); s2.removeAllRanges(); s2.addRange(r); }
+		}
+		renumber(edit.el);
+		return true;
+	};
+	/** 들여쓰기: 목록이면 문단마다, 아니면 그 글 덩이의 왼쪽 안쪽 여백을 24px 씩 (PowerPoint 「목록 수준 늘림 · 줄임」) */
+	const indent = (el, d) => {
+		const host = listHost(el), items = [...host.children].filter((c) => c.hasAttribute("data-li"));
+		if (!items.length) return setStyle(el, { "padding-left": P(Math.max(0, (parseFloat(css(el).paddingLeft) || 0) + 24 * d)) });
+		for (const li of items) {
+			const min = parseFloat(css(li.querySelector(":scope > [data-bu]") || li).minWidth) || 0;
+			li.style.paddingLeft = P(Math.max(min, (parseFloat(css(li).paddingLeft) || 0) + 24 * d));
+		}
+		rewrite(host);
+	};
+
+	// ── 표 ── 넣기와 행 · 열 고치기. 고친 표는 innerHTML 째로 되쓴다
+	const putTable = ({ r, c }) => {
+		if (edit) edit.el.blur();
+		const S = root.getBoundingClientRect(), w = Math.min(S.width * 0.8, c * 180), cell = "border:1px solid var(--line, #c8c8c8);padding:8px 12px;text-align:left";
+		const head = `<tr>${`<th style="${cell};background:var(--accent, #2f6fde);color:var(--paper, #fff);font-weight:700"></th>`.repeat(c)}</tr>`;
+		const body = `<tr>${`<td style="${cell}"></td>`.repeat(c)}</tr>`.repeat(Math.max(0, r - 1));
+		const t = document.createElement("template");
+		t.innerHTML = `<table style="position:absolute;left:${P((S.width - w) / 2)};top:${P(S.height * 0.3)};width:${P(w)};border-collapse:collapse"><tbody>${head}${body}</tbody></table>`;
+		const el = t.content.firstElementChild;
+		root.appendChild(el);
+		keep(el);
+		post({ t: "append", html: el.outerHTML });
+		select(el);
+	};
+	const tableOp = (how) => {
+		const at = edit ? edit.el : sel;
+		const td = at?.closest?.("td, th") || (lastCell?.isConnected && at?.contains(lastCell) ? lastCell : null);
+		const table = td?.closest("table") || at?.closest?.("table");
+		if (!table || !root.contains(table) || (!td && how !== "del")) return;
+		if (edit) edit.el.blur();
+		if (how === "del") { post({ t: "remove", path: pathOf(table) }); table.remove(); return select(null); }
+		const tr = td.parentElement, rows = [...table.rows], ri = rows.indexOf(tr), ci = td.cellIndex;
+		const blank = (c) => { const x = c.cloneNode(false); x.removeAttribute("data-deck-sel"); x.removeAttribute("colspan"); x.removeAttribute("rowspan"); return x; };
+		if (how === "rowAbove" || how === "rowBelow") {
+			// 머리 행(th) 위 · 아래에 넣는 행은 몸 행 꼴을 따른다: 머리 행이 둘이 되지 않게
+			const model = (how === "rowBelow" && rows[ri + 1]) || (tr.querySelector("th") && rows.find((x) => !x.querySelector("th"))) || tr;
+			const nr = model.cloneNode(false);
+			for (const c of model.cells) nr.appendChild(blank(c));
+			if (how === "rowAbove" && !tr.querySelector("th")) tr.before(nr); else tr.after(nr);
+		} else if (how === "colLeft" || how === "colRight") {
+			for (const row of rows) {
+				const c = row.cells[Math.min(ci, row.cells.length - 1)];
+				if (!c) continue;
+				if (how === "colLeft") c.before(blank(c)); else c.after(blank(c));
+			}
+		} else if (how === "rowDel") {
+			if (rows.length < 2) { post({ t: "remove", path: pathOf(table) }); table.remove(); return select(null); }
+			tr.remove();
+		} else if (how === "colDel") {
+			if (Math.max(...rows.map((x) => x.cells.length)) < 2) { post({ t: "remove", path: pathOf(table) }); table.remove(); return select(null); }
+			for (const row of rows) row.cells[ci]?.remove();
+		}
+		select(table);
+		keep(table);
+		post({ t: "edit", path: pathOf(table), html: table.innerHTML });
+		announce();
+	};
+
+	// ── 고른 글자에만 ── 글꼴 · 크기 · 간격 · 대소문자 · 색 · 강조 색은 글자를 골랐으면 그 글자만 span 으로 감싸 입힌다 (PowerPoint 와 같다).
+	// 글 마디 단위로 감싼다: 범위를 통째로 꺼내 감싸면(extractContents) 문단을 넘는 범위에서 문단이 쪼개진다. 글머리 표지는 건너뛴다
+	const wrapRange = (host, range, st) => {
+		const w = document.createTreeWalker(host, NodeFilter.SHOW_TEXT), cut = [];
+		for (let n; (n = w.nextNode());) {
+			if (!n.nodeValue || !range.intersectsNode(n) || n.parentElement.closest("[data-bu]")) continue;
+			const a = n === range.startContainer ? range.startOffset : 0, b = n === range.endContainer ? range.endOffset : n.nodeValue.length;
+			if (a < b) cut.push([n, a, b]);
+		}
+		const spans = [];
+		for (let [n, a, b] of cut) {
+			if (b < n.nodeValue.length) n.splitText(b);
+			if (a > 0) n = n.splitText(a);
+			const p = n.parentElement;
+			// 이미 그 글만 감싼 span 이면 거기에 더한다: 감싸기를 거듭해도 span 이 겹겹이 쌓이지 않게
+			const sp = p !== host && p.tagName === "SPAN" && p.childNodes.length === 1 ? p : document.createElement("span");
+			for (const [k, v] of Object.entries(st)) sp.style.setProperty(k, v);
+			if (sp !== p) { n.replaceWith(sp); sp.appendChild(n); }
+			spans.push(sp);
+		}
+		return spans;
+	};
+	/** 글 서식: 고친 중 고른 글자 · 마치기 전에 골라 둔 글자가 있으면 그 글자에만, 없으면 요소 전체에 */
+	const textStyle = (el, st) => {
+		const live = edit && ranged();
+		const r = live ? { host: edit.el, range: getSelection().getRangeAt(0) } : lastRange?.el.isConnected && sel && (sel === lastRange.el || sel.contains(lastRange.el)) ? lastRange : null;
+		if (!r) return setStyle(el, st);
+		const spans = wrapRange(r.host ?? r.el, r.range, st);
+		if (live) {
+			// 고른 자리를 감싼 글자로 다시 잡는다: 이어서 다른 서식을 또 입힐 수 있게
+			if (spans.length) { const g = document.createRange(); g.setStartBefore(spans[0]); g.setEndAfter(spans[spans.length - 1]); getSelection().removeAllRanges(); getSelection().addRange(g); }
+			return announce();
+		}
+		lastRange = null;
+		rewrite(r.host ?? r.el);
+	};
+	/** 강조 색: 글자를 골랐으면 그 글자, 아니면 그 글 전체 */
+	const highlight = (el, v) => {
+		if (edit && ranged()) return exec("hiliteColor", v === "transparent" ? v : rgbOf(v));
+		if (lastRange?.el.isConnected) return textStyle(el, { "background-color": v });
+		const host = edit ? edit.el : textAt(el, null);
+		if (!host) return;
+		const all = document.createRange();
+		all.selectNodeContents(host);
+		wrapRange(host, all, { "background-color": v });
+		rewrite(host);
+	};
+	/** 고치는 중 잘라내기 · 복사: 고른 글자를 앱에 넘긴다(앱이 클립보드에 쓴다). 잘라내기면 그 글자를 지운다 */
+	const clipText = (cut) => {
+		if (!ranged()) return;
+		post({ t: "clip", text: getSelection().toString() });
+		if (cut) document.execCommand("delete");
+		announce();
+	};
+
+	// ── 서식 복사 · 지우기 ──
+	const PAINT_TEXT = ["font-family", "font-size", "font-weight", "font-style", "text-decoration", "color", "letter-spacing", "text-transform", "line-height"];
+	const PAINT_BOX = ["background-color", "border-top", "border-right", "border-bottom", "border-left", "border-radius", "box-shadow", "opacity"];
+	const startPaint = (el) => {
+		if (painter) painter = null;
+		else {
+			const b = shapeOf(el), s = css(el), bs = css(b);
+			// 도형(바탕 · 테두리가 있는 것)에서 집었을 때만 상자 서식도 옮긴다: 맨 글에서 집어 도형에 찍으면 도형 바탕이 지워진다
+			const shape = !!color(bs.backgroundColor) || ["Top", "Right", "Bottom", "Left"].some((k) => bs["border" + k + "Style"] !== "none" && parseFloat(bs["border" + k + "Width"]) > 0);
+			painter = {
+				text: Object.fromEntries(PAINT_TEXT.map((k) => [k, s.getPropertyValue(k)])),
+				box: shape ? Object.fromEntries(PAINT_BOX.map((k) => [k, bs.getPropertyValue(k)])) : null,
+			};
+		}
+		document.documentElement.toggleAttribute("data-deck-paint", !!painter);
+		announce();
+	};
+	const paintOn = (t) => {
+		const p = painter;
+		painter = null;
+		document.documentElement.removeAttribute("data-deck-paint");
+		const box = boxOf(t) || t, tt = textAt(t, null) || (editable(t) ? t : null);
+		if (tt) setStyle(tt, p.text);
+		if (p.box) setStyle(shapeOf(tt || box), p.box);
+		select(box);
+	};
+	const clearFmt = (el) => {
+		if (ranged()) return exec("removeFormat");
+		// 글 조각(span · b …)에 박힌 서식도 걷는다: 가져온 PPTX 글은 서식이 조각마다 붙어 있다
+		const runs = [...el.querySelectorAll("*")].filter((x) => INLINE.has(x.tagName) && !x.hasAttribute("data-bu") && x.getAttribute("style"));
+		for (const x of runs) for (const k of PAINT_TEXT) x.style.removeProperty(k);
+		if (runs.length) rewrite(el);
+		setStyle(el, Object.fromEntries(PAINT_TEXT.filter((k) => k !== "line-height").map((k) => [k, ""])));
+	};
+	/** 기호 넣기: 고치는 중이면 커서 자리에, 아니면 고른 글 끝에 */
+	const putSymbol = (ch) => {
+		if (!edit) {
+			const tt = sel && textAt(sel, null);
+			if (!tt) return;
+			startEdit(tt, null, true);
+			getSelection().collapseToEnd();
+		}
+		document.execCommand("insertText", false, ch);
+		announce();
+	};
+	const removeSel = () => { const x = shapeOf(sel); post({ t: "remove", path: pathOf(x) }); x.remove(); select(null); };
 	/** 서식 띠가 보낸 명령 */
 	const command = (cmd, v, m) => {
 		if (cmd === "place") return setPlace(v ? { kind: v } : null);
 		if (cmd === "image") return void putImage(v);
 		if (cmd === "paste") return paste(v, m.dx || 0);
-		// 순서 · 맞춤 · 복제 · 지우기는 고친 글을 먼저 마친다 — 고치는 중인 요소의 번호 길이 바뀌면 글이 엉뚱한 요소에 쓰인다
-		if (["arrange", "alignTo", "dup", "remove", "copy"].includes(cmd) && edit) edit.el.blur();
+		if (cmd === "pasteReq") return post({ t: "pasteReq" });
+		if (cmd === "table") return putTable(v);
+		if (cmd === "tbl") return tableOp(v);
+		// 순서 · 맞춤 · 복제 · 지우기 · 목록은 고친 글을 먼저 마친다: 고치는 중인 요소의 번호 길이 바뀌면 글이 엉뚱한 요소에 쓰인다
+		// 고치는 중 잘라내기 · 복사는 고른 글자의 일이다 (Ctrl+X · Ctrl+C 가 웹뷰에서 한다): 상자째 잘라 내지 않는다
+		if ((cmd === "cut" || cmd === "copy") && edit) return clipText(cmd === "cut");
+		if (["arrange", "alignTo", "dup", "remove", "list", "indent", "dim"].includes(cmd) && edit) edit.el.blur();
 		const el = edit ? edit.el : sel;
 		if (!el) return;
 		const b = shapeOf(el);
 		if (cmd === "toggle") toggle(v);
-		else if (cmd === "color") { if (ranged()) exec("foreColor", rgbOf(v)); else setStyle(el, { color: v }); }
+		else if (cmd === "painter") startPaint(el);
+		else if (cmd === "clear") clearFmt(el);
+		else if (cmd === "symbol") putSymbol(v);
+		else if (cmd === "font") textStyle(el, { "font-family": v || "" });
+		// 글자 간격은 pt 로 받는다 (PowerPoint 「문자 간격」과 같은 수)
+		else if (cmd === "spacing") textStyle(el, { "letter-spacing": v ? Math.round((v / 0.75) * 100) / 100 + "px" : "" });
+		else if (cmd === "case") textStyle(el, { "text-transform": v === "none" ? "" : v });
+		else if (cmd === "highlight") highlight(el, v);
+		else if (cmd === "list") setList(el, v);
+		else if (cmd === "indent") indent(el, v);
+		else if (cmd === "radius") setStyle(b, { "border-radius": v });
+		// 그림자는 바깥 그림자 하나: 내보낼 때 PowerPoint 도형 그림자로 그대로 간다 (simpleShadow)
+		else if (cmd === "shadow") setStyle(b, { "box-shadow": v ? "0 4px 14px rgba(0,0,0,0.22)" : "none" });
+		else if (cmd === "opacity") setStyle(b, { opacity: v >= 100 ? "" : String(v / 100) });
+		else if (cmd === "dim") { if (canMove(b)) setStyle(b, Object.fromEntries(Object.entries(v).map(([k, x]) => [k, P(x)]))); }
+		else if (cmd === "cut") { if (sel) { copy(); removeSel(); } }
+		else if (cmd === "color") { if (ranged()) exec("foreColor", rgbOf(v)); else textStyle(el, { color: v }); }
 		// 글자 크기는 pt 로 받는다 (PowerPoint 와 같은 수). 쪽 1px = 0.75pt
-		else if (cmd === "size") setStyle(el, { "font-size": Math.round((v / 0.75) * 100) / 100 + "px" });
+		else if (cmd === "size") textStyle(el, { "font-size": Math.round((v / 0.75) * 100) / 100 + "px" });
 		else if (cmd === "align") setStyle(el, { "text-align": v });
 		// 줄 간격 — 글자 크기의 배수로 쓴다 (단위 없는 line-height). 내보낼 때는 그린 줄 높이(px)를 잰다
 		else if (cmd === "lineHeight") setStyle(el, { "line-height": String(v) });
@@ -443,7 +757,7 @@
 		else if (cmd === "alignTo") alignTo(v);
 		else if (cmd === "dup") dup();
 		else if (cmd === "copy") { if (sel) copy(); }
-		else if (cmd === "remove") { const x = shapeOf(sel); post({ t: "remove", path: pathOf(x) }); x.remove(); select(null); }
+		else if (cmd === "remove") removeSel();
 	};
 
 	// ── 붙기 ── 끌어 옮길 때 쪽 가장자리 · 가운데, 이웃 요소의 가장자리 · 가운데에 붙는다. Alt 를 누르고 끌면 붙지 않는다 (PowerPoint 와 같다)
@@ -483,6 +797,14 @@
 		if (place) {
 			if (e.button !== 0) return setPlace(null);
 			[place.x0, place.y0] = slideXY(e);
+			e.preventDefault();
+			return;
+		}
+		// 서식 복사 중: 누른 요소에 찍고 끝낸다. 쪽 바탕 · 오른쪽 단추를 누르면 그만둔다
+		if (painter) {
+			const t = e.target;
+			if (e.button === 0 && t !== root && root.contains(t) && !t.closest?.("#deck-ui")) paintOn(t);
+			else { painter = null; document.documentElement.removeAttribute("data-deck-paint"); announce(); }
 			e.preventDefault();
 			return;
 		}
@@ -633,15 +955,18 @@
 		if (mode !== "edit") return;
 		if (edit) {
 			if (e.key === "Escape") { edit.cancel = true; edit.el.blur(); e.preventDefault(); }
+			else if (e.key === "Enter" && !e.shiftKey && !e.isComposing && listEnter()) e.preventDefault();
 			else if (e.key === "Enter" && !e.shiftKey && !e.isComposing) { edit.el.blur(); e.preventDefault(); }
 			else if (e.key === "Enter" && e.shiftKey && !e.isComposing) { document.execCommand("insertLineBreak"); e.preventDefault(); }
 			return;
 		}
 		if (place) { if (e.key === "Escape") { setPlace(null); e.preventDefault(); } return; }
+		if (painter && e.key === "Escape") { painter = null; document.documentElement.removeAttribute("data-deck-paint"); announce(); e.preventDefault(); return; }
 		// 붙여 넣기는 고른 것이 없어도 된다 — 복사한 요소는 앱이 들고 있다가 paste 명령으로 돌려준다
 		if (ctrl && k === "v") { post({ t: "pasteReq" }); e.preventDefault(); return; }
 		if (!sel) return;
 		if (ctrl && k === "c") { copy(); e.preventDefault(); }
+		else if (ctrl && k === "x") { copy(); removeSel(); e.preventDefault(); }
 		else if (ctrl && k === "d") { dup(); e.preventDefault(); }
 		else if (ctrl && ["b", "i", "u"].includes(k)) { toggle({ b: "bold", i: "italic", u: "underline" }[k]); e.preventDefault(); }
 		else if (e.ctrlKey || e.altKey) return;
@@ -783,17 +1108,19 @@
 	const opacityOf = (el) => { let o = 1; for (let e = el; e && e !== document.documentElement; e = e.parentElement) o *= +css(e).opacity || 1; return o; };
 	// 글꼴 목록 전체를 넘긴다 — 앞 글꼴이 이 PC 에 없으면 브라우저는 다음 글꼴로 그린다. 내보내기도 같은 차례로 고른다
 	const fontOf = (s) => s.fontFamily.split(",").map((f) => f.replace(/["']/g, "").trim()).filter(Boolean).join("|");
+	/** 글머리 표지: 목록 문단(data-li)의 맨 앞 span. 글상자 안 글로 치지 않고 PowerPoint 글머리로 넘긴다 (setList) */
+	const isMark = (n) => n.nodeType === 1 && n.hasAttribute("data-bu") && !!n.parentElement?.hasAttribute("data-li") && n === n.parentElement.firstElementChild;
 	const isTextBlock = (el) => {
 		let text = false;
 		for (const n of el.childNodes) {
 			if (n.nodeType === 3) { if (n.nodeValue.trim()) text = true; }
-			else if (n.nodeType === 1) { if (!INLINE.has(n.tagName) || css(n).display.includes("block") || css(n).display === "flex") return false; }
+			else if (n.nodeType === 1 && !isMark(n)) { if (!INLINE.has(n.tagName) || css(n).display.includes("block") || css(n).display === "flex") return false; }
 		}
 		return text || (el.innerText || "").trim() !== "";
 	};
 	// 숨은 iframe 에서는 글꼴 · 그림 준비가 끝없이 미뤄질 때가 있다 — 기다림마다 한도를 둔다
 	const within = (p, ms) => Promise.race([Promise.resolve(p).catch(() => {}), new Promise((r) => setTimeout(r, ms))]);
-	const hasInlineOnly = (el) => [...el.children].every((c) => INLINE.has(c.tagName) && !css(c).display.includes("block"));
+	const hasInlineOnly = (el) => [...el.children].every((c) => isMark(c) || INLINE.has(c.tagName) && !css(c).display.includes("block"));
 
 	// ── 굽기 — 요소를 브라우저가 그린 그대로 PNG 로 ──
 	// PowerPoint 가 같은 모양으로 그릴 수 없는 것(그라데이션 · 그림자 · 변형 · 필터 · ::before/::after · 그림 · SVG)은
@@ -1006,7 +1333,7 @@
 
 	// 글자 조각. 브라우저가 실제로 줄을 바꾼 자리에서 조각을 나누고 soft 를 단다 — PPT 에서 같은 자리에 줄 바꿈(<a:br>)을 넣어
 	// 한국어 낱말 끊기(keep-all)와 줄 수가 웹과 같게 된다. PowerPoint 는 한국어를 글자 단위로 끊는다.
-	function runsOf(el) {
+	function runsOf(el, noMark) {
 		const runs = [];
 		const line = { top: null };
 		const range = document.createRange();
@@ -1042,6 +1369,7 @@
 					runs.push({ ...style, text: raw.slice(start).replace(/\s+/g, " "), soft });
 				} else if (n.nodeType === 1) {
 					if (n.tagName === "BR") { runs.push({ text: "\n", br: true }); line.top = null; }
+					else if (noMark && isMark(n)) { /* 글머리 표지는 문단의 글머리로 넘긴다 */ }
 					else if (visible(n)) walk(n);
 				}
 			}
@@ -1157,7 +1485,7 @@
 			if (isTextBlock(ch) && hasInlineOnly(ch)) {
 				const pl = parseFloat(s.paddingLeft) + (parseFloat(s.borderLeftWidth) || 0), pr = parseFloat(s.paddingRight) + (parseFloat(s.borderRightWidth) || 0);
 				const pt = parseFloat(s.paddingTop) + (parseFloat(s.borderTopWidth) || 0), pb = parseFloat(s.paddingBottom) + (parseFloat(s.borderBottomWidth) || 0);
-				const runs = runsOf(ch);
+				const mark = [...ch.children].find(isMark), runs = runsOf(ch, !!mark);
 				if (runs.length) {
 					const flex = s.display.includes("flex") || s.display.includes("grid");
 					// 끝 맞춤은 표기가 엔진마다 다르다 — WebView2 는 flex-end 를 flow-end 로 돌려준다. 그래서 「end 로 끝나는가」로 본다
@@ -1173,7 +1501,10 @@
 					const fm = fontMetrics(fb ? fb.s : s);
 					const lh = isNaN(lhRaw) ? fm.asc + fm.desc : lhRaw;
 					const top = r.y + pt;
-					items.push({ type: "text", x: r.x + pl, y: top, w: r.w - pl - pr, h: r.h - pt - pb, runs, align: align === "start" ? "left" : align === "end" ? "right" : align, valign, lineHeight: lh, baseline: fb ? fb.y - S.top - top : null, size0: fb ? fb.size : parseFloat(s.fontSize), alpha: op });
+					// 글머리 문단: 글상자를 표지 자리(내어쓰기만큼 왼쪽)에서 열고, 글머리와 글 사이를 내어쓰기 너비로 둔다
+					const ti = mark ? Math.min(0, parseFloat(s.textIndent) || 0) : 0;
+					const bullet = mark ? { ...(/^\d+/.test(mark.getAttribute("data-bu")) ? { num: parseInt(mark.getAttribute("data-bu"), 10) } : { char: mark.getAttribute("data-bu") || "•" }), indent: -ti || mark.getBoundingClientRect().width } : undefined;
+					items.push({ type: "text", x: r.x + pl + ti, y: top, w: r.w - pl - pr - ti, h: r.h - pt - pb, runs, bullet, align: align === "start" ? "left" : align === "end" ? "right" : align, valign, lineHeight: lh, baseline: fb ? fb.y - S.top - top : null, size0: fb ? fb.size : parseFloat(s.fontSize), alpha: op });
 				}
 				return;
 			}
