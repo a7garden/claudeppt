@@ -176,9 +176,11 @@ interface Ctx {
 	/** 마지막에 쓴 강조 색: 단추 아래 띠에 칠한다 */
 	mark: string;
 	setMark: (c: string) => void;
+	/** 고른 요소를 요청에 넣기 (Workspace askSelected) */
+	onAsk?: () => void;
 }
 
-export function Ribbon({ win, info, placing, off }: { win: React.MutableRefObject<Window | null>; info: SelInfo | null; placing: string | null; off: boolean }) {
+export function Ribbon({ win, info, placing, off, onAsk }: { win: React.MutableRefObject<Window | null>; info: SelInfo | null; placing: string | null; off: boolean; onAsk?: () => void }) {
 	const t = useT();
 	const tool = useDeck((s) => s.tool);
 	const setTool = useDeck((s) => s.setTool);
@@ -206,7 +208,7 @@ export function Ribbon({ win, info, placing, off }: { win: React.MutableRefObjec
 	const inTable = !!info?.cell || info?.tag === "table";
 	const tabs: [Tab, Key][] = [["home", "rbHome"], ["insert", "rbInsert"], ...(info ? [["shape", "rbShapeFmt"] as [Tab, Key]] : []), ...(inTable ? [["table", "rbTable"] as [Tab, Key]] : [])];
 	const tab: Tab = tabs.some(([k]) => k === saved) ? saved : "home";
-	const c: Ctx = { t, info, send, vars, insert, placing, win, mark, setMark };
+	const c: Ctx = { t, info, send, vars, insert, placing, win, mark, setMark, onAsk };
 	// 접힌 띠에서 두 번 누르면 첫 누름이 펴고 두 번 누르기가 다시 접었다: 방금 편 것이면 두 번 누르기는 편 채로 둔다
 	const opened = useRef(0);
 	const go = (k: Tab) => { setTab(k); if (mini) { setMini(false); opened.current = Date.now(); } };
@@ -266,7 +268,7 @@ function Field({ value, commit, className, label, disabled, placeholder, mono }:
 	);
 }
 
-function HomeTab({ t, info, send, vars, mark, setMark }: Ctx) {
+function HomeTab({ t, info, send, vars, mark, setMark, onAsk }: Ctx) {
 	const pt = info ? Math.round(info.size * 0.75 * 10) / 10 : null;
 	const step = (d: 1 | -1) => {
 		if (pt == null) return;
@@ -375,6 +377,16 @@ function HomeTab({ t, info, send, vars, mark, setMark }: Ctx) {
 					<Icon d="M3 4.5h10M6.5 4.5V3h3v1.5M4.5 4.5l.6 9h5.8l.6-9" />
 				</button>
 			</Grp>
+
+			{/* 고른 요소를 요청에 넣기: 그 요소를 가리키는 핀을 꽂고 대화칸으로 (Workspace askAbout) */}
+			{onAsk && (
+				<Grp label={t("askEl")}>
+					<button className="rb-ask" disabled={none} onClick={onAsk} title={t("askElHint")} aria-label={t("askEl")}>
+						<Icon d="M3 3.5h10v7H7.5L4.5 13v-2.5H3z" />
+						<span>{t("askEl")}</span>
+					</button>
+				</Grp>
+			)}
 		</>
 	);
 }
