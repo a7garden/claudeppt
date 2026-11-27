@@ -163,6 +163,8 @@ pub async fn claude_detect(path: String) -> Res<Option<Detected>> {
 pub struct RunSpec {
 	turn: String,
 	dir: String,
+	/// 돌 자리 — 덱의 작업 사본 (vcs_work_prepare). 없으면 덱 폴더 (글꼴 찾기)
+	cwd: Option<String>,
 	prompt: String,
 	system: String,
 	claude_path: String,
@@ -209,15 +211,16 @@ fn live_transcript(root: &Path, dir: &Path, sid: &str) -> Option<PathBuf> {
 	std::fs::read_dir(root).ok()?.flatten().map(|e| e.path().join(format!("{sid}.jsonl"))).find(|p| p.is_file())
 }
 
-/// 이어 쓰기 전에 — 이 작업 폴더 자리에 기록이 없으면 다른 자리의 것이나 덱에 남긴 것을 놓는다
-fn restore_transcript(root: &Path, dir: &Path, sid: &str) {
-	let key = project_key(dir);
+/// 이어 쓰기 전에 — 이 작업 폴더(cwd) 자리에 기록이 없으면 다른 자리의 것이나 덱(deck)에 남긴 것을 놓는다.
+/// 작업 폴더와 덱은 다르다 — 턴은 덱의 작업 사본(vcs.rs 「작업 사본」)에서 돌고, 기록은 덱에 남는다
+fn restore_transcript(root: &Path, cwd: &Path, deck: &Path, sid: &str) {
+	let key = project_key(cwd);
 	// 아주 긴 경로는 Claude Code 가 이름을 줄이고 해시를 붙인다 — 그 이름을 모르므로 놓지 않는다 (claude 가 못 찾으면 화면이 요약으로 새로 잇는다)
 	if !valid_sid(sid) || key.len() > 200 {
 		return;
 	}
 	let here = root.join(&key).join(format!("{sid}.jsonl"));
-	let backup = backup_path(dir, sid);
+	let backup = backup_path(deck, sid);
 	// 2026.11.26 : 덱에 남긴 기록이 더 길면 그것으로 — 팀원 PC 에서 이어 쓴 턴(collab.rs)은 덱의 기록에만 붙는다. 기록은 뒤에 덧붙기만 한다
 	let len = |p: &Path| std::fs::metadata(p).map(|m| m.len()).unwrap_or(0);
 	if here.is_file() {
@@ -226,20 +229,20 @@ fn restore_transcript(root: &Path, dir: &Path, sid: &str) {
 		}
 		return;
 	}
-	let src = live_transcript(root, dir, sid).or_else(|| Some(backup.clone()).filter(|p| p.is_file()));
+	let src = live_transcript(root, cwd, sid).or_else(|| Some(backup.clone()).filter(|p| p.is_file()));
 	if let Some(src) = src {
 		let _ = std::fs::create_dir_all(here.parent().unwrap());
 		let _ = std::fs::copy(src, &here);
 	}
 }
 
-/// 턴이 끝난 뒤 — claude 쪽 기록을 덱에 남긴다
-fn backup_transcript(root: &Path, dir: &Path, sid: &str) {
+/// 턴이 끝난 뒤 — 작업 폴더(cwd)에서 돈 claude 쪽 기록을 덱에 남긴다
+fn backup_transcript(root: &Path, cwd: &Path, deck: &Path, sid: &str) {
 	if !valid_sid(sid) {
 		return;
 	}
-	if let Some(src) = live_transcript(root, dir, sid) {
-		let to = backup_path(dir, sid);
+	if let Some(src) = live_transcript(root, cwd, sid) {
+		let to = backup_path(deck, sid);
 		let _ = std::fs::create_dir_all(to.parent().unwrap());
 		let _ = std::fs::copy(src, to);
 	}
@@ -398,17 +401,18 @@ pub async fn execute(job: Job<'_>, mut on_line: impl FnMut(String) + Send, on_pi
 pub async fn claude_run(app: AppHandle, state: State<'_, AppState>, spec: RunSpec) -> Res<Done> {
 	let exe = resolve(&spec.claude_path).ok_or("claude 실행 파일을 찾지 못했다 — 설정 › Claude 에서 경로를 준다")?;
 	let dir = PathBuf::from(&spec.dir);
+	let cwd = spec.cwd.as_deref().map(PathBuf::from).unwrap_or_else(|| dir.clone());
 	let root = projects_root();
 	let resume = spec.resume.as_deref().filter(|s| !s.is_empty());
 	if let (Some(sid), Some(r)) = (resume, &root) {
-		restore_transcript(r, &dir, sid);
+		restore_transcript(r, &cwd, &dir, sid);
 	}
 	let turn = spec.turn.clone();
 	let (app2, turn2) = (app.clone(), turn.clone());
 	let runs = &state.runs;
 	let job = Job {
 		exe,
-		dir: &dir,
+		dir: &cwd,
 		prompt: &spec.prompt,
 		system: &spec.system,
 		model: &spec.model,
@@ -421,7 +425,7 @@ pub async fn claude_run(app: AppHandle, state: State<'_, AppState>, spec: RunSpe
 	state.runs.lock().unwrap().remove(&turn);
 	let ended = ended?;
 	if let (Some(r), Some(s)) = (&root, &ended.sid) {
-		backup_transcript(r, &dir, s);
+		backup_transcript(r, &cwd, &dir, s);
 	}
 	Ok(Done { turn, code: ended.code, stderr: ended.stderr })
 }
@@ -519,32 +523,43 @@ mod tests {
 		std::fs::write(root.join(project_key(&deck)).join(format!("{sid}.jsonl")), "{\"a\":1}\n").unwrap();
 
 		// 턴이 끝나면 덱에 남는다
-		backup_transcript(&root, &deck, sid);
+		backup_transcript(&root, &deck, &deck, sid);
 		assert_eq!(std::fs::read_to_string(backup_path(&deck, sid)).unwrap(), "{\"a\":1}\n");
 
 		// 덱을 옮기면 (같은 PC) 옛 자리의 기록을 새 자리에 놓는다
 		std::fs::create_dir_all(&moved).unwrap();
-		restore_transcript(&root, &moved, sid);
+		restore_transcript(&root, &moved, &moved, sid);
 		assert!(root.join(project_key(&moved)).join(format!("{sid}.jsonl")).is_file());
 
 		// claude 쪽 기록이 모두 없어도 (다른 PC · 지움) 덱에 남긴 것으로 되돌린다
 		std::fs::remove_dir_all(&root).unwrap();
-		restore_transcript(&root, &deck, sid);
+		restore_transcript(&root, &deck, &deck, sid);
 		assert_eq!(std::fs::read_to_string(root.join(project_key(&deck)).join(format!("{sid}.jsonl"))).unwrap(), "{\"a\":1}\n");
 
 		// 이미 있으면 덮지 않는다 (claude 쪽이 더 길다 = 더 새것. 기록은 덧붙기만 한다)
 		std::fs::write(root.join(project_key(&deck)).join(format!("{sid}.jsonl")), "{\"a\":1}\n{\"b\":2}\n").unwrap();
-		restore_transcript(&root, &deck, sid);
+		restore_transcript(&root, &deck, &deck, sid);
 		assert_eq!(std::fs::read_to_string(root.join(project_key(&deck)).join(format!("{sid}.jsonl"))).unwrap(), "{\"a\":1}\n{\"b\":2}\n");
 
 		// 팀원 PC 에서 이어 써 덱의 기록이 더 길면 그것으로 (collab.rs 가 save_transcript 로 남긴다)
 		save_transcript(&deck, sid, "{\"a\":1}\n{\"b\":2}\n{\"c\":3}\n");
-		restore_transcript(&root, &deck, sid);
+		restore_transcript(&root, &deck, &deck, sid);
 		assert_eq!(std::fs::read_to_string(root.join(project_key(&deck)).join(format!("{sid}.jsonl"))).unwrap(), "{\"a\":1}\n{\"b\":2}\n{\"c\":3}\n");
 
+		// 덱의 작업 사본에서 돈다 — 기록은 사본 자리에 놓이고, 끝나면 늘어난 것이 덱에 남는다
+		let work = t.join("사본");
+		std::fs::create_dir_all(&work).unwrap();
+		restore_transcript(&root, &work, &deck, sid);
+		let live = root.join(project_key(&work)).join(format!("{sid}.jsonl"));
+		assert_eq!(std::fs::read_to_string(&live).unwrap(), "{\"a\":1}\n{\"b\":2}\n{\"c\":3}\n");
+		std::fs::write(&live, "{\"a\":1}\n{\"b\":2}\n{\"c\":3}\n{\"d\":4}\n").unwrap();
+		backup_transcript(&root, &work, &deck, sid);
+		assert!(std::fs::read_to_string(backup_path(&deck, sid)).unwrap().ends_with("{\"d\":4}\n"));
+		assert!(!backup_path(&work, sid).exists(), "사본 폴더에는 남기지 않는다");
+
 		// 이상한 id 는 경로에 쓰지 않는다
-		restore_transcript(&root, &deck, "../../evil");
-		backup_transcript(&root, &deck, "../../evil");
+		restore_transcript(&root, &deck, &deck, "../../evil");
+		backup_transcript(&root, &deck, &deck, "../../evil");
 		assert!(!t.join("evil.jsonl").exists());
 		let _ = std::fs::remove_dir_all(&t);
 	}

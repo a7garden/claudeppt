@@ -1093,12 +1093,13 @@ fn on_message(h: &Arc<Hub>, conn: u64, direct: &mpsc::UnboundedSender<String>, t
 // 2026.11.26 : 팀원이 「내 PC 의 Claude」로 보낸 턴도 덱 주인 앱이 지금처럼 지휘한다(줄 세우기 · 대화 · 판 · 그림 채우기).
 // claude 프로세스만 팀원 PC 의 사본 폴더에서 돈다. 그래서 겪는 것이 덱 주인 Claude 와 같다:
 //   출력 줄      팀원 PC 가 보낸 줄을 이 PC 의 「claude」 사건으로 그대로 낸다 — 대화칸 · 도구 목록 · 세션 id 가 같은 코드로 돈다
-//   파일 쓰기    Claude 가 사본에 쓰는 즉시 그 파일을 보낸다(put). 여기서 덱에 쓰면 폴더 감시가 모두의 화면을 바로 다시 그린다
+//   파일 쓰기    Claude 가 사본에 쓰는 즉시 그 파일을 보낸다(put). 여기서는 덱이 아니라 그 턴의 작업 사본(vcs.rs)에 쓰고,
+//                턴이 끝나면 덱 주인 화면이 묶음 하나로 덱 위에 얹는다 (2026.11.27 — 전에는 덱에 바로 써서 그 사이 고친 것을 덮었다)
 //   사본 맞추기  /_/runner/manifest · file 로 받고, 덱이 바뀌면 바뀐 경로를 알린다(files_changed) — Claude 는 늘 최신 파일을 읽는다
 //   대화 기록    이어 쓸 세션이면 기록 글을 함께 보내고, 끝나면 늘어난 뒷부분을 받아 덱에 남긴다 — 누가 어느 PC 에서 이어 써도 맥락이 같다.
 //                그 PC 가 마지막으로 이어 쓴 뒤 아무도 이어 쓰지 않았으면 기록을 다시 보내지 않는다 (기록은 수 MB 까지 커진다 — 바깥 길에서 시작이 늦었다)
 //   경로        출력 줄 안의 사본 경로는 팀원 PC 가 표시(DECK_MARK)로 바꿔 보내고 여기서 덱 경로로 채운다 — 서로의 PC 경로(사용자 이름)가 건너가지 않는다
-// 받는 쓰기는 그 기기의 턴이 도는 동안, 덱 폴더 안, .git · .claudeppt 밖만. 팀원 PC 가 덱 주인 PC 의 다른 곳을 건드리지 못하게
+// 받는 쓰기는 그 기기의 턴이 도는 동안, 그 턴의 작업 사본 안, .git · .claudeppt 밖만. 팀원 PC 가 덱 주인 PC 의 다른 곳을 건드리지 못하게
 
 /// 팀원 PC 의 Claude 연결 하나
 struct Runner {
@@ -1113,7 +1114,10 @@ pub const DECK_MARK_FWD: &str = "@@CPPT_DECK_FWD@@";
 /// 팀원 PC 에서 도는 턴
 struct RemoteRun {
 	device: String,
+	/// 덱 폴더 — 세션 기록을 남기는 곳
 	dir: PathBuf,
+	/// 이 턴의 작업 사본 (vcs.rs 「작업 사본」) — 팀원 PC 가 보낸 파일은 덱이 아니라 여기에 쓴다. 끝나면 덱 주인 화면이 덱 위에 얹는다
+	work: PathBuf,
 	done: Option<oneshot::Sender<Value>>,
 }
 
@@ -1334,14 +1338,16 @@ fn on_runner_message(h: &Arc<Hub>, device: &str, text: &str) {
 	let turn = m["turn"].as_str().unwrap_or("").to_string();
 	// 그 기기의 턴인가 — 남의 턴 이름으로 줄 · 파일을 보내지 못하게
 	let run_dir = || h.remote_runs.lock().unwrap().get(&turn).filter(|r| r.device == device).map(|r| r.dir.clone());
+	let run_work = || h.remote_runs.lock().unwrap().get(&turn).filter(|r| r.device == device).map(|r| r.work.clone());
 	match m["t"].as_str().unwrap_or("") {
 		"line" => {
-			let Some(dir) = run_dir() else { return };
+			// 출력 줄의 경로는 작업 사본으로 — 덱 주인 화면이 고친 파일을 사본 기준으로 읽는다
+			let Some(dir) = run_work() else { return };
 			let line = rewrite(m["line"].as_str().unwrap_or(""), &dir);
 			let _ = h.app.emit("claude", json!({ "turn": turn, "line": line }));
 		}
 		"put" => {
-			let Some(dir) = run_dir() else { return };
+			let Some(dir) = run_work() else { return };
 			let rel = m["path"].as_str().unwrap_or("");
 			use base64::Engine;
 			let Ok(bytes) = base64::engine::general_purpose::STANDARD.decode(m["data"].as_str().unwrap_or("")) else { return };
@@ -1385,6 +1391,8 @@ fn on_runner_message(h: &Arc<Hub>, device: &str, text: &str) {
 pub struct RemoteSpec {
 	turn: String,
 	dir: String,
+	/// 이 턴의 작업 사본 — 없으면 덱 폴더
+	work: Option<String>,
 	device: String,
 	prompt: String,
 	system: String,
@@ -1398,6 +1406,7 @@ pub async fn claude_run_remote(app: AppHandle, spec: RemoteSpec) -> Res<Value> {
 	let h = hub(&app).ok_or("협업이 꺼져 있다")?;
 	let tx = h.runners.lock().unwrap().get(&spec.device).map(|r| r.tx.clone()).ok_or("그 팀원 PC 의 Claude 가 연결되어 있지 않다")?;
 	let dir = PathBuf::from(&spec.dir);
+	let work = spec.work.as_deref().map(PathBuf::from).unwrap_or_else(|| dir.clone());
 	let resume = spec.resume.clone().filter(|s| !s.is_empty());
 	// 이어 쓸 기록 — 덱에 남겨 두고(끝나면 뒷부분을 여기에 잇는다), 그 PC 가 이미 같은 기록을 쥐고 있으면 보내지 않는다
 	let mut transcript = None;
@@ -1415,7 +1424,7 @@ pub async fn claude_run_remote(app: AppHandle, spec: RemoteSpec) -> Res<Value> {
 		}
 	}
 	let (done_tx, done_rx) = oneshot::channel();
-	h.remote_runs.lock().unwrap().insert(spec.turn.clone(), RemoteRun { device: spec.device.clone(), dir, done: Some(done_tx) });
+	h.remote_runs.lock().unwrap().insert(spec.turn.clone(), RemoteRun { device: spec.device.clone(), dir, work, done: Some(done_tx) });
 	let job = json!({ "t": "run", "turn": spec.turn, "prompt": spec.prompt, "system": spec.system, "resume": resume, "sessionId": spec.session_id, "transcript": transcript, "transcriptLen": transcript_len });
 	if tx.send(job.to_string()).is_err() {
 		h.remote_runs.lock().unwrap().remove(&spec.turn);

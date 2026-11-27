@@ -3,6 +3,10 @@ import { call as invoke, remote, remoteDeck } from "./transport";
 
 /** author — 이 판을 시킨 팀원 이름 (직접 편집 · 바깥 CLI 의 판은 ClaudePPT) */
 export interface Commit { n: number; hash: string; short: string; date: string; subject: string; tags: string[]; author: string }
+/** 덱에 들어가지 못한 변경 묶음 (vcs.rs Hold) — name 은 그 턴 id. conflicts 는 얹으려다 겹친 파일(얹을 때만 안다) */
+export interface Hold { name: string; hash: string; author: string; subject: string; date: string; files: string[]; conflicts: string[] }
+/** 턴의 변경을 덱 위에 얹은 결과 (vcs.rs Landed) */
+export type Landed = { kind: "none" } | { kind: "applied"; commit: Commit; files: string[] } | { kind: "held"; hold: Hold };
 export interface LibItem { dir: string; deck: any; modified: number }
 /** 설정 「바깥 연결」 — 통로 · 최근 바깥 명령 · 스킬 상태 (control.rs remote_info) */
 export interface RemoteInfo {
@@ -44,17 +48,23 @@ export const api = {
 	vcsInit: (dir: string) => invoke<void>("vcs_init", { dir }),
 	/** author — 이 판을 시킨 팀원 이름. 주면 git 작성자로 남는다 */
 	commit: (dir: string, message: string, author?: string) => invoke<Commit | null>("vcs_commit", { dir, message, author: author || null }),
-	/** 이 파일들만 한 판으로 — 여러 세션의 턴이 함께 돌 때 끝난 턴의 판에 다른 턴의 파일이 섞이지 않게 */
-	commitPaths: (dir: string, message: string, author: string | undefined, paths: string[]) => invoke<Commit | null>("vcs_commit_paths", { dir, message, author: author || null, paths }),
+	/** 작업 사본 (vcs.rs) — Claude 턴은 세션마다 둔 사본에서 돌고, 끝나면 묶음 하나로 덱 위에 얹는다. 겹치면 보류 갈래로 남는다 */
+	workPrepare: (dir: string, key: string) => invoke<{ path: string; base: string }>("vcs_work_prepare", { dir, key }),
+	workBring: (dir: string, key: string, paths: string[]) => invoke<void>("vcs_work_bring", { dir, key, paths }),
+	workFinish: (dir: string, key: string, turn: string, message: string, author?: string) => invoke<Landed>("vcs_work_finish", { dir, key, turn, message, author: author || null }),
+	holds: (dir: string) => invoke<Hold[]>("vcs_holds", { dir }),
+	holdRetry: (dir: string, name: string) => invoke<Landed>("vcs_hold_retry", { dir, name }),
+	holdTake: (dir: string, name: string, message: string, author?: string) => invoke<Commit | null>("vcs_hold_take", { dir, name, message, author: author || null }),
+	holdDrop: (dir: string, name: string) => invoke<void>("vcs_hold_drop", { dir, name }),
 	log: (dir: string, limit?: number) => invoke<Commit[]>("vcs_log", { dir, limit }),
 	tag: (dir: string, name: string) => invoke<void>("vcs_tag", { dir, name }),
 	restore: (dir: string, hash: string, message: string, author?: string) => invoke<Commit | null>("vcs_restore", { dir, hash, message, author: author || null }),
 
 	claudeDetect: (path: string) => invoke<{ path: string; version: string } | null>("claude_detect", { path }),
-	claudeRun: (spec: { turn: string; dir: string; prompt: string; system: string; claudePath: string; model: string; effort: string; resume?: string | null; sessionId?: string | null; mode?: "fonts" }) => invoke<{ code: number; stderr: string }>("claude_run", { spec }),
+	claudeRun: (spec: { turn: string; dir: string; cwd?: string; prompt: string; system: string; claudePath: string; model: string; effort: string; resume?: string | null; sessionId?: string | null; mode?: "fonts" }) => invoke<{ code: number; stderr: string }>("claude_run", { spec }),
 	claudeStop: (turn: string) => invoke<void>("claude_stop", { turn }),
 	/** 팀원 PC 의 Claude 로 돌린다 (collab.rs claude_run_remote) — claudeRun 과 같은 답 */
-	claudeRunRemote: (spec: { turn: string; dir: string; device: string; prompt: string; system: string; resume?: string | null; sessionId?: string | null }) => invoke<{ code: number; stderr: string }>("claude_run_remote", { spec }),
+	claudeRunRemote: (spec: { turn: string; dir: string; work?: string; device: string; prompt: string; system: string; resume?: string | null; sessionId?: string | null }) => invoke<{ code: number; stderr: string }>("claude_run_remote", { spec }),
 
 	toolsDetect: () => invoke<Tool[]>("tools_detect"),
 	imageGenerate: (spec: { provider: string; prompt: string; out: string; apiKey?: string; model?: string; size?: string }) => invoke<string>("image_generate", { spec }),

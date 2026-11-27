@@ -97,7 +97,7 @@ function wireFollow() {
 }
 
 /** 호스트와 브라우저가 함께 쓰는 칸 — 나머지(보는 쪽 · 도구 · 비교 · 알림 · 되돌리기 쌓임)는 보는 사람 몫 */
-const SHARED = ["dir", "id", "deck", "rev", "sessions", "bind", "talkKey", "versions", "releases", "running", "runs", "pins", "assign", "editing", "histBy"] as const;
+const SHARED = ["dir", "id", "deck", "rev", "sessions", "bind", "talkKey", "versions", "releases", "holds", "running", "runs", "pins", "assign", "editing", "histBy"] as const;
 type Key = (typeof SHARED)[number];
 
 // ── 호스트 ──
@@ -371,7 +371,8 @@ onIntent("direct", async (from, a) => {
 		op.t === "remove";
 	if (typeof a.slideId !== "string" || !okPath || !okOp) throw new Error("bad edit");
 	mustOwn(from, a.slideId);
-	await d.applyDirect(a.slideId, path, op, from.name || tNow("collabNoName"));
+	// base — 팀원이 본 쪽 그림의 표식. 그 뒤 남이 그 쪽을 바꿨으면 받지 않는다 (store applyDirect)
+	await d.applyDirect(a.slideId, path, op, from.name || tNow("collabNoName"), Number.isFinite(a.base) ? a.base : undefined);
 });
 
 /** 핀 · 의견 — 꽂기 · 고치기 · 지우기는 그 사람 것만, 해결 · 세션에 보내기는 누구나 */
@@ -633,7 +634,7 @@ function remoteActions() {
 		fixDiff: () => { hostOnly(); },
 		undo: async () => { await intent("undo").catch(fail); },
 		redo: async () => { await intent("redo").catch(fail); },
-		applyDirect: async (slideId: string, path: number[] | null, op: unknown) => { await intent("direct", { slideId, path, op }).catch(fail); },
+		applyDirect: async (slideId: string, path: number[] | null, op: unknown, _by?: string, base?: number) => { await intent("direct", { slideId, path, op, base }).catch(fail); },
 		addPin: (p: any) => { const id = "p" + Date.now().toString(36); intent("pinAdd", { ...p, id }).catch(fail); return id; },
 		updatePin: (id: string, text: string) => { intent("pinUpdate", { id, text }).catch(fail); },
 		removePin: (id: string) => { intent("pinRemove", { id }).catch(fail); },

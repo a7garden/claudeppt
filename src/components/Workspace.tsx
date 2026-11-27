@@ -73,7 +73,7 @@ export function SlideFrame({ file, rev, width, height, w, h, onWin, revHash }: {
  *  iframe 하나를 바로 갈아 끼우면 새 문서가 그려지기 전의 빈 흰 바탕이 매번 번쩍인다.
  *  읽는 중에 또 넘기면 읽던 것은 버리고 마지막 쪽만 읽는다 — 보이는 것은 끝까지 옛 쪽이다 */
 type Layer = { k: string; file: string; rev: number; revHash?: string };
-function SwapFrame({ file, rev, revHash, onWin, ...size }: { file: string; rev: number; revHash?: string; width: number; w: number; h: number; onWin: (win: Window, file: string) => void }) {
+function SwapFrame({ file, rev, revHash, onWin, ...size }: { file: string; rev: number; revHash?: string; width: number; w: number; h: number; onWin: (win: Window, file: string, rev: number) => void }) {
 	const cur: Layer = { k: `${file}|${rev}|${revHash || ""}`, file, rev, revHash };
 	const [shown, setShown] = useState<Layer | null>(null);
 	const latest = useRef(cur.k);
@@ -88,7 +88,7 @@ function SwapFrame({ file, rev, revHash, onWin, ...size }: { file: string; rev: 
 						<SlideFrame file={l.file} rev={l.rev} revHash={l.revHash} {...size}
 							onWin={top ? undefined : (win) => {
 								if (!win) return; // 걷히는 옛 창이 null 을 알려도 지금 창을 지우지 않는다
-								onWin(win, l.file);
+								onWin(win, l.file, l.rev);
 								// load 직후는 아직 첫 그림이 화면에 안 올라왔을 수 있어 두 프레임 기다린다. 그 사이 또 넘겼으면 이 쪽은 버린다
 								requestAnimationFrame(() => requestAnimationFrame(() => { if (latest.current === l.k) setShown(l); }));
 							}} />
@@ -397,7 +397,8 @@ function Stage() {
 	const [active, setActive] = useState<string | null>(null);
 	const win = useRef<Window | null>(null);
 	// 무대 슬라이드 창 → 그 쪽 id. 쪽을 넘긴 직후 옛 창이 늦게 보낸 편집(방향키 이동 · 그림 넣기)도 제 쪽에 쓴다 — 지금 쪽에 쓰면 엉뚱한 쪽이 고쳐진다
-	const owner = useRef(new WeakMap<Window, string>());
+	// 무대 창 → 그 쪽 id 와 그 창이 그린 다시 그릴 표식(rev) — 손 편집이 「본 그림 뒤에 남이 바꿨는지」를 덱 주인이 가리게 함께 보낸다 (store applyDirect base)
+	const owner = useRef(new WeakMap<Window, { id: string; rev: number }>());
 	const [selInfo, setSelInfo] = useState<SelInfo | null>(null);
 	// 우클릭 메뉴가 여는 순간의 고른 것 — 메뉴는 고르기(sel) 바로 뒤에 와서 상태가 아직 다시 그려지지 않았다
 	const selNow = useRef<SelInfo | null>(null);
@@ -418,8 +419,10 @@ function Stage() {
 
 	// 직접 편집 — 무대 iframe 이 보낸 것만 받는다
 	useEffect(() => onFrame((m, src) => {
-		const sid = owner.current.get(src as Window);
-		if (!sid) return;
+		const seen = owner.current.get(src as Window);
+		if (!seen) return;
+		const sid = seen.id;
+		const edit = (path: number[] | null, op: Parameters<typeof applyDirect>[2]) => applyDirect(sid, path, op, undefined, seen.rev);
 		const now = src === win.current;
 		// 슬라이드 창 위에서 굴린 휠 · 누른 넘김 키 (rt.js 가 넘겨준다) · 고른 것의 서식 · 넣는 중인 것
 		if (now && m.t === "wheel") return wheel(m.dy);
@@ -431,12 +434,12 @@ function Stage() {
 		if (m.t === "redo") return void useDeck.getState().redo();
 		if (m.t === "copy") clip = { html: m.html, slide: sid, n: 0 };
 		else if (m.t === "pasteReq") { if (now) paste(sid); }
-		else if (m.t === "edit") applyDirect(sid, m.path, { t: "edit", html: m.html });
-		else if (m.t === "patch") applyDirect(sid, m.path, { t: "patch", style: m.style });
-		else if (m.t === "remove") applyDirect(sid, m.path, { t: "remove" });
-		else if (m.t === "append") applyDirect(sid, [], { t: "append", html: m.html });
-		else if (m.t === "after") applyDirect(sid, m.path, { t: "after", html: m.html });
-		else if (m.t === "order") applyDirect(sid, m.path, { t: "order", to: m.to });
+		else if (m.t === "edit") edit(m.path, { t: "edit", html: m.html });
+		else if (m.t === "patch") edit(m.path, { t: "patch", style: m.style });
+		else if (m.t === "remove") edit(m.path, { t: "remove" });
+		else if (m.t === "append") edit([], { t: "append", html: m.html });
+		else if (m.t === "after") edit(m.path, { t: "after", html: m.html });
+		else if (m.t === "order") edit(m.path, { t: "order", to: m.to });
 	}), [preview]);
 	// 쪽을 넘기거나 지난 판을 보면 옛 쪽의 고른 것을 내려놓는다 — 새 창이 다시 알린다
 	useEffect(() => { setSelInfo(null); setPlacing(null); }, [slide?.id, preview]);
@@ -488,7 +491,7 @@ function Stage() {
 				{ label: t("rbCopy"), kbd: "Ctrl+C", run: () => cmd("copy") },
 				{ label: t("rbDup"), kbd: "Ctrl+D", run: () => cmd("dup") },
 				...(selNow.current?.abs ? [{ label: t("rbFront"), run: () => cmd("arrange", "front") }, { label: t("rbBack"), run: () => cmd("arrange", "back") }] : []),
-				{ label: `${t("removeEl")} <${hit.tag}>`, kbd: "Delete", danger: true, run: () => applyDirect(slide.id, hit.path, { t: "remove" }) },
+				{ label: `${t("removeEl")} <${hit.tag}>`, kbd: "Delete", danger: true, run: () => applyDirect(slide.id, hit.path, { t: "remove" }, undefined, win.current ? owner.current.get(win.current)?.rev : undefined) },
 			] : []),
 			...(mode === "edit" && clip && !flow && !compare ? [{ label: t("rbPaste"), kbd: "Ctrl+V", run: () => paste(slide.id) }] : []),
 			"-",
@@ -542,7 +545,7 @@ function Stage() {
 						<div style={{ width: deck.size.w * scale, height: deck.size.h * scale, overflow: "hidden", position: "relative" }}>
 							<div style={{ position: "absolute", left: 0, top: 0 }}>
 								<SwapFrame file={slide.file} rev={rev[slide.id] || 0} w={deck.size.w} h={deck.size.h} width={deck.size.w * scale} revHash={preview?.hash}
-									onWin={(w, file) => { win.current = w; const id = useDeck.getState().deck?.slides.find((s) => s.file === file)?.id; if (id) owner.current.set(w, id); }} />
+									onWin={(w, file, r) => { win.current = w; const id = useDeck.getState().deck?.slides.find((s) => s.file === file)?.id; if (id) owner.current.set(w, { id, rev: r }); }} />
 							</div>
 						</div>
 						{!preview && !compare && <PageGuides w={deck.size.w} h={deck.size.h} scale={scale} />}

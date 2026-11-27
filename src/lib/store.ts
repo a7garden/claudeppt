@@ -8,16 +8,17 @@
 //   무대 보기            setFlow — 한 쪽 보기 ↔ 이어 보기(모든 쪽을 세로로 스크롤)
 //   요청칸 채우기        mentionSlide — 요청칸에 @쪽 넣기 · refill — 지난 요청을 다시 쓰기 (우클릭 메뉴 · 쪽 목록에서)
 //   쪽 손보기            addSlide · duplicateSlide · moveSlide · removeSlide — 쪽 목록 · 우클릭 메뉴가 같이 쓴다
-//   대화                 send → claude 한 턴 → 그림 채우기 → 한 판으로 남김 → .claudeppt/talk.json
+//   대화                 send → 작업 사본 맞추기 → claude 한 턴 → 그림 채우기 → 덱 위에 얹기(겹치면 보류) → .claudeppt/talk.json
+//   보류                 refreshHolds · holdRetry · holdTake · holdDrop — 덱에 얹지 못한 턴의 변경 묶음 (vcs.rs 「작업 사본」)
 //   바깥 작업            outside · OUTSIDE_MS — 앱 밖 Claude Code 가 방금 다룬 덱이면 send 가 보내기 전에 한 번 묻는다 (remote.ts touch)
-//   직접 편집            applyDirect → 원본 HTML 에 되쓰고 잠시 뒤 한 판으로 남김
+//   직접 편집            applyDirect → 원본 HTML 에 되쓰고 잠시 뒤 한 판으로 남김. 본 쪽 그림 이후 남이 고쳤으면 받지 않는다(base)
 //   판 · 릴리즈          refreshVersions · preview · restore · release (릴리즈 본체는 파일 끝 makeRelease — 바깥 CLI 도 쓴다)
 //   판 비교              startCompare · closeCompare · restoreSlide — 고른 판과 지금을 쪽마다 견주고 한 쪽만 되돌린다 (versions.ts)
 //   판 멘션              mentionVersion · send 의 @v<n> — 그 판 파일을 펼쳐 Claude 가 참고로 읽는다 (versions.ts versionContext)
 //   내보낸 PPTX 확인     verifyPptx — 내보내기 · 릴리즈 뒤 PowerPoint 가 그린 모양을 웹과 견주어 다를 때만 알린다 (check.ts) · fixDiff
 import { listen } from "@tauri-apps/api/event";
 import { create } from "zustand";
-import { api, type Commit } from "./api";
+import { api, type Commit, type Hold, type Landed } from "./api";
 import { type Deck, newId, readDeck, slideHtml, writeDeck } from "./deck";
 import { applyOp, type Op } from "./edits";
 // 내보내기 · 검사(pptxgenjs · jszip)는 쓸 때 불러온다 — 시작 청크를 가볍게
@@ -64,6 +65,8 @@ export interface Turn {
 	session?: string;
 	/** 팀원 PC 의 Claude 로 돈 턴 — 그 기기와 사람 (collab.rs 「팀원 PC 의 Claude」). 없으면 이 PC 의 Claude */
 	runner?: { device: string; name: string };
+	/** 덱에 얹지 못하고 보류로 남은 턴 (2026.11.27 vcs.rs 「작업 사본」) — 그 사이 같은 곳을 남이 고쳤다. name 은 보류 갈래 이름(턴 id) · files 는 겹친 파일 */
+	held?: { name: string; files: string[] };
 }
 /**
  * 대화 세션 하나. key 는 앱이 붙인 이름(s1 · s2 …), claude 는 Claude Code 의 세션 id (첫 턴이 돌아야 생긴다)
@@ -110,12 +113,15 @@ interface S {
 	/** 지금 대화 — 대화칸에 보이는 세션이자, 아직 어느 세션도 고치지 않은 쪽에 대한 요청이 가는 세션.
 	 *  마지막에 쓰인 세션 · 「새 대화」로 연 세션 · 세션 목록에서 고른 세션 */
 	talkKey: string | null;
-	/** 도는 턴이 하나라도 있으면 그중 하나 (직접 편집 · 되돌리기 · 판 되돌리기를 막는 데 쓴다) */
+	/** 도는 턴이 하나라도 있으면 그중 하나 (판 되돌리기 · 쪽 되돌리기를 막는 데 쓴다).
+	 *  2026.11.27 : 턴이 작업 사본에서 돌게 되어 손 편집 · Ctrl+Z 는 막지 않는다 — 겹치면 턴 쪽이 보류로 남는다 */
 	running: string | null;
 	/** 세션 key → 그 세션에서 도는 턴 — 다른 세션끼리는 함께 돈다 */
 	runs: Record<string, string>;
 	versions: Commit[];
 	releases: Release[];
+	/** 덱에 들어가지 못한 변경 묶음 — 새것부터 (vcs.rs 보류 갈래) */
+	holds: Hold[];
 	preview: Commit | null;
 	/** 되돌릴 수 있는 걸음 수 · 다시 할 수 있는 걸음 수 — 제목 줄 단추가 켜고 끈다 */
 	hist: { u: number; r: number };
@@ -166,13 +172,21 @@ interface S {
 	/** 그 세션의 대화를 본다 — 지금 대화가 된다 (처음 고치는 쪽이 이 세션으로 간다) */
 	viewSession: (key: string) => void;
 	/** by — 고친 사람 (협업 브라우저 팀원이면 그 이름, 없으면 이 기기의 이름) */
-	applyDirect: (slideId: string, path: number[] | null, op: Op, by?: string) => Promise<void>;
+	/** base — 고친 사람이 보던 쪽 그림의 다시 그릴 표식(rev). 그 뒤 남이 그 쪽을 바꿨으면 받지 않는다 — 요소 번호 길이 다른 요소를 가리킨다 */
+	applyDirect: (slideId: string, path: number[] | null, op: Op, by?: string, base?: number) => Promise<void>;
 	/** 손으로 고친 것(끌기 · 방향키 이동 · 글 고치기 · 지우기)을 한 걸음 되돌린다 (Ctrl+Z) · 다시 한다 (Ctrl+Y). by 의 걸음만 */
 	undo: (by?: string) => Promise<void>;
 	redo: (by?: string) => Promise<void>;
 	refreshVersions: () => Promise<void>;
 	setPreview: (c: Commit | null) => void;
 	restore: (c: Commit) => Promise<void>;
+	refreshHolds: () => Promise<void>;
+	/** 보류한 것을 다시 얹어 본다 — 그 사이 겹친 곳이 풀렸으면 들어간다 */
+	holdRetry: (name: string) => Promise<void>;
+	/** 보류한 것으로 바꾼다 — 그 묶음이 고친 파일을 묶음 내용 그대로. 덮인 지금 내용은 지난 판에 남는다 */
+	holdTake: (name: string) => Promise<void>;
+	/** 보류한 것을 버린다 */
+	holdDrop: (name: string) => Promise<void>;
 	exportTo: (path: string, exact?: boolean) => Promise<void>;
 	release: (name: string, notes: string) => Promise<void>;
 	/** action 이 있거나 sticky 면 사용자가 닫을 때까지 둔다 */
@@ -203,6 +217,8 @@ let directTimer: ReturnType<typeof setTimeout> | undefined;
 // 협업: after 는 그 걸음 직후의 파일 글 — 되돌릴 때 파일이 아직 그 글이어야 되쓴다. 그 사이 다른 사람이 같은 쪽을 고쳤으면
 // 파일을 통째로 되쓰면 그 사람이 고친 것까지 사라진다 (2026.11.25 협업 시험에서 찾음) — 그때는 되돌리지 않고 알린다
 type Snap = { file: string; text: string; after: string | null; by: string };
+/** 쪽 파일마다 마지막으로 손 편집 · 되돌리기가 쓴 글과 그 사람 — applyDirect 의 base 검사가 「자기가 방금 고친 것」을 가린다 */
+const lastOut = new Map<string, { text: string; by: string }>();
 let undoStack: Snap[] = [];
 let redoStack: Snap[] = [];
 const UNDO_MAX = 100;
@@ -215,7 +231,8 @@ const syncHist = () => {
 const clearUndo = () => { undoStack = []; redoStack = []; syncHist(); };
 // 손 편집 · 되돌리기는 한 줄로 차례대로 돈다 — 방향키 이동을 쓰는 중에 Ctrl+Z 가 같은 파일을 읽고 쓰면 하나가 다른 것을 덮는다
 let queue: Promise<unknown> = Promise.resolve();
-const serial = (f: () => Promise<void>) => { const r = queue.then(f, f); queue = r.catch(() => {}); return r; };
+// 턴의 변경을 덱 위에 얹는 일도 이 줄에 선다 — 얹는 사이에 손 편집이 같은 파일을 쓰면 하나가 다른 것을 덮는다
+const serial = <T,>(f: () => Promise<T>): Promise<T> => { const r = queue.then(f, f); queue = r.catch(() => {}); return r; };
 
 let compareTimer: ReturnType<typeof setTimeout> | undefined;
 /** 비교 중에 파일이 바뀌면(Claude 턴 · 손 편집 · 되돌리기) 잠잠해진 뒤 다시 견준다 */
@@ -264,22 +281,25 @@ let directBy = new Set<string>();
 function directCommit(dir: string, get: () => S, by: string) {
 	clearTimeout(directTimer);
 	directBy.add(by);
-	const flush = async () => {
+	directTimer = setTimeout(async () => {
 		if (get().dir !== dir) return;
-		if (get().running) { directTimer = setTimeout(flush, 2000); return; }
-		const authors = [...directBy].filter(Boolean).join(" · ");
-		directBy = new Set();
-		await api.commit(dir, tNow("direct"), authors || me()).catch(() => null);
+		await flushDirect(dir);
 		get().refreshVersions();
-	};
-	directTimer = setTimeout(flush, 4000);
+	}, 4000);
+}
+/** 남은 손 편집을 지금 판으로 — 턴의 작업 사본을 맞추기 전 · 턴을 덱에 얹기 전. 판으로 남지 않은 손 편집은 사본에 들지 않는다.
+ *  2026.11.27 : 턴이 도는 동안 미루던 것을 그만뒀다 — 턴이 덱에 바로 쓰지 않으니 섞일 것이 없다 */
+async function flushDirect(dir: string) {
+	clearTimeout(directTimer);
+	const authors = [...directBy].filter(Boolean).join(" · ");
+	directBy = new Set();
+	await api.commit(dir, tNow("direct"), authors || me()).catch(() => null);
 }
 
 /** from 에서 하나 꺼내 그 파일을 되쓰고, 지금 글은 to 에 쌓는다 — undo · redo 가 같은 길을 반대로 쓴다 */
 async function step(get: () => S, from: Snap[], to: Snap[], by: string) {
 	const { dir, deck } = get();
 	if (!dir || !deck || get().preview) return;
-	if (get().running) return get().notify(tNow("working"), "err");
 	// 이 사람의 마지막 걸음 — 다른 사람의 걸음은 건너뛴다
 	const k = from.map((x) => x.by).lastIndexOf(by);
 	if (k < 0) return;
@@ -292,6 +312,7 @@ async function step(get: () => S, from: Snap[], to: Snap[], by: string) {
 		return get().notify(msg, "err");
 	}
 	await api.writeText(dir, snap.file, snap.text);
+	lastOut.set(snap.file, { text: snap.text, by });
 	if (now != null) to.push({ file: snap.file, text: now, after: snap.text, by });
 	syncHist();
 	// 되돌린 쪽이 다른 쪽이면 그 쪽으로 간다 — 보이지 않는 곳에서 바뀌면 되돌렸는지 알 수 없다 (호스트 화면만 — 팀원의 되돌리기로 호스트가 보는 쪽이 넘어가지 않게)
@@ -406,6 +427,10 @@ const readJson = async <T,>(dir: string, rel: string, d: T): Promise<T> => {
 	try { return JSON.parse(await api.readText(dir, rel)); } catch { return d; }
 };
 
+/** 도는 턴 → 그 턴의 작업 사본 (도구 줄의 경로를 덱 기준으로 바꾼다) */
+const workOf = new Map<string, string>();
+/** p 가 dir 폴더 안인가 */
+const within = (dir: string, p: string) => p.replace(/\\/g, "/").toLowerCase().startsWith(dir.replace(/\\/g, "/").replace(/\/$/, "").toLowerCase() + "/");
 /** Claude 가 고친 파일 경로를 프로젝트 기준 상대 경로로 */
 const relOf = (dir: string, p?: string) => {
 	if (!p) return undefined;
@@ -530,10 +555,6 @@ async function sendTurn(get: () => S, set: (p: Partial<S>) => void, text: string
 	}
 	clearUndo();
 	const s = useSettings.getState().s;
-	// 직접 편집이 남아 있으면 먼저 판으로 — Claude 의 판과 섞이지 않게. 도는 턴이 있으면 하지 않는다
-	// (그동안은 직접 편집을 받지 않아 남은 것이 없고, 하면 도는 턴이 고치던 파일을 「직접 편집」 판에 쓸어 담는다)
-	clearTimeout(directTimer);
-	if (!get().running) await api.commit(dir, tNow("direct"), by).catch(() => {});
 	const order = (id: string) => deck.slides.findIndex((x) => x.id === id) + 1;
 	// 다른 사람이 남긴 의견이면 Claude 에게 누구의 의견인지 알린다
 	const notes: PinNote[] = pins.map((p, i) => ({ n: i + 1, slide: p.slide, slideNo: order(p.slide), x: p.x, y: p.y, text: p.text, target: p.target, shape: p.shape, by: p.by && p.by !== by ? p.by : undefined }));
@@ -573,20 +594,26 @@ async function sendTurn(get: () => S, set: (p: Partial<S>) => void, text: string
 	const exec = async () => {
 		const session = get().sessions.find((x) => x.key === key)!;
 		const deck = get().deck ?? deck0;
+		// 작업 사본 (2026.11.27 vcs.rs) — 이 턴은 덱이 아니라 이 세션의 사본에서 돈다. 손 편집이 남았으면 먼저 판으로 남겨 사본에 넣는다
+		let work = "";
 		try {
+			work = await serial(async () => { await flushDirect(dir); return (await api.workPrepare(dir, key)).path; });
+			workOf.set(turn.id, work);
 			// 「담당 쪽만」 — 담당 밖 파일을 턴 앞에 떠 둔다. 이르는 것만으로는 Claude 가 덱 목차 · 다른 쪽을 고칠 수 있다
-			const fence = from?.scope ? await fenceOf(dir, deck, from.scope) : null;
+			const fence = from?.scope ? await fenceOf(work, deck, from.scope) : null;
 			// 표시가 있으면 그 쪽 그림 위에 그려 붙인다. 못 만들어도 좌표 글은 가므로 턴은 그대로 돈다
 			if (notes.some((n) => n.shape)) {
 				patch((t) => ({ ...t, phase: tNow("marking") }));
 				attachments = [...attachments, ...(await markedPictures(dir, get().id, deck, notes).catch(() => []))];
 				patch((t) => ({ ...t, phase: undefined }));
 			}
+			// 첨부 · 표시 그림은 덱의 .claudeppt 에 있다 — 판에 들지 않아 사본에 없으므로 옮긴다
+			if (attachments.length) await api.workBring(dir, key, attachments);
 			// 판 멘션 — 그 판 파일을 .claudeppt/versions/v<n>/ 에 펼치고 지금과 다른 쪽을 적어 넘긴다. 못 펼친 판은 번호만이라도 알린다
 			const vlines: string[] = [];
 			for (const v of versionMentions) {
 				const c = get().versions.find((x) => x.hash === v.hash);
-				vlines.push(c ? await versionContext(dir, get().id, deck, c).catch((e) => `- @v${v.n}: could not be read (${e})`) : `- @v${v.n}: not found`);
+				vlines.push(c ? await versionContext(work, get().id, deck, c).catch((e) => `- @v${v.n}: could not be read (${e})`) : `- @v${v.n}: not found`);
 			}
 			// 협업을 켜면 한 세션을 여러 팀원이 이어 쓰므로 누가 시킨 것인지 알린다 — 「아까 말한 것」이 누구 말인지 가린다
 			const prompt = (by ? `Request from teammate: ${by}\n\n` : "") + (fence ? scopeNote(from!.scope!) : "") + turnPrompt(text, notes, cur ? { id: cur.id, no: current + 1 } : null, attachments, mentions, vlines, deck);
@@ -594,8 +621,8 @@ async function sendTurn(get: () => S, set: (p: Partial<S>) => void, text: string
 			// 팀원 PC 의 Claude 로 보낸 턴이면 claude 만 그 PC 에서 돈다 — 줄 · 파일은 이 PC 로 와서 이 PC 에서 돈 턴과 똑같이 그려지고 판에 남는다.
 			// 모델 · 생각 깊이 · claude 경로는 그 PC 의 설정을 쓴다 (runner.rs)
 			const run = (p: string, resume: string | null) => turn.runner
-				? api.claudeRunRemote({ turn: turn.id, dir, device: turn.runner.device, prompt: p, system: systemPrompt(s, deck), resume, sessionId: resume ? null : uuid() })
-				: api.claudeRun({ turn: turn.id, dir, prompt: p, system: systemPrompt(s, deck), claudePath: s.claude.path, model: s.claude.model, effort: s.claude.effort, resume, sessionId: resume ? null : uuid() });
+				? api.claudeRunRemote({ turn: turn.id, dir, work, device: turn.runner.device, prompt: p, system: systemPrompt(s, deck), resume, sessionId: resume ? null : uuid() })
+				: api.claudeRun({ turn: turn.id, dir, cwd: work, prompt: p, system: systemPrompt(s, deck), claudePath: s.claude.path, model: s.claude.model, effort: s.claude.effort, resume, sessionId: resume ? null : uuid() });
 			let r = await run(prompt, session.claude);
 			flushText(get, set);
 			// 세션 기록을 claude 쪽에서도 덱에서도 찾지 못했다 (기록 없이 옮겨 온 덱 · 지운 기록 · UUID 가 아닌 옛 id). 그대로 두면 이 세션을 이을 때마다 실패하고
@@ -614,14 +641,13 @@ async function sendTurn(get: () => S, set: (p: Partial<S>) => void, text: string
 			if (status === "failed" && !t0.error) patch((t) => ({ ...t, error: r.stderr.trim().split("\n").slice(-3).join("\n") || `exit ${r.code}` }));
 			// 담당 밖을 고쳤으면 턴 앞 내용으로 되돌리고 알린다
 			if (fence) {
-				const undone = await unfence(dir, fence, get().turns.find((t) => t.id === turn.id)!.tools);
+				const undone = await unfence(work, fence, get().turns.find((t) => t.id === turn.id)!.tools);
 				if (undone.length) patch((t) => ({ ...t, error: [t.error, tNow("scopeUndone").replace("{files}", undone.join(", "))].filter(Boolean).join("\n") }));
 			}
-			// 그림 자리 채우기
-			const fresh = await readDeck(dir).catch(() => get().deck!);
-			set({ deck: fresh });
+			// 그림 자리 채우기 — 사본에서. 덱에는 얹을 때 함께 들어간다
+			const fresh = await readDeck(work).catch(() => deck);
 			if (status !== "stopped" && s.image.provider !== "svg") {
-				const errs = await fillGenerated(dir, fresh, s, (p) => patch((t) => ({ ...t, phase: `${tNow("generating")} · ${p}` })));
+				const errs = await fillGenerated(work, fresh, s, (p) => patch((t) => ({ ...t, phase: `${tNow("generating")} · ${p}` })));
 				if (errs.length) patch((t) => ({ ...t, error: [t.error, ...errs].filter(Boolean).join("\n") }));
 			}
 			// 이 턴이 처음 고친 쪽은 이 세션으로 확정한다 — 이미 다른 세션에 확정된 쪽은 그대로 둔다
@@ -630,16 +656,25 @@ async function sendTurn(get: () => S, set: (p: Partial<S>) => void, text: string
 			for (const sl of fresh.slides) if (wrote.has(sl.file) && !bind[bindKey(pool, sl.id)]) bind[bindKey(pool, sl.id)] = key;
 			set({ bind });
 			const summary = (text.trim() || notes.map((n) => n.text).join(" · ") || "핀").replace(/\s+/g, " ").slice(0, 72);
-			// 다른 세션의 턴이 함께 돌고 있으면 이 턴이 고친 파일만 판에 담는다 — 아직 도는 턴이 고치던 파일이 섞이지 않게.
-			// 혼자 돌았으면 전처럼 통째로 (그림 채우기가 만든 파일 · 함께 돌던 턴이 남긴 것까지)
-			const others = Object.keys(get().runs).filter((k) => k !== key).length > 0;
-			const touched = [...new Set(get().turns.find((t) => t.id === turn.id)!.tools.filter((x) => EDIT_TOOLS.includes(x.name)).map((x) => x.file).filter((x): x is string => !!x))];
-			const c = await (others ? api.commitPaths(dir, summary, by, touched) : api.commit(dir, summary, by)).catch(() => null);
+			// 덱 위에 얹는다 — 손 편집과 같은 줄에 서서(serial), 남은 손 편집을 먼저 판으로 남긴 뒤 3방향으로. 그 사이 남이 같은 곳을 고쳤으면
+			// 덱은 그대로 두고 이 턴의 변경을 통째로 보류로 남긴다 (반쯤 들어가지 않는다)
+			const landed: Landed = await serial(async () => { await flushDirect(dir); return api.workFinish(dir, key, turn.id, summary, by); });
+			if (get().dir === dir) set({ deck: await readDeck(dir).catch(() => get().deck) });
+			if (landed.kind === "held") {
+				const files = landed.hold.conflicts;
+				patch((t) => ({ ...t, held: { name: landed.hold.name, files } }));
+				get().refreshHolds();
+				if (get().dir === dir) get().notify(tNow("heldToast").replace("{files}", files.join(", ")), "err", { sticky: true });
+			}
+			const c = landed.kind === "applied" ? landed.commit : null;
 			patch((t) => ({ ...t, status, phase: undefined, version: c ? { n: c.n, short: c.short, hash: c.hash } : undefined }));
 		} catch (e) {
 			patch((t) => ({ ...t, status: "failed", error: String(e) }));
+		} finally {
+			workOf.delete(turn.id);
 		}
 	};
+
 	// 약속을 바로 돌려주면 async 함수가 그것을 풀어 끝날 때까지 기다린다 — 감싸서 돌려준다 (턴 세우기 줄이 턴이 끝날 때까지 막혔다)
 	return {
 		done: new Promise<void>((done) => {
@@ -648,6 +683,24 @@ async function sendTurn(get: () => S, set: (p: Partial<S>) => void, text: string
 			else startRun(get, set, w);
 		}),
 	};
+}
+
+/** 보류 하나를 다룬다 — 손 편집과 같은 줄에서(덱 파일을 쓴다). 끝나면 그 턴의 보류 표시를 걷고 목록 · 판을 새로 읽는다 */
+async function holdAction(get: () => S, set: (p: Partial<S>) => void, name: string, f: (dir: string) => Promise<boolean>) {
+	const { dir } = get();
+	if (!dir) return;
+	try {
+		const done = await serial(async () => { await flushDirect(dir); return f(dir); });
+		if (done) {
+			set({ turns: get().turns.map((t) => (t.held?.name === name ? { ...t, held: undefined } : t)) });
+			persistTalk(dir, get());
+		}
+		if (get().dir === dir) set({ deck: await readDeck(dir).catch(() => get().deck) });
+	} catch (e) {
+		get().notify(String(e), "err");
+	}
+	await get().refreshHolds();
+	await get().refreshVersions();
 }
 
 export const useDeck = create<S>()((set, get) => ({
@@ -670,6 +723,7 @@ export const useDeck = create<S>()((set, get) => ({
 	runs: {},
 	versions: [],
 	releases: [],
+	holds: [],
 	preview: null,
 	hist: { u: 0, r: 0 },
 	histBy: {},
@@ -697,12 +751,13 @@ export const useDeck = create<S>()((set, get) => ({
 		const talkKey = talk.talkKey ?? sessions.at(-1)?.key ?? null;
 		const releases = await readJson<Release[]>(dir, "releases/releases.json", []);
 		clearUndo();
-		set({ dir, id, deck, rev: {}, current: 0, mode: "edit", tool: "select", pins, assign, turns, sessions, bind: talk.bind ?? {}, talkKey, versions: [], releases, preview: null, vdiff: null });
+		set({ dir, id, deck, rev: {}, current: 0, mode: "edit", tool: "select", pins, assign, turns, sessions, bind: talk.bind ?? {}, talkKey, versions: [], releases, holds: [], preview: null, vdiff: null });
 		useSettings.getState().remember(dir);
 		// 처음 여는 프로젝트(가져오기 직후)면 첫 판을 남긴다
 		const log = await api.log(dir, 1);
 		if (!log.length) await api.commit(dir, deck.source?.kind === "pptx" ? "PPTX 가져옴" : "새로 만듦", me());
 		await get().refreshVersions();
+		get().refreshHolds();
 		listening ??= Promise.all([
 			listen<{ id: string; paths: string[] }>("deck-fs", async (e) => {
 				if (e.payload.id !== get().id) return;
@@ -748,7 +803,9 @@ export const useDeck = create<S>()((set, get) => ({
 					patch((t) => ({ ...t, reply: t.reply && !t.reply.endsWith("\n\n") ? t.reply + "\n\n" : t.reply }));
 				} else if (m.type === "assistant") {
 					const uses = (m.message?.content || []).filter((c: any) => c.type === "tool_use");
-					if (uses.length) patch((t) => ({ ...t, tools: [...t.tools, ...uses.map((u: any) => ({ name: u.name, file: relOf(get().dir, u.input?.file_path || u.input?.path || u.input?.pattern) }))] }));
+					// 경로는 그 턴의 작업 사본 기준 — 사본 밖(덱 폴더 경로가 남은 옛 기록)이면 덱 기준으로도 본다
+					const rel = (p?: string) => { const w = workOf.get(turn); return relOf(w && p && within(w, p) ? w : get().dir, p); };
+					if (uses.length) patch((t) => ({ ...t, tools: [...t.tools, ...uses.map((u: any) => ({ name: u.name, file: rel(u.input?.file_path || u.input?.path || u.input?.pattern) }))] }));
 				} else if (m.type === "result") {
 					if (m.session_id) keep(m.session_id);
 					patch((t) => ({ ...t, cost: m.total_cost_usd, reply: (t.reply.trim() || m.result || "").trim(), error: m.is_error ? m.result || "error" : t.error }));
@@ -926,19 +983,21 @@ export const useDeck = create<S>()((set, get) => ({
 		api.claudeStop(r);
 	},
 
-	applyDirect: (slideId, path, op, by = me()) => serial(async () => {
+	applyDirect: (slideId, path, op, by = me(), base) => serial(async () => {
 		const { dir, deck } = get();
 		const ref = deck?.slides.find((s) => s.id === slideId);
 		if (!ref) return;
-		// Claude 가 파일을 고치는 중에는 화면의 요소 번호 길이 원본과 어긋날 수 있다 — 받지 않는다
-		if (get().running) {
-			if (by !== me()) throw new Error(tNow("working"));
-			return get().notify(tNow("working"), "err");
-		}
 		const before = await api.readText(dir, ref.file).catch(() => null);
+		// 고친 사람이 본 쪽 그림 뒤에 남이 그 쪽을 바꿨으면 받지 않는다 — 요소 번호 길이 다른 요소를 가리켜 엉뚱한 곳이 바뀐다.
+		// 자기가 방금 고친 것(그 그림이 아직 다시 그려지기 전)은 이어서 받는다 — 파일이 그 사람이 마지막으로 쓴 그대로면 그 사람 화면과 같다
+		if (base !== undefined && base !== (get().rev[slideId] || 0) && !(before != null && lastOut.get(ref.file)?.by === by && lastOut.get(ref.file)?.text === before)) {
+			if (by !== me()) throw new Error(tNow("editStale"));
+			return get().notify(tNow("editStale"), "err");
+		}
 		if (!(await applyOp(dir, ref.file, path, op))) return;
 		if (before != null) {
 			const after = await api.readText(dir, ref.file).catch(() => null);
+			if (after != null) lastOut.set(ref.file, { text: after, by });
 			undoStack.push({ file: ref.file, text: before, after, by });
 			if (undoStack.length > UNDO_MAX) undoStack.shift();
 			// 새로 고치면 그 사람의 「다시 하기」만 버린다
@@ -957,6 +1016,29 @@ export const useDeck = create<S>()((set, get) => ({
 		if (!dir) return;
 		set({ versions: await api.log(dir).catch(() => []) });
 	},
+
+	refreshHolds: async () => {
+		const { dir } = get();
+		if (!dir) return;
+		const holds = await api.holds(dir).catch(() => []);
+		if (get().dir === dir) set({ holds });
+	},
+
+	holdRetry: (name) => holdAction(get, set, name, async (dir) => {
+		const r = await api.holdRetry(dir, name);
+		get().notify(tNow(r.kind === "held" ? "heldStill" : "heldLanded"), r.kind === "held" ? "err" : "ok");
+		return r.kind !== "held";
+	}),
+	holdTake: (name) => holdAction(get, set, name, async (dir) => {
+		const h = get().holds.find((x) => x.name === name);
+		await api.holdTake(dir, name, tNow("heldTakeMsg").replace("{subject}", h?.subject ?? name), h?.author && h.author !== "ClaudePPT" ? h.author : me());
+		get().notify(tNow("heldTaken"), "ok");
+		return true;
+	}),
+	holdDrop: (name) => holdAction(get, set, name, async (dir) => {
+		await api.holdDrop(dir, name);
+		return true;
+	}),
 
 	setPreview: (c) => set({ preview: c && c.hash === get().versions[0]?.hash ? null : c, ...(c ? { vdiff: null } : {}) }),
 

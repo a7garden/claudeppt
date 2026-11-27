@@ -244,6 +244,39 @@ function SessionList({ onClose }: { onClose: () => void }) {
 }
 
 /** 턴 하나. memo — 글자가 흐르는 동안 바뀌는 것은 도는 턴 하나라 나머지 턴은 다시 그리지 않는다 (판 열기도 안에서 해 props 가 매번 새로 생기지 않게) */
+/** 덱에 넣지 못하고 보류한 변경 (2026.11.27 vcs.rs 「작업 사본」) — 그사이 같은 곳을 남이 고쳤다. 사람이 고르기 전에는 덱이 그대로다.
+ *  고르는 것은 덱 주인 화면만 — 팀원 화면에는 알림만 보인다. 이미 다른 곳에서 풀었으면(보류 목록에 없으면) 감춘다 */
+function HeldBox({ held }: { held: NonNullable<Turn["held"]> }) {
+	const t = useT();
+	const deck = useDeck((s) => s.deck)!;
+	const live = useDeck((s) => s.holds.some((h) => h.name === held.name));
+	const [busy, setBusy] = useState(false);
+	const [sure, setSure] = useState(false);
+	if (!live) return null;
+	const go = (f: (name: string) => Promise<void>) => async () => {
+		setBusy(true);
+		try { await f(held.name); } finally { setBusy(false); setSure(false); }
+	};
+	const where = held.files.map((f) => {
+		const no = deck.slides.findIndex((s) => s.file === f) + 1;
+		return no ? `${no}${t("slideN") === "쪽" ? "쪽" : ""}` : f.split("/").pop();
+	}).join(" · ");
+	const st = useDeck.getState();
+	return (
+		<div className="held" role="group" aria-label={t("heldTitle")}>
+			<b>{t("heldTitle")}</b>
+			<p>{t("heldNote").replace("{where}", where)}{remote ? ` ${t("heldRemote")}` : ""}</p>
+			{!remote && (
+				<div className="held-do">
+					<button disabled={busy} title={t("heldRetryHint")} onClick={go(st.holdRetry)}>{t("heldRetry")}</button>
+					<button disabled={busy} title={t("heldTakeHint")} onClick={go(st.holdTake)}>{t("heldTake")}</button>
+					<button className="rm" disabled={busy} onClick={sure ? go(st.holdDrop) : () => setSure(true)}>{t(sure ? "heldDropSure" : "heldDrop")}</button>
+				</div>
+			)}
+		</div>
+	);
+}
+
 const TurnView = memo(function TurnView({ turn, head: isHead }: { turn: Turn; head: boolean }) {
 	const t = useT();
 	const deck = useDeck((s) => s.deck)!;
@@ -293,6 +326,7 @@ const TurnView = memo(function TurnView({ turn, head: isHead }: { turn: Turn; he
 			)}
 			{(turn.reply || live) && <div className="reply">{turn.reply}</div>}
 			{turn.error && <div className="err">{turn.error}</div>}
+			{turn.held && <HeldBox held={turn.held} />}
 			{/* 끝줄 — 이 턴이 남긴 판(지금 판은 채움) · 고친 쪽. 도는 중이면 뛰는 점과 지금 하는 일 */}
 			{(live || turn.version || changed || turn.status === "stopped" || turn.status === "queued" || turn.phase) && (
 				<div className="foot" title={detail}>

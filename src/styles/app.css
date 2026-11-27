@@ -272,6 +272,13 @@ input, textarea, select { font: inherit; color: inherit; }
 .turn .req-pins i { font: normal 600 10px var(--mono); color: var(--accent); padding-top: 2px; }
 .turn .reply { margin-top: 8px; padding: 0 2px; line-height: 1.62; color: color-mix(in srgb, var(--text) 88%, var(--bg)); white-space: pre-wrap; word-break: keep-all; overflow-wrap: anywhere; }
 .turn .err { margin-top: 8px; padding: 0 2px; color: var(--err); font-size: 12px; white-space: pre-wrap; }
+/* 보류한 변경 (Talk.tsx HeldBox) — 덱에 들어가지 않았다는 것이 먼저 보이게 붉은 테두리. 고르기 단추는 덱 주인 화면만 */
+.turn .held { margin-top: 8px; padding: 8px 10px; border-radius: 8px; outline: 1px solid var(--err); outline-offset: -1px; display: grid; gap: 4px; font-size: 12px; }
+.turn .held b { color: var(--err); font-size: 12px; }
+.turn .held p { margin: 0; color: var(--dim); line-height: 1.5; }
+.held-do { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 2px; }
+.held-do button { height: 26px; padding: 0 10px; border-radius: var(--r-ctl); outline: 1px solid var(--hair); outline-offset: -1px; }
+.held-do .rm { color: var(--err); }
 .turn.running .reply::after { content: "▍"; color: var(--accent); animation: pulse 1s steps(2) infinite; }
 /* 끝줄 — 판 알약 · 지금 하는 일 · 고친 쪽 */
 .turn .foot { margin-top: 8px; padding: 0 2px; display: flex; flex-wrap: wrap; gap: 4px 6px; align-items: center; font-size: 12px; }

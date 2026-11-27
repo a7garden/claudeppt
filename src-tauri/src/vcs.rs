@@ -3,6 +3,8 @@
 //   판(v<n>)      커밋 수. Claude 한 턴 · 직접 편집 한 묶음 · 되돌리기가 각각 한 판이 된다.
 //   릴리즈(r<k>)  사용자가 「릴리즈」로 확정한 판. git 태그 r<k> 와 releases/r<k>-v<n>.pptx 가 남는다.
 //   되돌리기      지난 판의 파일을 지금 위에 덮어 새 판으로 남긴다. 이력은 지우지 않는다 (앞으로만 간다).
+//   작업 사본     Claude 턴은 세션마다 둔 작업 사본(git worktree)에서 돌고, 끝나면 변경 한 묶음을 덱 위에 3방향으로 얹는다.
+//                 그 사이 남이 같은 곳을 고쳤으면 얹지 않고 보류 갈래로 남긴다 (아래 「작업 사본」)
 //
 // 사용자의 git 설정(이름 · 줄끝 변환)에 기대지 않도록 매번 -c 로 준다.
 //
@@ -124,27 +126,6 @@ fn lock(d: &Path) -> Res<Lock> {
 	}
 }
 
-/// 이 파일들만 한 판으로 — 여러 세션의 Claude 턴이 함께 돌 때, 끝난 턴의 판에 아직 도는 다른 턴이 고치던 파일이 섞이지 않게.
-/// 경로는 덱 폴더 기준 상대 경로만 받는다 (절대 경로 · .. 은 건너뛴다). 남은 파일은 다음 판에 들어간다
-#[tauri::command(async)]
-pub fn vcs_commit_paths(dir: String, message: String, author: Option<String>, paths: Vec<String>) -> Res<Option<Commit>> {
-	vcs_init(dir.clone())?;
-	let d = Path::new(&dir);
-	let _l = lock(d)?;
-	if run(d, &["rev-parse", "--verify", "-q", "HEAD"]).is_err() {
-		// 첫 판은 통째로
-		return commit_all(d, &message, author.as_deref());
-	}
-	// 색인만 비운다 — 작업 파일은 그대로
-	run(d, &["reset", "-q"])?;
-	for p in paths.iter().map(|p| p.replace('\\', "/")).filter(|p| safe_rel(p)) {
-		// :(literal) — 경로의 * ? [ 를 무늬로 읽지 않게. 지운 파일도 -A 로 담긴다
-		let spec = format!(":(literal){p}");
-		let _ = run(d, &["add", "-A", "--", &spec]);
-	}
-	finish(d, &message, author.as_deref())
-}
-
 /// 덱 폴더 안 상대 경로인가
 fn safe_rel(p: &str) -> bool {
 	!p.is_empty() && !p.starts_with('/') && !p.contains(':') && !p.split('/').any(|c| c == "..")
@@ -240,6 +221,221 @@ pub fn vcs_restore(dir: String, hash: String, message: String, author: Option<St
 	commit_all(d, &message, author.as_deref())
 }
 
+// ── 작업 사본 (2026.11.27) ──
+// Claude 턴은 덱 원본이 아니라 세션마다 둔 작업 사본(git worktree)에서 돈다. 끝나면 그 턴의 변경을 묶음(커밋) 하나로 만들어
+// 덱 위에 3방향으로 얹는다(cherry-pick). 그 사이 손 편집 · 다른 턴이 같은 곳을 고쳤으면 얹지 않고 보류 갈래로 남긴다.
+//   그래서   어떤 변경도 남의 변경을 모른 채 덮어쓰지 못한다 — 덮을 것 같으면 들어가지 않고, 들어가지 못한 것도 버리지 않는다
+//   전에는   여러 세션의 턴이 같은 덱 폴더에 바로 썼다. 같은 파일(테마 · 덱 목차 · 요청에 없던 쪽)을 둘이 고치면 늦게 쓴 쪽이 이겼고,
+//            그래서 손 편집은 턴이 도는 동안 아예 받지 않았다
+//   자리     앱 데이터 work/<덱 지문>/<세션> — 덱 폴더 밖이라 .cppt 묶음 · 폴더 감시에 들지 않는다. 같은 세션은 차례로 돌아 세션마다 하나면 되고,
+//            자리가 늘 같아 Claude 세션 기록(작업 폴더마다 따로 둔다)이 턴 사이에 이어진다
+//   보류     refs/heads/cppt/hold/<턴 id> — 보통 git 갈래라 앱 밖 git 으로도 보인다. 덱에 들어간 변경은 본 줄(main)에 곧게 쌓인다
+
+const HOLD: &str = "cppt/hold/";
+
+/// 이름(세션 · 턴 id)은 화면에서 온다 — 경로 · 갈래 이름에 쓰므로 영문 · 숫자만
+fn plain(s: &str) -> Res<&str> {
+	(!s.is_empty() && s.len() <= 40 && s.chars().all(|c| c.is_ascii_alphanumeric())).then_some(s).ok_or_else(|| format!("이름이 맞지 않다: {s}"))
+}
+
+fn work_dir(d: &Path, key: &str) -> Res<PathBuf> {
+	let deck = crate::invite::hash(&d.to_string_lossy().to_lowercase());
+	Ok(crate::control::data_dir().join("work").join(&deck[..16]).join(plain(key)?))
+}
+
+#[derive(Serialize)]
+pub struct Work {
+	path: String,
+	base: String,
+}
+
+/// 그 세션의 작업 사본을 덱의 지금 판으로 맞춘다. 손 편집이 판으로 남지 않았으면 사본에 들지 않는다 — 화면이 먼저 남긴다
+#[tauri::command(async)]
+pub fn vcs_work_prepare(dir: String, key: String) -> Res<Work> {
+	vcs_init(dir.clone())?;
+	let d = Path::new(&dir);
+	let w = work_dir(d, &key)?;
+	let _l = lock(d)?;
+	if run(d, &["rev-parse", "--verify", "-q", "HEAD"]).is_err() {
+		commit_all(d, "새로 만듦", None)?;
+	}
+	let base = run(d, &["rev-parse", "HEAD"])?;
+	// 이 덱의 사본인가 — 덱을 옮겼거나 사본이 망가졌으면 새로 만든다. 지우는 곳은 앱 데이터 안 사본 자리뿐이다
+	let real = |p: &Path| std::fs::canonicalize(p).ok();
+	let mine = w.join(".git").is_file() && run(&w, &["rev-parse", "--git-common-dir"]).ok().and_then(|g| real(&w.join(g.trim()))) == real(&d.join(".git"));
+	// 끝나지 않은 턴이 남긴 것(앱이 꺼졌다 · 얹기 전에 오류)이 있으면 지우기 전에 보류로 남긴다 — Claude 가 한 일을 소리 없이 잃지 않게
+	if mine && !run(&w, &["status", "--porcelain"]).unwrap_or_default().trim().is_empty() {
+		let _ = run(&w, &["add", "-A"]).and_then(|_| finish(&w, "끝나지 않은 턴의 변경", None));
+		if let Ok(c) = run(&w, &["rev-parse", "HEAD"]) {
+			let t = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+			let _ = run(d, &["branch", "-f", &format!("{HOLD}{key}x{t}"), &c]);
+		}
+	}
+	let reset = || -> Res<()> {
+		run(&w, &["reset", "-q", "--hard", &base])?;
+		run(&w, &["clean", "-fdxq"]).map(|_| ())
+	};
+	if !mine || reset().is_err() {
+		let _ = std::fs::remove_dir_all(&w);
+		let _ = run(d, &["worktree", "prune"]);
+		std::fs::create_dir_all(w.parent().unwrap()).map_err(err)?;
+		run(d, &["worktree", "add", "-q", "--detach", &w.to_string_lossy(), &base])?;
+	}
+	Ok(Work { path: w.to_string_lossy().into(), base })
+}
+
+/// 턴이 읽을 앱 파일(첨부 · 표시 그림)을 덱에서 사본으로 — .claudeppt 는 판에 들지 않아 사본에 없다
+#[tauri::command(async)]
+pub fn vcs_work_bring(dir: String, key: String, paths: Vec<String>) -> Res<()> {
+	let d = Path::new(&dir);
+	let w = work_dir(d, &key)?;
+	for p in paths.iter().map(|p| p.replace('\\', "/")).filter(|p| safe_rel(p) && p.starts_with(".claudeppt/")) {
+		let to = w.join(&p);
+		std::fs::create_dir_all(to.parent().unwrap()).map_err(err)?;
+		std::fs::copy(d.join(&p), to).map_err(err)?;
+	}
+	Ok(())
+}
+
+/// 얹은 결과
+#[derive(Serialize)]
+#[serde(tag = "kind", rename_all = "lowercase")]
+pub enum Landed {
+	/// 고친 것이 없다 (또는 이미 같은 내용이 들어가 있다)
+	None,
+	/// 덱에 들어가 판이 되었다
+	Applied { commit: Commit, files: Vec<String> },
+	/// 그 사이 같은 곳을 남이 고쳐 얹지 않았다 — 보류 갈래로 남겼다
+	Held { hold: Hold },
+}
+
+/// 보류 갈래 하나 — 덱에 들어가지 못한 변경 묶음
+#[derive(Serialize)]
+pub struct Hold {
+	/// 턴 id (갈래 이름 cppt/hold/<name>)
+	name: String,
+	hash: String,
+	author: String,
+	subject: String,
+	date: String,
+	/// 이 묶음이 고친 파일
+	files: Vec<String>,
+	/// 얹으려다 겹친 파일 — 얹을 때만 안다 (목록에서는 빈다)
+	conflicts: Vec<String>,
+}
+
+/// 턴이 끝났다 — 사본의 변경을 묶음 하나로 만들어 덱에 얹는다
+#[tauri::command(async)]
+pub fn vcs_work_finish(dir: String, key: String, turn: String, message: String, author: Option<String>) -> Res<Landed> {
+	let d = Path::new(&dir);
+	let w = work_dir(d, &key)?;
+	plain(&turn)?;
+	run(&w, &["add", "-A"])?;
+	if git(&w).args(["diff", "--cached", "--quiet"]).status().map_err(err)?.success() {
+		return Ok(Landed::None);
+	}
+	finish(&w, &message, author.as_deref())?;
+	let c = run(&w, &["rev-parse", "HEAD"])?;
+	// 얹기 전에 보류 갈래부터 — 얹다가 오류가 나도 묶음이 남는다. 들어가면 land 가 걷는다
+	run(d, &["branch", "-f", &format!("{HOLD}{turn}"), &c])?;
+	let _l = lock(d)?;
+	land(d, &c, &turn)
+}
+
+/// 묶음 하나를 덱 위에 얹는다 (잠근 채로 부른다). 못 얹으면 덱은 그대로 두고 보류 갈래로 남긴다
+fn land(d: &Path, c: &str, name: &str) -> Res<Landed> {
+	// 덱에 판으로 남지 않은 것(앱 밖에서 고친 것)이 있으면 먼저 — 얹기는 깨끗한 덱 위에서만 한다. 섞이면 되돌릴 때 함께 날아간다
+	commit_all(d, "덱에 남아 있던 변경", None)?;
+	let files = files_of(d, c)?;
+	let hold = format!("{HOLD}{name}");
+	match run(d, &["cherry-pick", c]) {
+		Ok(_) => {
+			let _ = run(d, &["branch", "-D", &hold]);
+			Ok(Landed::Applied { commit: head(d)?, files })
+		}
+		Err(e) => {
+			let picking = d.join(".git").join("CHERRY_PICK_HEAD").exists();
+			let conflicts: Vec<String> = run(d, &["diff", "--name-only", "--diff-filter=U"]).unwrap_or_default().lines().map(String::from).collect();
+			if picking && conflicts.is_empty() {
+				// 같은 내용이 이미 들어가 있다 — 얹을 것이 없다
+				let _ = run(d, &["cherry-pick", "--skip"]);
+				let _ = run(d, &["branch", "-D", &hold]);
+				return Ok(Landed::None);
+			}
+			if picking {
+				run(d, &["cherry-pick", "--abort"])?;
+			}
+			run(d, &["branch", "-f", &hold, c])?;
+			let mut h = hold_of(d, name)?;
+			h.conflicts = if conflicts.is_empty() { vec![e] } else { conflicts };
+			Ok(Landed::Held { hold: h })
+		}
+	}
+}
+
+/// 묶음 하나가 고친 파일
+fn files_of(d: &Path, c: &str) -> Res<Vec<String>> {
+	Ok(run(d, &["diff-tree", "--no-commit-id", "--name-only", "-r", c])?.lines().filter(|l| !l.is_empty()).map(String::from).collect())
+}
+
+fn hold_of(d: &Path, name: &str) -> Res<Hold> {
+	let r = format!("{HOLD}{}", plain(name)?);
+	let line = run(d, &["log", "-1", "--format=%H%x09%an%x09%ci%x09%s", &r])?;
+	let mut p = line.splitn(4, '\t');
+	let hash = p.next().unwrap_or("").to_string();
+	let author = p.next().unwrap_or("").to_string();
+	let date = p.next().unwrap_or("").get(..16).unwrap_or("").to_string();
+	let subject = p.next().unwrap_or("").to_string();
+	Ok(Hold { name: name.to_string(), files: files_of(d, &hash)?, hash, author, subject, date, conflicts: vec![] })
+}
+
+/// 보류 갈래 목록 — 새것부터
+#[tauri::command(async)]
+pub fn vcs_holds(dir: String) -> Res<Vec<Hold>> {
+	let d = Path::new(&dir);
+	if !d.join(".git").exists() {
+		return Ok(vec![]);
+	}
+	let refs = run(d, &["for-each-ref", "--sort=-creatordate", "--format=%(refname:short)", &format!("refs/heads/{HOLD}")])?;
+	Ok(refs.lines().filter_map(|r| r.strip_prefix(HOLD)).filter_map(|n| hold_of(d, n).ok()).collect())
+}
+
+/// 보류한 것을 다시 얹어 본다 — 그 사이 겹친 쪽이 되돌려졌거나 손으로 맞췄으면 들어간다
+#[tauri::command(async)]
+pub fn vcs_hold_retry(dir: String, name: String) -> Res<Landed> {
+	let d = Path::new(&dir);
+	let c = run(d, &["rev-parse", &format!("{HOLD}{}", plain(&name)?)])?;
+	let _l = lock(d)?;
+	land(d, &c, &name)
+}
+
+/// 보류한 것으로 바꾼다 — 그 묶음이 고친 파일을 묶음의 내용 그대로 덱에 놓고 새 판으로. 덮인 지금 내용은 지난 판에 남는다
+#[tauri::command(async)]
+pub fn vcs_hold_take(dir: String, name: String, message: String, author: Option<String>) -> Res<Option<Commit>> {
+	let d = Path::new(&dir);
+	let r = format!("{HOLD}{}", plain(&name)?);
+	let c = run(d, &["rev-parse", &r])?;
+	let _l = lock(d)?;
+	commit_all(d, "덱에 남아 있던 변경", None)?;
+	for line in run(d, &["diff-tree", "--no-commit-id", "--name-status", "-r", &c])?.lines() {
+		let Some((st, rel)) = line.split_once('\t') else { continue };
+		if st.starts_with('D') {
+			let _ = std::fs::remove_file(d.join(rel));
+		} else {
+			run(d, &["checkout", &c, "--", &format!(":(literal){rel}")])?;
+		}
+	}
+	let made = commit_all(d, &message, author.as_deref())?;
+	run(d, &["branch", "-D", &r])?;
+	Ok(made)
+}
+
+/// 보류한 것을 버린다 — 사람이 고른 때만
+#[tauri::command(async)]
+pub fn vcs_hold_drop(dir: String, name: String) -> Res<()> {
+	run(Path::new(&dir), &["branch", "-D", &format!("{HOLD}{}", plain(&name)?)]).map(|_| ())
+}
+
 #[cfg(test)]
 mod tests {
 	use super::*;
@@ -277,31 +473,112 @@ mod tests {
 		let _ = std::fs::remove_dir_all(p);
 	}
 
-	/// 여러 턴이 함께 돌 때 — 끝난 턴의 판에는 그 턴이 고친 파일만, 남은 것은 다음 판에
-	#[test]
-	fn commit_paths_takes_only_given_files() {
-		let dir = tmp("paths");
+	/// 덱 하나 — 쪽 두 개, a 는 여러 줄 (줄이 다르면 겹치지 않는다)
+	fn deck(name: &str) -> String {
+		let dir = tmp(name);
 		let p = Path::new(&dir);
 		std::fs::create_dir_all(p.join("slides")).unwrap();
-		std::fs::write(p.join("slides/a.html"), "a1").unwrap();
-		std::fs::write(p.join("slides/b.html"), "b1").unwrap();
-		vcs_commit(dir.clone(), "첫 판".into(), None).unwrap().unwrap();
-		std::fs::write(p.join("slides/a.html"), "a2").unwrap();
-		std::fs::write(p.join("slides/b.html"), "b2").unwrap();
-		std::fs::write(p.join("slides/new [1].html"), "n").unwrap();
-		let c = vcs_commit_paths(dir.clone(), "세션 1 턴".into(), Some("민수".into()), vec!["slides/a.html".into(), "slides/new [1].html".into(), "../outside.txt".into(), "C:/x".into()]).unwrap().unwrap();
+		std::fs::write(p.join("slides/a.html"), "a1\na2\na3\na4\na5\n").unwrap();
+		std::fs::write(p.join("slides/b.html"), "b1\n").unwrap();
+		vcs_commit(dir.clone(), "첫 판".into(), None).unwrap();
+		dir
+	}
+	fn wipe(dir: &str) {
+		for k in ["s1", "s2"] {
+			let _ = std::fs::remove_dir_all(work_dir(Path::new(dir), k).unwrap());
+		}
+		let _ = std::fs::remove_dir_all(dir);
+	}
+	fn put(w: &Work, rel: &str, text: &str) {
+		std::fs::write(Path::new(&w.path).join(rel), text).unwrap();
+	}
+	fn read(dir: &str, rel: &str) -> String {
+		std::fs::read_to_string(Path::new(dir).join(rel)).unwrap()
+	}
+
+	#[test]
+	fn turns_in_copies_land_side_by_side() {
+		let dir = deck("land");
+		let (w1, w2) = (vcs_work_prepare(dir.clone(), "s1".into()).unwrap(), vcs_work_prepare(dir.clone(), "s2".into()).unwrap());
+		assert_eq!(w1.base, w2.base);
+		put(&w1, "slides/a.html", "a1\nA2\na3\na4\na5\n");
+		put(&w2, "slides/b.html", "B1\n");
+		assert_eq!(read(&dir, "slides/a.html"), "a1\na2\na3\na4\na5\n", "턴이 도는 동안 덱은 그대로다");
+		let Landed::Applied { commit, files } = vcs_work_finish(dir.clone(), "s1".into(), "t1".into(), "a 고침".into(), Some("민수".into())).unwrap() else { panic!("첫 턴이 들어가야 한다") };
+		assert_eq!((commit.author.as_str(), files), ("민수", vec!["slides/a.html".to_string()]));
+		// 둘째 턴은 옛 판에서 시작했지만 다른 파일이라 그대로 들어간다
+		assert!(matches!(vcs_work_finish(dir.clone(), "s2".into(), "t2".into(), "b 고침".into(), Some("은지".into())).unwrap(), Landed::Applied { .. }));
+		assert_eq!((read(&dir, "slides/a.html"), read(&dir, "slides/b.html")), ("a1\nA2\na3\na4\na5\n".into(), "B1\n".into()));
+		// 사본은 다음 턴에 지금 판으로 맞춰진다 · 고친 것이 없는 턴은 판을 남기지 않는다
+		let w1 = vcs_work_prepare(dir.clone(), "s1".into()).unwrap();
+		assert_eq!(read(&w1.path, "slides/b.html"), "B1\n");
+		assert!(matches!(vcs_work_finish(dir.clone(), "s1".into(), "t3".into(), "없음".into(), None).unwrap(), Landed::None));
+		assert_eq!(vcs_log(dir.clone(), None).unwrap().len(), 3);
+		wipe(&dir);
+	}
+
+	#[test]
+	fn same_file_different_lines_merges() {
+		let dir = deck("merge");
+		let w = vcs_work_prepare(dir.clone(), "s1".into()).unwrap();
+		// 턴이 도는 동안 손으로 고친 것 (다른 줄)
+		std::fs::write(Path::new(&dir).join("slides/a.html"), "a1\na2\na3\na4\nA5\n").unwrap();
+		vcs_commit(dir.clone(), "손 편집".into(), Some("은지".into())).unwrap();
+		put(&w, "slides/a.html", "A1\na2\na3\na4\na5\n");
+		assert!(matches!(vcs_work_finish(dir.clone(), "s1".into(), "t1".into(), "턴".into(), None).unwrap(), Landed::Applied { .. }));
+		assert_eq!(read(&dir, "slides/a.html"), "A1\na2\na3\na4\nA5\n", "둘 다 남는다");
+		wipe(&dir);
+	}
+
+	#[test]
+	fn overlap_is_held_not_overwritten() {
+		let dir = deck("hold");
+		let p = Path::new(&dir);
+		let w = vcs_work_prepare(dir.clone(), "s1".into()).unwrap();
+		std::fs::write(p.join("slides/a.html"), "a1\n손\na3\na4\na5\n").unwrap();
+		vcs_commit(dir.clone(), "손 편집".into(), Some("은지".into())).unwrap();
+		put(&w, "slides/a.html", "a1\nClaude\na3\na4\na5\n");
+		put(&w, "slides/b.html", "B1\n");
+		let Landed::Held { hold } = vcs_work_finish(dir.clone(), "s1".into(), "t1".into(), "턴".into(), Some("민수".into())).unwrap() else { panic!("겹치면 보류") };
+		assert_eq!(hold.conflicts, ["slides/a.html"]);
+		// 덱은 손 편집 그대로 · 겹치지 않은 b 도 묶음째 보류 (반쯤 들어가지 않는다) · 얹다 만 흔적이 없다
+		assert_eq!((read(&dir, "slides/a.html"), read(&dir, "slides/b.html")), ("a1\n손\na3\na4\na5\n".into(), "b1\n".into()));
+		assert!(!p.join(".git/CHERRY_PICK_HEAD").exists());
+		assert!(run(p, &["status", "--porcelain"]).unwrap().is_empty());
+		let list = vcs_holds(dir.clone()).unwrap();
+		assert_eq!((list.len(), list[0].author.as_str(), list[0].files.len()), (1, "민수", 2));
+		// 그대로 다시 얹으면 또 보류 · 「이것으로 바꾸기」는 묶음 내용으로 새 판, 손 편집은 지난 판에 남는다
+		assert!(matches!(vcs_hold_retry(dir.clone(), "t1".into()).unwrap(), Landed::Held { .. }));
+		let c = vcs_hold_take(dir.clone(), "t1".into(), "보류한 것으로".into(), Some("민수".into())).unwrap().unwrap();
+		assert_eq!((read(&dir, "slides/a.html"), read(&dir, "slides/b.html")), ("a1\nClaude\na3\na4\na5\n".into(), "B1\n".into()));
 		assert_eq!(c.author, "민수");
-		let files = run(p, &["show", "--name-only", "--format=", "HEAD"]).unwrap();
-		let mut files: Vec<&str> = files.lines().collect();
-		files.sort();
-		assert_eq!(files, ["slides/a.html", "slides/new [1].html"]);
-		// b 는 아직 바뀐 채로 남아 있다가 다음 판에
-		let c2 = vcs_commit(dir.clone(), "남은 것".into(), Some("은채".into())).unwrap().unwrap();
-		assert_eq!(run(p, &["show", "--name-only", "--format=", "HEAD"]).unwrap().trim(), "slides/b.html");
-		assert_eq!(c2.n, 3);
-		// 담을 것이 없으면 판을 남기지 않는다
-		assert!(vcs_commit_paths(dir.clone(), "없음".into(), None, vec!["slides/a.html".into()]).unwrap().is_none());
-		let _ = std::fs::remove_dir_all(p);
+		assert!(vcs_holds(dir.clone()).unwrap().is_empty());
+		assert_eq!(vcs_log(dir.clone(), None).unwrap()[1].subject, "손 편집");
+		wipe(&dir);
+	}
+
+	#[test]
+	fn unfinished_turn_is_kept_not_wiped() {
+		let dir = deck("left");
+		let w = vcs_work_prepare(dir.clone(), "s1".into()).unwrap();
+		put(&w, "slides/b.html", "끝나기 전에 꺼짐
+");
+		// 다음 턴이 사본을 맞춘다 — 남은 것은 보류로
+		let w = vcs_work_prepare(dir.clone(), "s1".into()).unwrap();
+		assert_eq!(read(&w.path, "slides/b.html"), "b1
+");
+		let list = vcs_holds(dir.clone()).unwrap();
+		assert_eq!((list.len(), list[0].files.as_slice()), (1, ["slides/b.html".to_string()].as_slice()));
+		assert!(list[0].name.starts_with("s1x"));
+		wipe(&dir);
+	}
+
+	#[test]
+	fn names_must_be_plain() {
+		assert!(plain("s1").is_ok() && plain("t1abc").is_ok());
+		for bad in ["", "../x", "s 1", "a/b", "한"] {
+			assert!(plain(bad).is_err(), "{bad}");
+		}
 	}
 
 	#[test]
