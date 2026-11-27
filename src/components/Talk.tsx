@@ -17,6 +17,7 @@ import { ATTACH_EXT, attachName, isImage, useAttach } from "../lib/attach";
 import { useT } from "../lib/i18n";
 import { isVersionQuery, mentionCandidates, mentionTokens, typingMention, versionCandidates, versionTokens } from "../lib/mention";
 import { CommentsButton } from "./Collab";
+import { UsageChip } from "./Usage";
 import { copyText, openMenu } from "./ContextMenu";
 import { SLIDE_MIME, SlideFrame } from "./Workspace";
 import { useSettings } from "../lib/settings";
@@ -110,6 +111,8 @@ export default function Talk() {
 					{turns.length > 0 && <span className="mono">{turns.length}{t("talkTurns")}</span>}
 					{/* 협업 중이면 덱의 열린 의견 — 누가 · 몇 쪽 · 무엇 (Collab.tsx) */}
 					<CommentsButton />
+					{/* Claude 남은 사용량 — 가장 많이 쓴 한도의 남은 %. 누르면 한도마다 (Usage.tsx) */}
+					<UsageChip />
 					<button className="talk-new" disabled={fresh} onClick={() => { setList(false); useDeck.getState().newTalk(); }} title={fresh ? t("newTalkEmpty") : team ? t("newTalkHintTeam") : t("newTalkHint")}>
 						<svg width="12" height="12" viewBox="0 0 16 16" aria-hidden><path d="M8 3v10M3 8h10" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" /></svg>
 						{t("newTalk")}

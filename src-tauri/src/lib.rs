@@ -27,6 +27,7 @@ mod sync;
 mod vcs;
 mod trust;
 mod tunnel;
+mod usage;
 mod watch;
 
 use std::collections::HashMap;
@@ -149,6 +150,7 @@ pub fn run() {
 			claude::claude_detect,
 			claude::claude_run,
 			claude::claude_stop,
+			usage::claude_usage,
 			imagegen::tools_detect,
 			imagegen::image_generate,
 			pptsnap::ppt_snapshot,

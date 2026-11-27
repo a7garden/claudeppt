@@ -14,6 +14,7 @@ import { addTemplateFromPath, saveTemplateFile, TEMPLATE_EXT } from "../lib/temp
 import { useDeck } from "../lib/store";
 import { stopHost } from "../lib/collab";
 import { SharePanel } from "./Collab";
+import { UsageRows } from "./Usage";
 import { useUpdate } from "../lib/updater";
 
 type Tab = "general" | "templates" | "claude" | "image" | "connect" | "collab" | "update";
@@ -110,6 +111,7 @@ function Claude() {
 			</Row>
 			<Row k={t("isolation")}><span className="note ok" style={{ whiteSpace: "normal" }}>{t("isolationOn")}</span></Row>
 			<Row k=""><span className="note" style={{ whiteSpace: "normal" }}>{t("styleInTemplate")}</span></Row>
+			<UsageRows Row={Row} />
 		</>
 	);
 }
