@@ -77,7 +77,7 @@ export default function App() {
 			<TitleBar onSettings={() => setSettings((v) => !v)} settingsOpen={settings} />
 			{/* 제목 줄 밖에서 오류를 받는다 — 제목 줄이 남아야 창을 닫거나 옮길 수 있다 */}
 			<Crash>
-				{open ? <Workspace /> : remote ? <RemoteWaiting /> : <Home />}
+				{open ? <Workspace /> : remote ? <RemoteWaiting /> : <Home onSettings={() => setSettings(true)} />}
 				{settings && <Settings onClose={() => setSettings(false)} />}
 			</Crash>
 			<Toasts />

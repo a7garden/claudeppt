@@ -708,7 +708,12 @@ async function sendTurn(get: () => S, set: (p: Partial<S>) => void, text: string
 			}
 			const t0 = get().turns.find((t) => t.id === turn.id)!;
 			let status: Turn["status"] = t0.status === "stopped" ? "stopped" : r.code === 0 && !t0.error ? "done" : "failed";
-			if (status === "failed" && !t0.error) patch((t) => ({ ...t, error: r.stderr.trim().split("\n").slice(-3).join("\n") || `exit ${r.code}` }));
+			// 로그인이 안 됐으면 CLI 의 영어 줄 앞에 할 일을 적는다 (2026.11.27)
+			if (status === "failed" && !t0.error) {
+				const tail = r.stderr.trim().split("\n").slice(-3).join("\n") || `exit ${r.code}`;
+				const login = /not logged in|\/login|invalid api key|authenticat|unauthori[sz]ed|oauth token/i.test(r.stderr);
+				patch((t) => ({ ...t, error: login ? `${tNow("claudeLogin")}\n${tail}` : tail }));
+			}
 			// 비워 둔 남의 쪽 · 덱 목차를 되돌린다 — 울타리(unfence)보다 먼저, 그래야 비운 것을 「고친 것」으로 알리지 않는다
 			await hidden?.restore();
 			// 담당 밖을 고쳤으면 턴 앞 내용으로 되돌리고 알린다
