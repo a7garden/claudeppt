@@ -4,6 +4,7 @@
 // 2026.11.26 : 「공유 덱 열기」 — 팀원이 보낸 초대 링크를 브라우저 대신 이 앱의 새 창으로 연다 (collab.rs collab_join). 들어간 곳은 아래 「공유 덱」에 남는다.
 // 2026.11.27 : 최근 덱 카드에 관리 메뉴(우클릭 · 카드 위 「⋯」) — 이름 바꾸기 · 탐색기 · CPPT 내보내기 · 목록에서 빼기 · 휴지통. 전에는 열기밖에 없어 지우려면 탐색기로 가야 했다.
 import { ask, open, save } from "@tauri-apps/plugin-dialog";
+import { openUrl } from "@tauri-apps/plugin-opener";
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { api, deckUrl, type LibItem } from "../lib/api";
 import { readDeck, safeName, writeDeck } from "../lib/deck";
@@ -15,8 +16,16 @@ import { inviteInClip, isInvite, joinShared } from "../lib/join";
 import { originOf, type RunnerState, setMine, useRunners } from "../lib/runner";
 import { openMenu } from "./ContextMenu";
 
-export default function Home() {
+export default function Home({ onSettings }: { onSettings?: () => void }) {
 	const t = useT();
+	// Claude Code 가 있는지 — 설정의 경로(비면 저절로 찾기)로 한 번 본다. 경로를 고치면 다시
+	const claudePath = useSettings((x) => x.s.claude.path);
+	const [noClaude, setNoClaude] = useState(false);
+	useEffect(() => {
+		let on = true;
+		api.claudeDetect(claudePath).then((d) => on && setNoClaude(!d), () => on && setNoClaude(true));
+		return () => { on = false; };
+	}, [claudePath]);
 	const s = useSettings((x) => x.s);
 	const busy = useDeck((x) => x.busy);
 	const [brief, setBrief] = useState("");
@@ -145,6 +154,14 @@ export default function Home() {
 		<main className="home">
 			{(working || busy) && <div className="progress-line" />}
 			<section className="home-top">
+				{/* Claude Code 를 못 찾으면 처음부터 알린다 — 2026.11.27 : 첫 요청을 보내 덱이 만들어진 뒤에야 실패로 알았다 */}
+				{noClaude && (
+					<div className="home-warn" role="alert">
+						<span>{t("claudeMissing")}</span>
+						<button className="ghost" onClick={() => void openUrl("https://claude.com/claude-code").catch(() => {})}>{t("claudeInstall")}</button>
+						{onSettings && <button className="ghost" onClick={onSettings}>{t("settings")}</button>}
+					</div>
+				)}
 				<div className="brief">
 					<div className="line">
 						<textarea
