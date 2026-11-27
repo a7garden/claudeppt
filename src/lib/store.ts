@@ -1276,10 +1276,12 @@ export const useDeck = create<S>()((set, get) => ({
 
 	notify: (text, kind = "ok", opt = {}) => {
 		const sticky = opt.sticky ?? !!opt.action;
-		set({ toast: { text, kind, action: opt.action, sticky } });
+		const toast = { text, kind, action: opt.action, sticky };
+		set({ toast });
 		// 누를 단추가 있거나 꼭 읽어야 할 글이면 사용자가 닫을 때까지 둔다 — 다른 일을 하다 돌아와도 놓치지 않게.
 		// 단추가 있어도 sticky: false 면(「폴더에서 보기」 같은 덤) 조금 길게 두고 스스로 닫는다
-		if (!sticky) setTimeout(() => { if (get().toast?.text === text) set({ toast: null }); }, kind === "err" ? 7000 : opt.action ? 8000 : 3500);
+		// 이 알림만 닫는다 — 글로 견주면 같은 글의 새 알림(다시 쓴 뒤의 파일 이름)을 앞 알림의 시계가 닫았다
+		if (!sticky) setTimeout(() => { if (get().toast === toast) set({ toast: null }); }, kind === "err" ? 7000 : opt.action ? 8000 : 3500);
 	},
 
 	fixFonts: async (missing) => {
