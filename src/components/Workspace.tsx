@@ -36,14 +36,18 @@ export function SlideFrame({ file, rev, width, height, w, h, onWin, revHash }: {
 	const id = useDeck((s) => s.id);
 	const frames = useDeck((s) => s.frames);
 	// 공유 덱 창에서는 권한 · 담당에 맞춘 모드 (collab.ts useFrameMode) — 덱 주인 앱은 그대로
-	const mode = useFrameMode(file, useDeck((s) => s.mode));
+	const deckMode = useDeck((s) => s.mode);
+	const frameMode = useFrameMode(file, deckMode);
+	// 지난 판을 보는 중이면 보기만 — 2026.11.27 : 끌어 옮기고 글을 고칠 수 있게 보였지만 아무것도 저장되지 않았다 (preview 중 메시지는 버린다)
+	const mode = revHash ? "view" : frameMode;
 	const ref = useRef<HTMLIFrameElement>(null);
 	// 읽힌 창 — 떼어 낼 때는 iframe.contentWindow 가 이미 null 이라 그것으로는 frames 에서 지우지 못하고 쌓였다
 	const winRef = useRef<Window | null>(null);
 	const s = width / w;
 	const src = deckUrl(id, file, revHash) + `?v=${rev}`;
 	// 모드가 바뀌면 다시 알린다 — store 의 도구 고르기는 모든 창에 덱 모드를 그대로 보내므로, 권한으로 좁힌 모드를 그 뒤에 덮어 쓴다
-	useEffect(() => { if (onWin && winRef.current) winRef.current.postMessage({ __deck: 1, t: "mode", mode }, "*"); }, [mode]);
+	// 덱 모드가 바뀐 뒤에도 다시 덮는다 — 좁힌 모드가 그대로여도 store 가 방금 모든 창에 덱 모드를 보냈다
+	useEffect(() => { if (onWin && winRef.current) winRef.current.postMessage({ __deck: 1, t: "mode", mode }, "*"); }, [mode, deckMode]);
 	useEffect(() => {
 		const f = ref.current;
 		return () => {
@@ -135,6 +139,14 @@ function toolKey(raw: string): boolean {
 	else if (key === "f") useRibbon.getState().toggle();
 	else return false;
 	return true;
+}
+
+/** Esc — 비교를 닫고, 지난 판을 보는 중이면 지금으로 돌아오고, 아니면 고르기 도구로. 앱 화면에서 누른 것도 슬라이드 창이 넘겨준 것도 */
+function escKey() {
+	const st = useDeck.getState();
+	if (st.vdiff) st.closeCompare();
+	else if (st.preview) st.setPreview(null);
+	else st.setTool("select");
 }
 
 /** 휠로 쪽 넘기기 —한 칸 굴림(≈100)이나 터치패드로 조금씩 민 양이 모이면 한 쪽 넘기고, 잠깐 쉰다.
@@ -243,7 +255,7 @@ export default function Workspace() {
 			const tgt = e.target as Element;
 			if (tgt.closest?.("input, textarea, [contenteditable]") || e.ctrlKey || e.altKey || e.metaKey) return;
 			if (!toolKey(e.key) && !navKey(e.key)) {
-				if (e.key === "Escape") { if (useDeck.getState().vdiff) useDeck.getState().closeCompare(); else setTool("select"); }
+				if (e.key === "Escape") escKey();
 				else return;
 			}
 			e.preventDefault();
@@ -452,7 +464,7 @@ function Stage() {
 		const now = src === win.current;
 		// 슬라이드 창 위에서 굴린 휠 · 누른 넘김 키 (rt.js 가 넘겨준다) · 고른 것의 서식 · 넣는 중인 것
 		if (now && m.t === "wheel") return wheel(m.dy);
-		if (now && m.t === "key") return void (navKey(m.key) || toolKey(m.key));
+		if (now && m.t === "key") return void (m.key === "Escape" ? escKey() : navKey(m.key) || toolKey(m.key));
 		if (now && m.t === "sel") { selNow.current = m.info; return setSelInfo(m.info); }
 		if (now && m.t === "placing") return setPlacing(m.kind);
 		// 고치는 중 띠의 잘라내기 · 복사: 고른 글자를 클립보드에 쓴다. 단추를 누른 직후라 사용자 활성이 남아 있어 쓸 수 있다
