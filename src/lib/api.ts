@@ -7,6 +7,15 @@ export interface Commit { n: number; hash: string; short: string; date: string; 
 export interface Hold { name: string; hash: string; author: string; subject: string; date: string; files: string[]; conflicts: string[] }
 /** 턴의 변경을 덱 위에 얹은 결과 (vcs.rs Landed) */
 export type Landed = { kind: "none" } | { kind: "applied"; commit: Commit; files: string[] } | { kind: "held"; hold: Hold };
+/** 갈래 (branch.rs) — 시안 하나. ahead 는 본안에 없는 변경 수 · behind 는 받지 않은 본안의 변경 수 · path 는 열어 둔 작업 폴더 */
+export interface Sian { id: string; name: string; by: string; hash: string; date: string; ahead: number; behind: number; path: string | null }
+/** 이 폴더는 어느 덱의 어느 줄인가 — sian 이 있으면 시안 폴더, main 은 본 덱 폴더 */
+export interface Where { main: string; sian: string | null; name: string | null; origin: string | null }
+/** 합친 결과 — ok 가 아니면 겹친 파일 */
+export interface Merged { ok: boolean; commit: Commit | null; conflicts: string[] }
+/** 변경 그래프 (branch.rs vcs_graph) — nodes 는 새것부터(부모보다 늘 위), heads 는 줄마다의 끝 */
+export interface GraphNode { hash: string; short: string; parents: string[]; author: string; date: string; subject: string; tags: string[] }
+export interface GraphHead { kind: "main" | "sian" | "hold"; id: string; name: string; hash: string }
 export interface LibItem { dir: string; deck: any; modified: number }
 /** 설정 「바깥 연결」 — 통로 · 최근 바깥 명령 · 스킬 상태 (control.rs remote_info) */
 export interface RemoteInfo {
@@ -56,6 +65,19 @@ export const api = {
 	holdRetry: (dir: string, name: string) => invoke<Landed>("vcs_hold_retry", { dir, name }),
 	holdTake: (dir: string, name: string, message: string, author?: string) => invoke<Commit | null>("vcs_hold_take", { dir, name, message, author: author || null }),
 	holdDrop: (dir: string, name: string) => invoke<void>("vcs_hold_drop", { dir, name }),
+	/** 갈래 (branch.rs) — 시안 · 사본 · 그래프. dir 은 본 덱 폴더 (시안 폴더에서는 where().main) */
+	where: (dir: string) => invoke<Where>("vcs_where", { dir }),
+	sians: (dir: string) => invoke<Sian[]>("vcs_sians", { dir }),
+	sianNew: (dir: string, name: string, by?: string, from?: string) => invoke<Sian>("vcs_sian_new", { dir, name, by: by || null, from: from || null }),
+	sianOpen: (dir: string, id: string) => invoke<string>("vcs_sian_open", { dir, id }),
+	/** prefer — 겹친 곳을 어느 쪽 것으로 (ours: 받는 쪽 · theirs: 들어오는 쪽). 겹친 것을 보고 사람이 고른 때만 준다 */
+	sianMerge: (dir: string, id: string, message: string, author?: string, prefer?: "ours" | "theirs") => invoke<Merged>("vcs_sian_merge", { dir, id, message, author: author || null, prefer: prefer || null }),
+	sianUpdate: (dir: string, id: string, author?: string, prefer?: "ours" | "theirs") => invoke<Merged>("vcs_sian_update", { dir, id, author: author || null, prefer: prefer || null }),
+	sianDrop: (dir: string, id: string) => invoke<void>("vcs_sian_drop", { dir, id }),
+	graph: (dir: string, limit?: number) => invoke<{ nodes: GraphNode[]; heads: GraphHead[] }>("vcs_graph", { dir, limit }),
+	fork: (dir: string, dest: string) => invoke<void>("vcs_fork", { dir, dest }),
+	forkSend: (dir: string, name: string, by?: string) => invoke<string>("vcs_fork_send", { dir, name, by: by || null }),
+	forkFetch: (dir: string, from: string, name: string, by?: string) => invoke<Sian>("vcs_fork_fetch", { dir, from, name, by: by || null }),
 	log: (dir: string, limit?: number) => invoke<Commit[]>("vcs_log", { dir, limit }),
 	tag: (dir: string, name: string) => invoke<void>("vcs_tag", { dir, name }),
 	restore: (dir: string, hash: string, message: string, author?: string) => invoke<Commit | null>("vcs_restore", { dir, hash, message, author: author || null }),

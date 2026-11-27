@@ -30,7 +30,7 @@ export function VersionLens({ slideId, w, h, scale }: { slideId: string; w: numb
 		const r = (e.currentTarget as HTMLElement).getBoundingClientRect();
 		setSplit(Math.min(1, Math.max(0, (e.clientX - r.left) / r.width)));
 	};
-	const name = `v${vdiff.base.n}`;
+	const name = `#${vdiff.base.n}`;
 	if (!past) {
 		// 고른 판 뒤에 생긴 쪽 — 견줄 것이 없다
 		return (
@@ -72,7 +72,7 @@ export function VersionBar({ slideId }: { slideId: string }) {
 	const showMask = useDeck((s) => s.vdiffMask);
 	const running = useDeck((s) => !!s.running || !!s.busy);
 	const { startCompare, closeCompare, restoreSlide, mentionVersion, setCurrent } = useDeck.getState();
-	const name = `v${vdiff.base.n}`;
+	const name = `#${vdiff.base.n}`;
 	const state = vdiff.slides[slideId];
 	const changed = deck.slides.map((s, i) => (vdiff.slides[s.id] ? i : -1)).filter((i) => i >= 0);
 	const prev = [...changed].reverse().find((i) => i < current);
@@ -81,7 +81,7 @@ export function VersionBar({ slideId }: { slideId: string }) {
 		<>
 			<div className="past vbar" role="status">
 				<select value={vdiff.base.hash} onChange={(e) => { const c = versions.find((v) => v.hash === e.target.value); if (c) startCompare(c); }} aria-label={t("vsBase")} title={vdiff.base.subject}>
-					{versions.slice(1).map((c) => <option key={c.hash} value={c.hash}>v{c.n} · {c.subject.slice(0, 40)}</option>)}
+					{versions.slice(1).map((c) => <option key={c.hash} value={c.hash}>#{c.n} · {c.subject.slice(0, 40)}</option>)}
 				</select>
 				<span className="dim">↔ <b>{t("vsNow")}</b></span>
 				<span>{t("vsChanged")} <b className="mono">{changed.length}</b>{vdiff.theme ? ` · ${t("vsTheme")}` : ""}</span>

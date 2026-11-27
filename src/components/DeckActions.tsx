@@ -102,8 +102,8 @@ function ReleasePop({ onDone }: { onDone: () => void }) {
 	return (
 		<div className="pop">
 			<div className="head">
-				<b>{t("release")} {next}</b>
-				<span>{t("releaseOf").replace("{v}", `v${head}`)}{last ? ` · ${t("releaseSince").replace("{r}", last.tag).replace("{n}", String(since.length))}` : ""}</span>
+				<b>{t("releaseTitle").replace("{r}", next)}</b>
+				<span>{t("releaseOf").replace("{v}", `#${head}`)}{last ? ` · ${t("releaseSince").replace("{r}", last.tag).replace("{n}", String(since.length))}` : ""}</span>
 			</div>
 			<input className="field" autoFocus placeholder={t("releaseName")} value={name} onChange={(e) => setName(e.target.value)} onKeyDown={(e) => { if (e.key === "Enter") { onDone(); release(name, notes); } }} />
 			<textarea className="field" rows={4} placeholder={t("notes")} value={notes} onChange={(e) => setNotes(e.target.value)} style={{ fontFamily: "var(--ui)", fontSize: 13 }} />
@@ -120,7 +120,7 @@ function ReleasePop({ onDone }: { onDone: () => void }) {
 							<div key={r.tag}>
 								<i className="rtag">{r.tag}</i>
 								<span>{r.name}</span>
-								<button className={"node" + (c && c === versions[0] ? " head" : "")} disabled={!c} onClick={() => { if (c) { onDone(); useDeck.getState().setPreview(c); } }} title={c?.subject}>v{r.n}</button>
+								<button className={"node" + (c && c === versions[0] ? " head" : "")} disabled={!c} onClick={() => { if (c) { onDone(); useDeck.getState().setPreview(c); } }} title={c?.subject}>#{r.n}</button>
 								<button className="open" title={r.file} aria-label={r.file} onClick={() => api.reveal(join(dir, r.file))}>↗</button>
 							</div>
 						);

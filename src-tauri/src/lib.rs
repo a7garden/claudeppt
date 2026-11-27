@@ -7,6 +7,7 @@
 //   팀 협업              collab.rs — 「설정 › 협업」을 켜면 브라우저 팀원에게 화면 · 슬라이드 · 상태를 내주는 서버 (기본 꺼짐)
 //   바깥 제어            control.rs — 앱 밖 Claude Code 가 CLI(cli.rs · 같은 실행 파일에 인자를 주어 부른다)로 앱을 부리는 통로
 
+mod branch;
 pub mod cli;
 mod claude;
 mod collab;
@@ -111,6 +112,17 @@ pub fn run() {
 			vcs::vcs_hold_retry,
 			vcs::vcs_hold_take,
 			vcs::vcs_hold_drop,
+			branch::vcs_where,
+			branch::vcs_sians,
+			branch::vcs_sian_new,
+			branch::vcs_sian_open,
+			branch::vcs_sian_merge,
+			branch::vcs_sian_update,
+			branch::vcs_sian_drop,
+			branch::vcs_graph,
+			branch::vcs_fork,
+			branch::vcs_fork_send,
+			branch::vcs_fork_fetch,
 			vcs::vcs_log,
 			vcs::vcs_tag,
 			vcs::vcs_restore,

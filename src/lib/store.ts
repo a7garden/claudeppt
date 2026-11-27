@@ -10,6 +10,7 @@
 //   쪽 손보기            addSlide · duplicateSlide · moveSlide · removeSlide — 쪽 목록 · 우클릭 메뉴가 같이 쓴다
 //   대화                 send → 작업 사본 맞추기 → claude 한 턴 → 그림 채우기 → 덱 위에 얹기(겹치면 보류) → .claudeppt/talk.json
 //   보류                 refreshHolds · holdRetry · holdTake · holdDrop — 덱에 얹지 못한 턴의 변경 묶음 (vcs.rs 「작업 사본」)
+//   시안 · 사본          newSian · openSian · openMain · mergeSian · updateSian · dropSian · forkDeck · sendToOrigin · fetchFork (branch.rs)
 //   바깥 작업            outside · OUTSIDE_MS — 앱 밖 Claude Code 가 방금 다룬 덱이면 send 가 보내기 전에 한 번 묻는다 (remote.ts touch)
 //   직접 편집            applyDirect → 원본 HTML 에 되쓰고 잠시 뒤 한 판으로 남김. 본 쪽 그림 이후 남이 고쳤으면 받지 않는다(base)
 //   판 · 릴리즈          refreshVersions · preview · restore · release (릴리즈 본체는 파일 끝 makeRelease — 바깥 CLI 도 쓴다)
@@ -18,7 +19,7 @@
 //   내보낸 PPTX 확인     verifyPptx — 내보내기 · 릴리즈 뒤 PowerPoint 가 그린 모양을 웹과 견주어 다를 때만 알린다 (check.ts) · fixDiff
 import { listen } from "@tauri-apps/api/event";
 import { create } from "zustand";
-import { api, type Commit, type Hold, type Landed } from "./api";
+import { api, type Commit, type Hold, type Landed, type Sian, type Where } from "./api";
 import { type Deck, newId, readDeck, slideHtml, writeDeck } from "./deck";
 import { applyOp, type Op } from "./edits";
 // 내보내기 · 검사(pptxgenjs · jszip)는 쓸 때 불러온다 — 시작 청크를 가볍게
@@ -122,6 +123,10 @@ interface S {
 	releases: Release[];
 	/** 덱에 들어가지 못한 변경 묶음 — 새것부터 (vcs.rs 보류 갈래) */
 	holds: Hold[];
+	/** 이 덱이 어느 줄인가 (branch.rs) — sian 이 있으면 시안 폴더를 연 것, main 은 본 덱 폴더, origin 은 사본의 원본 */
+	line: Where | null;
+	/** 본 덱의 시안들 — 새것부터 */
+	sians: Sian[];
 	preview: Commit | null;
 	/** 되돌릴 수 있는 걸음 수 · 다시 할 수 있는 걸음 수 — 제목 줄 단추가 켜고 끈다 */
 	hist: { u: number; r: number };
@@ -187,6 +192,24 @@ interface S {
 	holdTake: (name: string) => Promise<void>;
 	/** 보류한 것을 버린다 */
 	holdDrop: (name: string) => Promise<void>;
+	refreshSians: () => Promise<void>;
+	/** 시안을 만들어 연다 — from(변경 하나)에서, 없으면 본안의 지금에서 */
+	newSian: (name: string, from?: string) => Promise<void>;
+	openSian: (id: string) => Promise<void>;
+	/** 시안에서 본안(본 덱)으로 */
+	openMain: () => Promise<void>;
+	/** 시안을 본안에 넣는다. prefer 는 겹쳤을 때 사람이 고른 쪽 (theirs = 시안 것) — 겹쳐서 못 넣었으면 false */
+	mergeSian: (id: string, prefer?: "ours" | "theirs") => Promise<boolean>;
+	/** 지금 연 시안에 본안의 변경을 받는다. prefer 는 겹쳤을 때 (theirs = 본안 것) */
+	updateSian: (prefer?: "ours" | "theirs") => Promise<boolean>;
+	/** 시안을 치운다 (지우지 않고 치워 둔다) */
+	dropSian: (id: string) => Promise<void>;
+	/** 덱을 사본으로 떼어 가 연다 */
+	forkDeck: (dest: string) => Promise<void>;
+	/** 사본의 변경을 원본 덱의 시안으로 보낸다 */
+	sendToOrigin: (name: string) => Promise<void>;
+	/** 사본 폴더의 변경을 이 덱의 시안으로 가져온다 */
+	fetchFork: (from: string, name: string) => Promise<void>;
 	exportTo: (path: string, exact?: boolean) => Promise<void>;
 	release: (name: string, notes: string) => Promise<void>;
 	/** action 이 있거나 sticky 면 사용자가 닫을 때까지 둔다 */
@@ -703,6 +726,22 @@ async function holdAction(get: () => S, set: (p: Partial<S>) => void, name: stri
 	await get().refreshVersions();
 }
 
+/** 시안 · 사본 일 하나 — 남은 손 편집을 먼저 판으로 남기고(손 편집과 같은 줄에서), 본 덱 폴더로 한다. 끝나면 시안 · 변경 목록을 새로 읽는다.
+ *  덱을 바꿔 여는 일(시안 열기 · 본안으로)은 도는 턴이 있으면 하지 않는다 — 닫으면 도는 턴이 멈춘다. same 이면 이 덱에 머문다 */
+async function lineAction(get: () => S, f: (main: string) => Promise<void>, same = false) {
+	const { dir, line } = get();
+	if (!dir) return;
+	if (!same && (get().running || waiting.length)) return get().notify(tNow("sianBusy"), "err");
+	try {
+		await serial(() => flushDirect(dir));
+		await f(line?.main ?? dir);
+	} catch (e) {
+		get().notify(String(e), "err", { sticky: true });
+	}
+	await get().refreshSians();
+	await get().refreshVersions();
+}
+
 export const useDeck = create<S>()((set, get) => ({
 	dir: "",
 	id: "",
@@ -724,6 +763,8 @@ export const useDeck = create<S>()((set, get) => ({
 	versions: [],
 	releases: [],
 	holds: [],
+	line: null,
+	sians: [],
 	preview: null,
 	hist: { u: 0, r: 0 },
 	histBy: {},
@@ -751,13 +792,16 @@ export const useDeck = create<S>()((set, get) => ({
 		const talkKey = talk.talkKey ?? sessions.at(-1)?.key ?? null;
 		const releases = await readJson<Release[]>(dir, "releases/releases.json", []);
 		clearUndo();
-		set({ dir, id, deck, rev: {}, current: 0, mode: "edit", tool: "select", pins, assign, turns, sessions, bind: talk.bind ?? {}, talkKey, versions: [], releases, holds: [], preview: null, vdiff: null });
-		useSettings.getState().remember(dir);
+		// 시안 폴더인가 — 시안은 본 덱의 한 줄이라 최근 덱 목록에 따로 올리지 않는다 (본 덱의 「변경 기록」에서 연다)
+		const line = await api.where(dir).catch(() => null);
+		set({ dir, id, deck, rev: {}, current: 0, mode: "edit", tool: "select", pins, assign, turns, sessions, bind: talk.bind ?? {}, talkKey, versions: [], releases, holds: [], line, sians: [], preview: null, vdiff: null });
+		if (!line?.sian) useSettings.getState().remember(dir);
 		// 처음 여는 프로젝트(가져오기 직후)면 첫 판을 남긴다
 		const log = await api.log(dir, 1);
 		if (!log.length) await api.commit(dir, deck.source?.kind === "pptx" ? "PPTX 가져옴" : "새로 만듦", me());
 		await get().refreshVersions();
 		get().refreshHolds();
+		get().refreshSians();
 		listening ??= Promise.all([
 			listen<{ id: string; paths: string[] }>("deck-fs", async (e) => {
 				if (e.payload.id !== get().id) return;
@@ -841,7 +885,7 @@ export const useDeck = create<S>()((set, get) => ({
 		clearTimeout(directTimer);
 		const { id } = get();
 		if (id) await api.close(id).catch(() => {});
-		set({ dir: "", id: "", deck: null, turns: [], sessions: [], bind: {}, talkKey: null, pins: [], assign: {}, versions: [], preview: null, running: null, runs: {}, vdiff: null });
+		set({ dir: "", id: "", deck: null, turns: [], sessions: [], bind: {}, talkKey: null, pins: [], assign: {}, versions: [], holds: [], line: null, sians: [], preview: null, running: null, runs: {}, vdiff: null });
 		// 닫은 덱의 슬라이드 창은 더 말을 받지 않는다 — 남은 것을 비운다
 		get().frames.clear();
 	},
@@ -1040,6 +1084,70 @@ export const useDeck = create<S>()((set, get) => ({
 		return true;
 	}),
 
+	refreshSians: async () => {
+		const { dir, line } = get();
+		if (!dir) return;
+		const sians = await api.sians(line?.main ?? dir).catch(() => []);
+		if (get().dir === dir) set({ sians });
+	},
+
+	newSian: (name, from) => lineAction(get, async (main) => {
+		const s = await api.sianNew(main, name, me(), from);
+		await get().openProject(s.path!);
+		get().notify(tNow("sianOpened").replace("{name}", s.name), "ok");
+	}),
+	openSian: (id) => lineAction(get, async (main) => {
+		const path = await api.sianOpen(main, id);
+		await get().openProject(path);
+	}),
+	openMain: () => lineAction(get, async (main) => { await get().openProject(main); }),
+	mergeSian: async (id, prefer) => {
+		let ok = false;
+		await lineAction(get, async (main) => {
+			const s = get().sians.find((x) => x.id === id);
+			const r = await api.sianMerge(main, id, tNow("sianMergeMsg").replace("{name}", s?.name ?? id), me(), prefer);
+			ok = r.ok;
+			if (!r.ok) return get().notify(tNow("sianClash").replace("{files}", r.conflicts.join(", ")), "err", { sticky: true });
+			get().notify(tNow(r.commit ? "sianMerged" : "sianNothing").replace("{name}", s?.name ?? id), "ok");
+		}, true);
+		return ok;
+	},
+	updateSian: async (prefer) => {
+		let ok = false;
+		const id = get().line?.sian;
+		if (!id) return false;
+		await lineAction(get, async (main) => {
+			const r = await api.sianUpdate(main, id, me(), prefer);
+			ok = r.ok;
+			if (!r.ok) return get().notify(tNow("sianClash").replace("{files}", r.conflicts.join(", ")), "err", { sticky: true });
+			get().notify(tNow(r.commit ? "sianUpdated" : "sianUpToDate"), "ok");
+			set({ deck: await readDeck(get().dir).catch(() => get().deck) });
+		}, true);
+		return ok;
+	},
+	dropSian: (id) => lineAction(get, async (main) => {
+		// 그 시안을 보고 있으면 본안으로 나간 뒤 치운다 — 연 폴더를 닫지 않으면 지우지 못한다
+		if (get().line?.sian === id) await get().openProject(main);
+		await api.sianDrop(main, id);
+		get().notify(tNow("sianDropped"), "ok");
+	}),
+	forkDeck: (dest) => lineAction(get, async () => {
+		const title = get().deck?.title ?? "";
+		await api.fork(get().dir, dest);
+		await get().openProject(dest);
+		const d = get().deck;
+		if (d) await get().saveDeck({ ...d, title: tNow("forkTitle").replace("{title}", title) });
+		get().notify(tNow("forkMade"), "ok");
+	}),
+	sendToOrigin: (name) => lineAction(get, async () => {
+		await api.forkSend(get().dir, name, me());
+		get().notify(tNow("forkSent"), "ok");
+	}),
+	fetchFork: (from, name) => lineAction(get, async (main) => {
+		const s = await api.forkFetch(main, from, name, me());
+		get().notify(tNow("forkFetched").replace("{name}", s.name), "ok");
+	}),
+
 	setPreview: (c) => set({ preview: c && c.hash === get().versions[0]?.hash ? null : c, ...(c ? { vdiff: null } : {}) }),
 
 	restore: async (c) => {
@@ -1047,7 +1155,7 @@ export const useDeck = create<S>()((set, get) => ({
 		set({ busy: tNow("restore") });
 		clearUndo();
 		try {
-			await api.restore(dir, c.hash, `v${c.n} 판으로 되돌림`, me());
+			await api.restore(dir, c.hash, `#${c.n} 때로 되돌림`, me());
 			set({ preview: null, vdiff: null, deck: await readDeck(dir) });
 			await get().refreshVersions();
 		} catch (e) {
@@ -1161,7 +1269,7 @@ export const useDeck = create<S>()((set, get) => ({
 			const next = await restoreSlideFile(dir, id, deck, vdiff, slideId);
 			if (next !== deck) await get().saveDeck(next);
 			const no = next.slides.findIndex((x) => x.id === slideId) + 1;
-			await api.commit(dir, `${no}쪽을 v${vdiff.base.n} 판으로 되돌림`, me());
+			await api.commit(dir, `${no}쪽을 #${vdiff.base.n} 때로 되돌림`, me());
 			await get().refreshVersions();
 			if (no > 0) get().setCurrent(no - 1);
 			set({ vdiff: await diffVersion(dir, id, get().deck!, vdiff.base) });

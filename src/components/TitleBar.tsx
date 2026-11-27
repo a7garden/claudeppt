@@ -1,17 +1,16 @@
-// 사용자 제목 줄 — 끌어서 창 옮기기 · 두 번 눌러 최대화. 왼쪽에 처음 · 덱 이름 · 판 번호(누르면 판 목록), 가운데에 한 쪽 · 이어 보기,
+// 사용자 제목 줄 — 끌어서 창 옮기기 · 두 번 눌러 최대화. 왼쪽에 처음 · 덱 이름 · 줄과 변경 번호(누르면 변경 기록 그래프), 가운데에 한 쪽 · 이어 보기,
 // 오른쪽에 내보내기 · 릴리즈 · 설정 · 창 단추.
 // 2026.11.18 : 가운데의 보기 · 핀 · 편집 모드를 걷었다 — 무대 도구 띠(고르기 · 펜 · 화살표 · 범위) 하나로 합쳤다.
 //              무대 아래 판 줄기(눈금 띠)도 걷고 판 번호를 누르면 여는 판 목록으로 옮겼다 — 눈금이 거의 안 보이면서 자리만 먹었다.
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { useEffect, useRef, useState } from "react";
-import type { Commit } from "../lib/api";
 import { useT } from "../lib/i18n";
 import { useDeck } from "../lib/store";
 import { remote } from "../lib/transport";
 import { useUpdate } from "../lib/updater";
-import { openMenu } from "./ContextMenu";
 import { CollabChip } from "./Collab";
 import DeckActions from "./DeckActions";
+import { History } from "./History";
 
 export const Mark = () => (
 	<svg className="mark" viewBox="0 0 16 16" aria-hidden>
@@ -41,6 +40,8 @@ export default function TitleBar({ onSettings, settingsOpen }: { onSettings: () 
 	}, []);
 	const head = versions[0];
 	const lastRel = releases[releases.length - 1];
+	const line = useDeck((s) => s.line);
+	const holds = useDeck((s) => s.holds.length);
 	const titleRef = useRef<HTMLInputElement>(null);
 
 	return (
@@ -64,14 +65,17 @@ export default function TitleBar({ onSettings, settingsOpen }: { onSettings: () 
 							/>
 							{head && (
 								<span className="stampwrap">
-								<button className={"stamp" + (list ? " on" : "")} onClick={() => setList(!list)} title={t("versions")} aria-expanded={list}>
-									<b>v{head.n}</b>
-									{/* 마지막 릴리즈 — 판 목록과 같은 꼬리표. 그 뒤로 판이 더 쌓였으면 몇 판인지 */}
+								<button className={"stamp" + (list ? " on" : "") + (line?.sian ? " sian" : "")} onClick={() => setList(!list)} title={t("versions")} aria-expanded={list}>
+									{/* 어느 줄인가 — 시안이면 시안 이름. 본안이면 줄 이름은 감추고 변경 번호만 (대부분은 본안만 쓴다) */}
+									{line?.sian && <i className="line">{line.name ?? line.sian}</i>}
+									<b>#{head.n}</b>
+									{/* 마지막 판(확정본) — 변경 기록과 같은 꼬리표. 그 뒤로 변경이 더 쌓였으면 몇 개인지 */}
 									{lastRel && <><i className="rtag">{lastRel.tag}</i>{head.n - lastRel.n > 1 ? `+${head.n - lastRel.n - 1}` : ""}</>}
+									{holds > 0 && <i className="held-dot" title={t("heldTitle")}>{holds}</i>}
 									<span className="caret" aria-hidden>▾</span>
 								</button>
-								{/* 판 번호 바로 아래로 편다 */}
-								{list && <VersionList onClose={() => setList(false)} />}
+								{/* 변경 번호 바로 아래로 편다 */}
+								{list && <History onClose={() => setList(false)} />}
 								</span>
 							)}
 							<UndoRedo />
@@ -124,51 +128,6 @@ function UndoRedo() {
 				<svg width="15" height="15" viewBox="0 0 16 16" aria-hidden><path d="M10.5 3l3 3-3 3M13.5 6h-7a4 4 0 0 0 0 8H9" fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round" /></svg>
 			</button>
 		</span>
-	);
-}
-
-/** 판 목록 — 새 판이 위. 누르면 그 판을 무대에서 제자리로 보고(지난 판 띠가 「되돌리기」를 준다), 릴리즈는 꼬리표로.
- *  대화의 v 번호와 같은 판이다. 직접 편집 판처럼 대화에 없는 판도 여기에는 다 있다 */
-function VersionList({ onClose }: { onClose: () => void }) {
-	const t = useT();
-	const versions = useDeck((s) => s.versions);
-	const preview = useDeck((s) => s.preview);
-	const setPreview = useDeck((s) => s.setPreview);
-	const restore = useDeck((s) => s.restore);
-	const running = useDeck((s) => s.running);
-	const ref = useRef<HTMLDivElement>(null);
-	useEffect(() => {
-		const k = (e: MouseEvent) => { if (!ref.current?.contains(e.target as Node) && !(e.target as Element).closest?.(".stamp")) onClose(); };
-		const esc = (e: KeyboardEvent) => { if (e.key === "Escape") onClose(); };
-		addEventListener("mousedown", k);
-		addEventListener("keydown", esc);
-		return () => { removeEventListener("mousedown", k); removeEventListener("keydown", esc); };
-	}, [onClose]);
-	const head = versions[0];
-	const pick = (c: Commit) => setPreview(c === head || preview?.hash === c.hash ? null : c);
-	return (
-		<div className="pop versions" ref={ref} role="listbox" aria-label={t("versions")}>
-			{versions.map((c) => {
-				const rel = c.tags.find((x) => /^r\d+$/.test(x));
-				const on = preview ? preview.hash === c.hash : c === head;
-				return (
-					<button key={c.hash} role="option" aria-selected={on} className={on ? "on" : ""} onClick={() => pick(c)}
-						onContextMenu={(e) => openMenu(e, [
-							{ label: `v${c.n} ${t("viewVersion")}`, run: () => pick(c), disabled: c === head },
-							{ label: t("restore"), run: () => restore(c), disabled: c === head || !!running },
-							"-",
-							{ label: t("compareWith"), run: () => { onClose(); useDeck.getState().startCompare(c); }, disabled: c === head },
-							{ label: `${t("mentionVersion")}`, run: () => { onClose(); useDeck.getState().mentionVersion(c.n); }, disabled: c === head },
-						])}>
-						{/* 대화의 판 알약과 같은 모양 — 지금 판만 채운다 */}
-						<span className={"node" + (c === head ? " head" : "")}>v{c.n}</span>
-						<span className="s"><span>{c.subject}</span>{rel && <i className="rtag">{rel}</i>}</span>
-						{/* 누가 시킨 판인지 — 팀원 이름. 바깥 CLI 처럼 이름 없이 남은 판(ClaudePPT)은 때만 */}
-						<span className="d">{c.author && c.author !== "ClaudePPT" ? `${c.author} · ` : ""}{c.date.slice(5, 16)}</span>
-					</button>
-				);
-			})}
-		</div>
 	);
 }
 

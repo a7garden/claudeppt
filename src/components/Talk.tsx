@@ -169,7 +169,7 @@ function Spine() {
 					return (
 						<li key={x.id}>
 							<button className={"sp-node" + (on ? " on" : "")} onClick={() => { if (c) setPreview(c === head ? null : c); }}
-								title={`v${v.n} · ${x.request.split("\n")[0].slice(0, 60)}`}>v{v.n}</button>
+								title={`#${v.n} · ${x.request.split("\n")[0].slice(0, 60)}`}>#{v.n}</button>
 						</li>
 					);
 				})}
@@ -293,7 +293,7 @@ const TurnView = memo(function TurnView({ turn, head: isHead }: { turn: Turn; he
 		{ label: t("copyReply"), run: () => copyText(turn.reply.trim()), disabled: !turn.reply.trim() },
 		"-",
 		...(commit ? [
-			{ label: `v${commit.n} ${t("viewVersion")}`, run: onVersion },
+			{ label: `#${commit.n} ${t("viewVersion")}`, run: onVersion },
 			{ label: t("compareWith"), run: () => useDeck.getState().startCompare(commit), disabled: commit.hash === head },
 			{ label: t("mentionVersion"), run: () => useDeck.getState().mentionVersion(commit.n), disabled: commit.hash === head },
 			// 지금 판이면 되돌릴 것이 없다. 턴이 도는 중에 되돌리면 Claude 가 고치던 파일을 덮는다
@@ -333,7 +333,7 @@ const TurnView = memo(function TurnView({ turn, head: isHead }: { turn: Turn; he
 					{/* 기다리는 턴 — 같은 세션의 앞 턴이 끝나면(또는 동시에 도는 수에 자리가 나면) 돈다. 멈춤으로 줄에서 뺄 수 있다 */}
 					{turn.status === "queued" && <><span className="phase">{t("queued")}</span><button className="more" onClick={() => useDeck.getState().stop(turn.id)}>{t("cancel")}</button></>}
 					{live && <span className="run" aria-label={t("working")} />}
-					{turn.version && <button className={"node" + (isHead ? " head" : "")} onClick={onVersion} title={`${turn.version.short}${turn.cost != null ? ` · $${turn.cost.toFixed(3)}` : ""}`}>v{turn.version.n}</button>}
+					{turn.version && <button className={"node" + (isHead ? " head" : "")} onClick={onVersion} title={`${turn.version.short}${turn.cost != null ? ` · $${turn.cost.toFixed(3)}` : ""}`}>#{turn.version.n}</button>}
 					{turn.phase && <span className="phase">{turn.phase}</span>}
 					{changed && <span className="lbl">{t("changedSlides")}</span>}
 					{touched.map((no) => <button key={no} className="mention" onClick={() => setCurrent(no - 1)}>{no}{t("slideN") === "쪽" ? "쪽" : ""}</button>)}

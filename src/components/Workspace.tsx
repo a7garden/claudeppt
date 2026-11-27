@@ -334,7 +334,7 @@ function Rail() {
 							{!preview && <button className="at" onClick={() => mentionSlide(i + 1)} title={`${t("mention")} (@${i + 1})`} aria-label={`${t("mention")} @${i + 1}`}>@</button>}
 						</div>
 						<button className="thumb" draggable={!preview} onDragStart={(e) => { setDrag(i); dragSlide(e, sl.id); }} onDragEnd={() => { setDrag(null); setDropAt(null); }}
-							onClick={() => setCurrent(i)} title={[sl.title || `${i + 1}`, vs && vdiff ? `v${vdiff.base.n} ${vs === "added" ? t("vsAdded") : t("vsChangedOne")}` : "", lastFiles.has(sl.file) ? t("changed") : ""].filter(Boolean).join(" · ")} aria-current={i === current}>
+							onClick={() => setCurrent(i)} title={[sl.title || `${i + 1}`, vs && vdiff ? `#${vdiff.base.n} ${vs === "added" ? t("vsAdded") : t("vsChangedOne")}` : "", lastFiles.has(sl.file) ? t("changed") : ""].filter(Boolean).join(" · ")} aria-current={i === current}>
 							<ThumbFrame file={sl.file} rev={rev[sl.id] || 0} w={deck.size.w} h={deck.size.h} revHash={preview?.hash} />
 							{lastFiles.has(sl.file) && !preview && <span className="fresh" aria-label={t("changed")} />}
 						</button>
@@ -529,7 +529,7 @@ function Stage() {
 				{compare && <VersionBar slideId={slide.id} />}
 				{preview && (
 					<div className="past" role="status">
-						<span className="node">v{preview.n}</span>
+						<span className="node">{preview.n ? `#${preview.n}` : preview.short}</span>
 						<span style={{ maxWidth: 320, overflow: "hidden", textOverflow: "ellipsis" }}>{preview.subject}</span>
 						<span className="dim mono">{preview.date}</span>
 						<button className="primary" onClick={() => restore(preview)}>{t("restore")}</button>

@@ -18,7 +18,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{Duration, Instant};
 
-fn git(dir: &Path) -> Command {
+pub(crate) fn git(dir: &Path) -> Command {
 	let mut c = Command::new("git");
 	hidden(&mut c);
 	c.current_dir(dir).args([
@@ -40,7 +40,7 @@ fn git(dir: &Path) -> Command {
 	c
 }
 
-fn run(dir: &Path, args: &[&str]) -> Res<String> {
+pub(crate) fn run(dir: &Path, args: &[&str]) -> Res<String> {
 	let o = git(dir).args(args).output().map_err(|e| format!("git 을 띄우지 못했다 ({e}) — git 이 설치되어 있어야 판 관리가 된다"))?;
 	if !o.status.success() {
 		return Err(String::from_utf8_lossy(&o.stderr).trim().to_string());
@@ -75,14 +75,14 @@ pub fn vcs_init(dir: String) -> Res<()> {
 
 #[derive(Serialize)]
 pub struct Commit {
-	n: u32,
+	pub(crate) n: u32,
 	hash: String,
 	short: String,
 	date: String,
-	subject: String,
+	pub(crate) subject: String,
 	tags: Vec<String>,
 	/// 남긴 이 — 팀원이 시킨 판은 그 사람 이름, 그 밖(직접 편집 · 바깥 CLI)은 ClaudePPT
-	author: String,
+	pub(crate) author: String,
 }
 
 /// 바뀐 것이 있으면 한 판으로 남기고 그 판을 돌려준다. 없으면 None.
@@ -96,7 +96,7 @@ pub fn vcs_commit(dir: String, message: String, author: Option<String>) -> Res<O
 
 /// 판 남기기 잠금 — 앱과 앱 밖 CLI(Claude Code 세션마다 프로세스가 따로 돈다)가 덱 하나의 git 색인을 함께 쓴다.
 /// 잠그지 않으면 같은 때 판을 남길 때 한쪽이 git 의 index.lock 에 걸려 실패하고, 되돌리기(남기기 → 덮기 → 남기기) 사이에 다른 판이 끼어든다
-struct Lock(PathBuf);
+pub(crate) struct Lock(PathBuf);
 
 impl Drop for Lock {
 	fn drop(&mut self) {
@@ -104,8 +104,20 @@ impl Drop for Lock {
 	}
 }
 
-fn lock(d: &Path) -> Res<Lock> {
-	let p = d.join(".git").join("claudeppt-commit.lock");
+/// 이 작업 폴더의 git 폴더 — 덱이면 .git, 시안 · 작업 사본(worktree)이면 .git 파일이 가리키는 곳.
+/// 2026.11.27 : 시안 폴더를 덱으로 열게 되며 더했다 — .git 이 파일이라 그 안에 잠금 · 상태 파일을 둘 수 없다
+pub(crate) fn git_dir(d: &Path) -> PathBuf {
+	let g = d.join(".git");
+	if g.is_file() {
+		if let Some(p) = std::fs::read_to_string(&g).ok().and_then(|s| s.trim().strip_prefix("gitdir:").map(|x| PathBuf::from(x.trim()))) {
+			return if p.is_absolute() { p } else { d.join(p) };
+		}
+	}
+	g
+}
+
+pub(crate) fn lock(d: &Path) -> Res<Lock> {
+	let p = git_dir(d).join("claudeppt-commit.lock");
 	let t0 = Instant::now();
 	loop {
 		match std::fs::OpenOptions::new().write(true).create_new(true).open(&p) {
@@ -131,7 +143,7 @@ fn safe_rel(p: &str) -> bool {
 	!p.is_empty() && !p.starts_with('/') && !p.contains(':') && !p.split('/').any(|c| c == "..")
 }
 
-fn commit_all(d: &Path, message: &str, author: Option<&str>) -> Res<Option<Commit>> {
+pub(crate) fn commit_all(d: &Path, message: &str, author: Option<&str>) -> Res<Option<Commit>> {
 	run(d, &["add", "-A"])?;
 	finish(d, message, author)
 }
@@ -153,7 +165,7 @@ fn finish(d: &Path, message: &str, author: Option<&str>) -> Res<Option<Commit>> 
 	Ok(head(d).ok())
 }
 
-fn head(d: &Path) -> Res<Commit> {
+pub(crate) fn head(d: &Path) -> Res<Commit> {
 	Ok(vcs_log(d.to_string_lossy().into(), Some(1))?.into_iter().next().ok_or("판이 없다")?)
 }
 
@@ -163,7 +175,8 @@ pub fn vcs_log(dir: String, limit: Option<u32>) -> Res<Vec<Commit>> {
 	if run(d, &["rev-parse", "--verify", "-q", "HEAD"]).is_err() {
 		return Ok(vec![]);
 	}
-	let total: u32 = run(d, &["rev-list", "--count", "HEAD"])?.trim().parse().unwrap_or(0);
+	// 본 줄만 센다 (2026.11.27) — 시안을 넣으면(merge) 시안의 변경은 「넣음」 하나로 보이고, 번호가 시안의 변경 수만큼 건너뛰지 않는다
+	let total: u32 = run(d, &["rev-list", "--count", "--first-parent", "HEAD"])?.trim().parse().unwrap_or(0);
 	let mut tags: std::collections::HashMap<String, Vec<String>> = Default::default();
 	if let Ok(t) = run(d, &["show-ref", "--tags"]) {
 		for line in t.lines() {
@@ -172,7 +185,7 @@ pub fn vcs_log(dir: String, limit: Option<u32>) -> Res<Vec<Commit>> {
 			}
 		}
 	}
-	let mut args = vec!["log".to_string(), "--format=%H%x09%h%x09%ci%x09%an%x09%s".to_string()];
+	let mut args = vec!["log".to_string(), "--first-parent".to_string(), "--format=%H%x09%h%x09%ci%x09%an%x09%s".to_string()];
 	if let Some(l) = limit {
 		args.push(format!("-{l}"));
 	}
@@ -234,7 +247,7 @@ pub fn vcs_restore(dir: String, hash: String, message: String, author: Option<St
 const HOLD: &str = "cppt/hold/";
 
 /// 이름(세션 · 턴 id)은 화면에서 온다 — 경로 · 갈래 이름에 쓰므로 영문 · 숫자만
-fn plain(s: &str) -> Res<&str> {
+pub(crate) fn plain(s: &str) -> Res<&str> {
 	(!s.is_empty() && s.len() <= 40 && s.chars().all(|c| c.is_ascii_alphanumeric())).then_some(s).ok_or_else(|| format!("이름이 맞지 않다: {s}"))
 }
 
@@ -261,8 +274,8 @@ pub fn vcs_work_prepare(dir: String, key: String) -> Res<Work> {
 	}
 	let base = run(d, &["rev-parse", "HEAD"])?;
 	// 이 덱의 사본인가 — 덱을 옮겼거나 사본이 망가졌으면 새로 만든다. 지우는 곳은 앱 데이터 안 사본 자리뿐이다
-	let real = |p: &Path| std::fs::canonicalize(p).ok();
-	let mine = w.join(".git").is_file() && run(&w, &["rev-parse", "--git-common-dir"]).ok().and_then(|g| real(&w.join(g.trim()))) == real(&d.join(".git"));
+	let common = |p: &Path| run(p, &["rev-parse", "--path-format=absolute", "--git-common-dir"]).ok().and_then(|g| std::fs::canonicalize(g.trim()).ok());
+	let mine = w.join(".git").is_file() && common(&w).is_some() && common(&w) == common(d);
 	// 끝나지 않은 턴이 남긴 것(앱이 꺼졌다 · 얹기 전에 오류)이 있으면 지우기 전에 보류로 남긴다 — Claude 가 한 일을 소리 없이 잃지 않게
 	if mine && !run(&w, &["status", "--porcelain"]).unwrap_or_default().trim().is_empty() {
 		let _ = run(&w, &["add", "-A"]).and_then(|_| finish(&w, "끝나지 않은 턴의 변경", None));
@@ -354,7 +367,7 @@ fn land(d: &Path, c: &str, name: &str) -> Res<Landed> {
 			Ok(Landed::Applied { commit: head(d)?, files })
 		}
 		Err(e) => {
-			let picking = d.join(".git").join("CHERRY_PICK_HEAD").exists();
+			let picking = git_dir(d).join("CHERRY_PICK_HEAD").exists();
 			let conflicts: Vec<String> = run(d, &["diff", "--name-only", "--diff-filter=U"]).unwrap_or_default().lines().map(String::from).collect();
 			if picking && conflicts.is_empty() {
 				// 같은 내용이 이미 들어가 있다 — 얹을 것이 없다
@@ -430,11 +443,15 @@ pub fn vcs_hold_take(dir: String, name: String, message: String, author: Option<
 	Ok(made)
 }
 
-/// 보류한 것을 버린다 — 사람이 고른 때만
+/// 보류한 것을 버린다 — 사람이 고른 때만. 지우지 않고 치워 둔다(cppt/old/…) — 잘못 눌러도 git 으로 되살린다
 #[tauri::command(async)]
 pub fn vcs_hold_drop(dir: String, name: String) -> Res<()> {
-	run(Path::new(&dir), &["branch", "-D", &format!("{HOLD}{}", plain(&name)?)]).map(|_| ())
+	let n = plain(&name)?;
+	run(Path::new(&dir), &["branch", "-M", &format!("{HOLD}{n}"), &format!("{OLD}hold-{n}")]).map(|_| ())
 }
+
+/// 버린 보류 · 시안을 치워 두는 자리 — 목록 · 그래프에 나오지 않는다
+pub(crate) const OLD: &str = "cppt/old/";
 
 #[cfg(test)]
 mod tests {
