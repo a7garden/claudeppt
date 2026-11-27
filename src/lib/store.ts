@@ -65,15 +65,19 @@ export interface Turn {
 	runner?: { device: string; name: string };
 }
 /**
- * 대화 세션 하나 — 팀원은 같은 Claude 계정을 쓰므로 세션을 사람마다 두지 않는다.
- * 쪽은 처음 고친 세션으로 확정되고(bind), 그 뒤 누가 그 쪽을 고치든 그 세션을 이어 쓴다. 세션 하나가 여러 쪽을 맡을 수 있다.
- * key 는 앱이 붙인 이름(s1 · s2 …), claude 는 Claude Code 의 세션 id (첫 턴이 돌아야 생긴다)
+ * 대화 세션 하나. key 는 앱이 붙인 이름(s1 · s2 …), claude 는 Claude Code 의 세션 id (첫 턴이 돌아야 생긴다)
+ * 쪽은 처음 고친 세션으로 확정되고(bind), 그 뒤 그 쪽을 고치는 요청은 그 세션을 이어 쓴다. 세션 하나가 여러 쪽을 맡을 수 있다.
+ * owner — 그 세션을 쓰는 팀원 기기 (2026.11.27). 없으면 덱 주인 묶음(덱 주인 · 브라우저 팀원).
+ *   덱 주인이 「세션 공유」를 켜지 않으면(기본) 앱 팀원은 자기 PC 의 Claude 로 자기 세션 묶음만 쓴다 — 고르기 · 확정 · 「지금 대화」 모두 묶음 안에서 (routeOf pool).
+ *   켜면 전처럼 묶음 없이 모두가 한 세션들을 이어 쓴다
  */
-export interface Session { key: string; claude: string | null; at: number }
+export interface Session { key: string; claude: string | null; at: number; owner?: string }
 /** 협업 브라우저에서 온 요청 — by 는 서버가 정한 기기 이름. onStart 는 턴이 만들어지자마자(끝나기 전에) 부른다 */
 export interface SendFrom { by: string; current: string | null; talkKey: string | null; pins: Pin[]; onStart?: (r: { key: string; via?: number; turn: string }) => void;
 	/** 보낸 팀원의 PC 에서 Claude 를 돌린다 — 그 기기 id (collab.ts 가 그 기기가 붙어 있는지 본다) */
-	runner?: string }
+	runner?: string;
+	/** 세션 묶음 (Session.owner) — "" 은 덱 주인 묶음, 없으면 묶음 없이(세션 공유). 정하는 곳은 collab.ts claudeFor */
+	pool?: string }
 /** 화면 뒤에서 도는 긴 일(PPTX 가져오기) 하나. n 이 0 이면 아직 전체 양을 모른다 */
 export interface Job { id: string; label: string; i: number; n: number; note?: string }
 export interface Release { name: string; tag: string; n: number; hash: string; file: string; notes: string; at: string }
@@ -144,7 +148,7 @@ interface S {
 	/** 의견 해결 · 다시 열기 */
 	resolvePin: (id: string, done: boolean) => void;
 	/** 의견 하나를 그 쪽의 세션에 보낸다 — 「○○ 님 의견을 반영해 줘」. from 이 없으면 이 기기 사람이 보낸다 */
-	sendPin: (id: string, from?: { by: string; talkKey: string | null }) => Promise<void>;
+	sendPin: (id: string, from?: { by: string; talkKey: string | null; runner?: string; pool?: string }) => Promise<void>;
 	/** force — 앱 밖 Claude Code 가 방금 이 덱을 다뤘어도 보낸다 (알림의 「그래도 보내기」).
 	 *  from — 협업 브라우저 팀원이 보낸 요청 (collab.ts). 보낸 사람 · 그 사람이 보던 쪽 · 그 사람의 지금 대화로 처리하고, 호스트 화면(보는 대화 · 핀)은 건드리지 않는다 */
 	send: (text: string, attachments?: string[], force?: boolean, from?: SendFrom) => Promise<void>;
@@ -318,8 +322,14 @@ export const persistTalk = (dir: string, st: Pick<S, "turns" | "sessions" | "bin
 	};
 	return api.writeText(dir, ".claudeppt/talk.json", JSON.stringify(file, null, 1)).catch(() => {});
 };
-/** 다음 세션 — s1 · s2 … */
-export const nextSession = (list: Session[]): Session => ({ key: "s" + (Math.max(0, ...list.map((x) => Number(x.key.slice(1)) || 0)) + 1), claude: null, at: Date.now() });
+/** 다음 세션 — s1 · s2 … (번호는 묶음과 상관없이 덱 하나에서 이어 간다). pool 이 팀원 기기면 그 사람 세션 */
+export const nextSession = (list: Session[], pool?: string): Session => ({ key: "s" + (Math.max(0, ...list.map((x) => Number(x.key.slice(1)) || 0)) + 1), claude: null, at: Date.now(), ...(pool ? { owner: pool } : {}) });
+/** 덱 주인 화면이 쓰는 묶음 — 세션 공유를 켰으면 묶음 없이, 아니면 덱 주인 묶음("") */
+export const hostPool = (): string | undefined => (useSettings.getState().s.collab.shareClaude ? undefined : "");
+/** 그 묶음의 세션인가 — pool 이 없으면(세션 공유) 모두 */
+export const inPool = (x: Session, pool?: string) => pool === undefined || (x.owner ?? "") === pool;
+/** 쪽 확정의 열쇠 — 덱 주인 묶음 · 세션 공유는 쪽 id 그대로(옛 talk.json 과 같다), 팀원 묶음은 「기기/쪽」 */
+export const bindKey = (pool: string | undefined, slide: string) => (pool ? `${pool}/${slide}` : slide);
 /** 「설정 › 협업」이 켜져 있나 — 꺼져 있으면 세션 하나 · 이름 없이 전처럼 돈다 */
 export const team = () => useSettings.getState().s.collab.on;
 /** 이 기기를 쓰는 팀원 — 협업을 켰을 때만. 판의 작성자로도 남긴다 (꺼져 있으면 빈 글 → 판 작성자는 전처럼 ClaudePPT) */
@@ -353,17 +363,19 @@ export function recapOf(turns: Turn[], key: string, skip: string): string {
  * 세션이 하나도 없으면 key 가 null — 보낼 때 새로 연다.
  * via 는 세션을 정한 쪽의 번호 (지금 대화로 가면 없음)
  */
-export function routeOf(st: Pick<S, "deck" | "current" | "pins" | "bind" | "sessions" | "talkKey">, text: string): { key: string | null; via?: number; targets: string[] } {
-	const live = (k?: string | null) => !!k && st.sessions.some((x) => x.key === k);
-	const talk = live(st.talkKey) ? st.talkKey : st.sessions.at(-1)?.key ?? null;
+export function routeOf(st: Pick<S, "deck" | "current" | "pins" | "bind" | "sessions" | "talkKey">, text: string, pool?: string): { key: string | null; via?: number; targets: string[] } {
+	// 묶음 밖 세션은 없는 것으로 본다 — 남의 세션을 보던 중에 보내도 내 세션으로 간다
+	const mine = st.sessions.filter((x) => inPool(x, pool));
+	const live = (k?: string | null) => !!k && mine.some((x) => x.key === k);
+	const talk = live(st.talkKey) ? st.talkKey : mine.at(-1)?.key ?? null;
 	const deck = st.deck;
 	if (!deck) return { key: talk, targets: [] };
 	const mentions = mentionsIn(text, deck);
 	const cur = deck.slides[st.current];
 	const targets = mentions.length ? mentions.map((m) => m.id) : st.pins.length ? st.pins.map((p) => p.slide) : cur ? [cur.id] : [];
 	if (!team()) return { key: talk, targets };
-	const hit = targets.find((id) => live(st.bind[id]));
-	if (hit) return { key: st.bind[hit], via: deck.slides.findIndex((x) => x.id === hit) + 1, targets };
+	const hit = targets.find((id) => live(st.bind[bindKey(pool, id)]));
+	if (hit) return { key: st.bind[bindKey(pool, hit)], via: deck.slides.findIndex((x) => x.id === hit) + 1, targets };
 	return { key: talk, targets };
 }
 /** 답 글자 조각을 잠깐(30ms) 모았다 한 번에 넣는다. 조각마다 turns 를 바꾸면 대화 · 쪽 목록이 조각 수만큼 다시 그려진다.
@@ -398,7 +410,8 @@ const relOf = (dir: string, p?: string) => {
 const MAX_RUNS = 3;
 /** 턴이 고친 파일을 알려 주는 도구 — 함께 돈 턴의 판에 이 파일들만 담는다 */
 const EDIT_TOOLS = ["Write", "Edit", "MultiEdit", "NotebookEdit"];
-type Waiting = { turn: string; key: string; exec: () => Promise<void>; done: () => void };
+/** slides — 그 요청이 가리킨 쪽(routeOf targets). 다른 세션이 같은 쪽을 고치는 동안은 돌지 않는다 */
+type Waiting = { turn: string; key: string; slides: string[]; exec: () => Promise<void>; done: () => void };
 /** 기다리는 턴 — 앞에서부터, 그 세션이 비고 자리가 나면 돈다 */
 let waiting: Waiting[] = [];
 /** 턴 세우기는 한 줄로 — 「도는 중 · 기다리는 턴」을 본 뒤 턴을 세우기까지 판 남기기를 기다리는 틈에 다른 요청(다른 팀원 · 같은 요청 두 번)이
@@ -406,14 +419,26 @@ let waiting: Waiting[] = [];
 let sendChain: Promise<unknown> = Promise.resolve();
 
 const setRuns = (set: (p: Partial<S>) => void, runs: Record<string, string>) => set({ runs, running: Object.values(runs)[0] ?? null });
+/** 도는 세션 → 그 턴이 가리킨 쪽 */
+const runSlides: Record<string, string[]> = {};
+/** 세션 key 의 요청이 쪽 slides 를 고치려 할 때 막히나 — 다른 세션이 그 쪽을 고치는 중이거나, 앞서 기다리는 다른 세션 요청(before)이 그 쪽을 가리킨다 */
+function clash(key: string, slides: string[], before: Waiting[]) {
+	if (!slides.length) return false;
+	const held = new Set<string>();
+	for (const [k, ids] of Object.entries(runSlides)) if (k !== key) ids.forEach((id) => held.add(id));
+	for (const w of before) if (w.key !== key) w.slides.forEach((id) => held.add(id));
+	return slides.some((id) => held.has(id));
+}
 
 function startRun(get: () => S, set: (p: Partial<S>) => void, w: Waiting) {
 	setRuns(set, { ...get().runs, [w.key]: w.turn });
+	runSlides[w.key] = w.slides;
 	set({ turns: get().turns.map((t) => (t.id === w.turn && t.status === "queued" ? { ...t, status: "running" } : t)) });
 	const dir = get().dir;
 	w.exec().finally(() => {
 		const runs = { ...get().runs };
 		delete runs[w.key];
+		delete runSlides[w.key];
 		setRuns(set, runs);
 		if (get().dir === dir) {
 			persistTalk(dir, get());
@@ -426,10 +451,12 @@ function startRun(get: () => S, set: (p: Partial<S>) => void, w: Waiting) {
 
 /** 자리가 났다 — 기다리는 턴을 앞에서부터 돌린다 (그 세션이 비어 있고 동시 상한 안이면) */
 function pump(get: () => S, set: (p: Partial<S>) => void) {
-	for (const w of [...waiting]) {
+	const list = [...waiting];
+	for (const [i, w] of list.entries()) {
 		const runs = get().runs;
 		if (Object.keys(runs).length >= MAX_RUNS) break;
-		if (runs[w.key]) continue;
+		// 앞서 기다리는(아직 못 돈) 다른 세션 요청과 같은 쪽이면 그 뒤에 — 먼저 온 요청이 먼저 고친다
+		if (runs[w.key] || clash(w.key, w.slides, list.slice(0, i).filter((x) => waiting.includes(x)))) continue;
 		waiting = waiting.filter((x) => x !== w);
 		startRun(get, set, w);
 	}
@@ -477,11 +504,13 @@ async function sendTurn(get: () => S, set: (p: Partial<S>) => void, text: string
 	const mentions = mentionsIn(text, deck);
 	const versionMentions = versionMentionsIn(text, get().versions);
 	// 세션 고르기 (routeOf). 보고 있던 대화와 다른 세션으로 가면 알리고, 대화칸도 그 세션으로 옮긴다 — 보낸 요청이 보이게
-	const route = routeOf(from ? { ...get(), current, talkKey: from.talkKey, pins } : get(), text);
+	// 세션 묶음 — 팀원 요청은 collab.ts 가 정해 온 것, 덱 주인 것은 덱 주인 묶음 (세션 공유면 묶음 없이)
+	const pool = from ? from.pool : hostPool();
+	const route = routeOf(from ? { ...get(), current, talkKey: from.talkKey, pins } : get(), text, pool);
 	let { sessions } = get();
 	let key = route.key;
 	if (!key) {
-		const ns = nextSession(sessions);
+		const ns = nextSession(sessions, pool);
 		sessions = [...sessions, ns];
 		key = ns.key;
 		set({ sessions });
@@ -489,11 +518,12 @@ async function sendTurn(get: () => S, set: (p: Partial<S>) => void, text: string
 	// 이 요청이 가리킨 쪽(@쪽 · 핀 · 보던 쪽)을 바로 이 세션에 붙인다 — 턴이 끝나기 전에 같은 쪽 요청이 오면 다른 세션으로 가서
 	// 두 세션이 같은 파일을 함께 고치지 않게 (같은 세션이면 차례로 기다린다). 이미 다른 세션에 붙은 쪽은 그대로
 	const claim = { ...get().bind };
-	for (const id of route.targets) if (!claim[id]) claim[id] = key;
+	for (const id of route.targets) if (!claim[bindKey(pool, id)]) claim[bindKey(pool, id)] = key;
 	set({ bind: claim });
 	if (!from && get().talkKey && key !== get().talkKey && route.via) get().notify(tNow("routedTo").replace("{no}", String(route.via)).replace("{n}", key.slice(1)), "ok");
 	// 같은 세션의 앞 턴이 돌거나 기다리는 중이면, 또는 동시에 도는 수가 찼으면 기다린다 — 같은 세션은 차례로, 다른 세션끼리는 함께
-	const wait = !!get().runs[key] || waiting.some((w) => w.key === key) || Object.keys(get().runs).length >= MAX_RUNS;
+	// 다른 세션이 같은 쪽을 고치는 중이거나 그 쪽 요청이 먼저 기다리고 있어도 기다린다 — 세션 묶음이 사람마다라 같은 쪽을 두 세션이 함께 고칠 수 있다 (한쪽이 덮인다)
+	const wait = !!get().runs[key] || waiting.some((w) => w.key === key) || Object.keys(get().runs).length >= MAX_RUNS || clash(key, route.targets, waiting);
 	const turn: Turn = { id: "t" + Date.now().toString(36) + Math.random().toString(36).slice(2, 5), at: Date.now(), request: text.trim(), pins: notes, mentions, versionMentions, attach: attachments.length ? [...attachments] : undefined, reply: "", tools: [], status: wait ? "queued" : "running", by: by || undefined, session: key, runner: from?.runner ? { device: from.runner, name: by } : undefined };
 	// 지금 대화 = 마지막에 쓰인 세션. 팀원의 요청이면 호스트가 보는 대화는 그대로 두고 그 팀원의 핀만 걷는다
 	set(from ? { turns: [...get().turns, turn], pins: get().pins.filter((p) => !pins.includes(p)) } : { turns: [...get().turns, turn], pins: get().pins.filter((p) => !pins.includes(p)), talkKey: key });
@@ -553,7 +583,7 @@ async function sendTurn(get: () => S, set: (p: Partial<S>) => void, text: string
 			// 이 턴이 처음 고친 쪽은 이 세션으로 확정한다 — 이미 다른 세션에 확정된 쪽은 그대로 둔다
 			const wrote = new Set(get().turns.find((t) => t.id === turn.id)!.tools.filter((x) => x.name === "Write" || x.name === "Edit" || x.name === "MultiEdit").map((x) => x.file));
 			const bind = { ...get().bind };
-			for (const sl of fresh.slides) if (wrote.has(sl.file) && !bind[sl.id]) bind[sl.id] = key;
+			for (const sl of fresh.slides) if (wrote.has(sl.file) && !bind[bindKey(pool, sl.id)]) bind[bindKey(pool, sl.id)] = key;
 			set({ bind });
 			const summary = (text.trim() || notes.map((n) => n.text).join(" · ") || "핀").replace(/\s+/g, " ").slice(0, 72);
 			// 다른 세션의 턴이 함께 돌고 있으면 이 턴이 고친 파일만 판에 담는다 — 아직 도는 턴이 고치던 파일이 섞이지 않게.
@@ -569,7 +599,7 @@ async function sendTurn(get: () => S, set: (p: Partial<S>) => void, text: string
 	// 약속을 바로 돌려주면 async 함수가 그것을 풀어 끝날 때까지 기다린다 — 감싸서 돌려준다 (턴 세우기 줄이 턴이 끝날 때까지 막혔다)
 	return {
 		done: new Promise<void>((done) => {
-			const w: Waiting = { turn: turn.id, key, exec, done };
+			const w: Waiting = { turn: turn.id, key, slides: route.targets, exec, done };
 			if (wait) waiting.push(w);
 			else startRun(get, set, w);
 		}),
@@ -797,7 +827,7 @@ export const useDeck = create<S>()((set, get) => ({
 		const p = get().pins.find((x) => x.id === id);
 		if (!p) return;
 		const by = from?.by ?? me();
-		await get().send(tNow("pinSendText").replace("{name}", p.by || by), [], true, { by, current: p.slide, talkKey: from ? from.talkKey : get().talkKey, pins: [p] });
+		await get().send(tNow("pinSendText").replace("{name}", p.by || by), [], true, { by, current: p.slide, talkKey: from ? from.talkKey : get().talkKey, pins: [p], runner: from?.runner, pool: from ? from.pool : hostPool() });
 	},
 
 	send: async (text, attachments = [], force = false, from) => {
@@ -812,7 +842,7 @@ export const useDeck = create<S>()((set, get) => ({
 		if (!dir) return;
 		// 지금 대화가 아직 한 번도 쓰이지 않았으면 새로 만들지 않는다 — 빈 세션이 쌓이지 않게
 		const cur = sessions.find((x) => x.key === talkKey);
-		const ns = cur && !cur.claude && !turns.some((t) => t.session === cur.key) ? cur : nextSession(sessions);
+		const ns = cur && inPool(cur, hostPool()) && !cur.claude && !turns.some((t) => t.session === cur.key) ? cur : nextSession(sessions, hostPool());
 		if (ns !== cur) set({ sessions: [...sessions, ns], talkKey: ns.key });
 		persistTalk(dir, get());
 		get().notify(tNow("newTalkDone").replace("{n}", ns.key.slice(1)), "ok");

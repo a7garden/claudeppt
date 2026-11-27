@@ -112,6 +112,9 @@ pub struct Member {
 	since: i64,
 	/// 이 기기가 「내 PC 의 Claude」를 붙여 두었나 — 요청칸이 고르기를 보인다
 	runner: bool,
+	/// 앱의 공유 덱 창으로 들어왔나 (2026.11.27) — 화면이 알려 온 것이라 믿을 것은 아니다. 덱 주인 화면이 Claude · 세션을 고르는 데만 쓴다:
+	/// 앱 팀원은 자기 PC 의 Claude · 자기 세션, 브라우저 팀원은 덱 주인의 것 (collab.ts 「send」). 브라우저인 척해도 얻는 것은 브라우저 팀원 몫뿐이다
+	app: bool,
 }
 
 #[derive(Serialize, Clone)]
@@ -576,7 +579,7 @@ pub fn collab_reply(app: AppHandle, id: String, reply: Value) {
 #[tauri::command]
 pub fn collab_view(app: AppHandle, name: String, slide: Option<String>) {
 	if let Some(h) = hub(&app) {
-		h.members.lock().unwrap().insert(0, Member { conn: 0, device: String::new(), name, slide, host: true, since: now(), runner: false });
+		h.members.lock().unwrap().insert(0, Member { conn: 0, device: String::new(), name, slide, host: true, since: now(), runner: false, app: true });
 		h.members_changed();
 	}
 }
@@ -831,7 +834,7 @@ async fn conn(h: Arc<Hub>, who: Who, mut socket: WebSocket) {
 	let (direct, mut inbox) = mpsc::unbounded_channel::<String>();
 	let mut rx = h.tx.subscribe();
 	h.conns.lock().unwrap().insert(id, (who.device.clone(), direct.clone()));
-	h.members.lock().unwrap().insert(id, Member { conn: id, device: who.device.clone(), name: who.name.clone(), slide: None, host: false, since: now(), runner: h.runners.lock().unwrap().contains_key(&who.device) });
+	h.members.lock().unwrap().insert(id, Member { conn: id, device: who.device.clone(), name: who.name.clone(), slide: None, host: false, since: now(), runner: h.runners.lock().unwrap().contains_key(&who.device), app: false });
 	h.members_changed();
 	let hello = json!({ "t": "hello", "conn": id, "deckKey": h.deck_key, "name": who.name }).to_string();
 	if socket.send(Message::Text(hello.into())).await.is_err() || socket.send(Message::Text(h.snapshot().into())).await.is_err() {
@@ -882,6 +885,9 @@ fn on_message(h: &Arc<Hub>, conn: u64, direct: &mpsc::UnboundedSender<String>, t
 			let slide = m["slide"].as_str().map(String::from);
 			if let Some(e) = h.members.lock().unwrap().get_mut(&conn) {
 				e.slide = slide;
+				if m["t"] == "hello" {
+					e.app = m["app"].as_bool().unwrap_or(false);
+				}
 			}
 			h.members_changed();
 		}

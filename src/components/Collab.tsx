@@ -1,6 +1,6 @@
 // 팀 협업 화면 조각 — 제목 줄 「공유」(공유 창) · 쪽 목록 · 무대의 「보는 사람」 표시 (상태: lib/collab.ts)
 import { useEffect, useRef, useState } from "react";
-import { collabKick, collabLinkNew, collabLinkRemove, collabLock, collabTools, follow, setVia, type InviteLink, type TunnelTools, type Member, startHost, stopHost, useCollab } from "../lib/collab";
+import { collabKick, collabLinkNew, collabLinkRemove, collabLock, collabTools, follow, setShareClaude, setVia, type InviteLink, type TunnelTools, type Member, startHost, stopHost, useCollab } from "../lib/collab";
 import { useT } from "../lib/i18n";
 import { useSettings } from "../lib/settings";
 import { useDeck } from "../lib/store";
@@ -147,6 +147,7 @@ export function SharePanel({ bare }: { bare?: boolean }) {
 	const { info, members } = useCollab();
 	const me = useSettings((s) => s.s.me);
 	const via = useSettings((s) => s.s.collab.via);
+	const shareClaude = useSettings((s) => s.s.collab.shareClaude);
 	const deck = useDeck((s) => s.deck);
 	const notify = useDeck((s) => s.notify);
 	const [busy, setBusy] = useState(false);
@@ -174,6 +175,13 @@ export function SharePanel({ bare }: { bare?: boolean }) {
 			))}
 		</div>
 	);
+	// 세션 · Claude 를 함께 쓸지 (2026.11.27) — 기본은 꺼짐: 앱 팀원은 저마다 자기 PC 의 Claude 와 자기 세션
+	const claude = (
+		<label className="check share-claude">
+			<input type="checkbox" checked={shareClaude} onChange={() => setShareClaude(!shareClaude)} />
+			<span>{t("shareClaude")}<small>{t(shareClaude ? "shareClaudeOn" : "shareClaudeOff")}</small></span>
+		</label>
+	);
 
 	if (!info) {
 		return (
@@ -182,6 +190,7 @@ export function SharePanel({ bare }: { bare?: boolean }) {
 				<p className="note">{t("shareIntro")}</p>
 				{pick}
 				{via === "internet" && noTools && <p className="note">{t("collabNoTools")}</p>}
+				{claude}
 				{!bare && (
 					<label className="share-name">
 						<span>{t("myName")}</span>
@@ -225,6 +234,7 @@ export function SharePanel({ bare }: { bare?: boolean }) {
 				<p className="note">{note}</p>
 				{via !== "app" && <p className="note">{t("shareViaWebAlso")}</p>}
 			</section>
+			{claude}
 
 			<section className="collab-members">
 				<span className="lbl">{t("collabPeople")}</span>

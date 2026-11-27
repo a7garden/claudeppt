@@ -9,13 +9,13 @@ import { listen } from "@tauri-apps/api/event";
 import { create } from "zustand";
 import { api, b64FromBytes } from "./api";
 import { attachable, relFor, useAttach } from "./attach";
-import { call, remote, remoteDeck } from "./transport";
+import { appWindow, call, remote, remoteDeck } from "./transport";
 import { tNow } from "./i18n";
 import { type ShareVia, useSettings } from "./settings";
-import { isMine, me, nextSession, persistTalk, type Turn, useDeck } from "./store";
+import { inPool, isMine, me, nextSession, persistTalk, type Turn, useDeck } from "./store";
 
-/** runner — 이 기기가 「내 PC 의 Claude」를 붙여 두었다 (runner.rs) */
-export interface Member { conn: number; device: string; name: string; slide: string | null; host: boolean; since: number; runner?: boolean }
+/** runner — 이 기기가 「내 PC 의 Claude」를 붙여 두었다 (runner.rs) · app — 앱의 공유 덱 창으로 들어왔다 (화면이 알려 온 것, collab.rs Member) */
+export interface Member { conn: number; device: string; name: string; slide: string | null; host: boolean; since: number; runner?: boolean; app?: boolean }
 /** app — 앱으로 여는 링크(claudeppt://…, 앱끼리 잇는 길이 없으면 null) · url — 브라우저로 여는 링크 */
 export interface InviteLink { id: string; app: string | null; url: string; name: string | null; expires: number | null; expired: boolean }
 export interface Device { id: string; name: string; seen: number; online: boolean }
@@ -36,8 +36,28 @@ interface C {
 	kicked: boolean;
 	/** 따라가는 사람의 연결 번호 — 그 사람이 쪽을 넘기면 내 화면도 넘어간다. 내가 쪽을 옮기면 풀린다 (보는 사람 몫) */
 	follow: number | null;
+	/** 브라우저: 덱 주인이 자기 Claude · 세션을 함께 쓰게 했나 (settings collab.shareClaude 를 받는다) */
+	shareClaude: boolean;
 }
-export const useCollab = create<C>()(() => ({ info: null, members: [], conn: null, connected: false, ended: false, kicked: false, follow: null }));
+export const useCollab = create<C>()(() => ({ info: null, members: [], conn: null, connected: false, ended: false, kicked: false, follow: null, shareClaude: false }));
+
+/** 이 화면이 보고 쓰는 세션 묶음 (store Session.owner) — 덱 주인 화면은 hostPool, 팀원 화면은 세션 공유면 묶음 없이 · 앱 창이면 내 기기 · 브라우저면 덱 주인 묶음.
+ *  덱 주인 쪽 claudeFor 와 같은 규칙이다 — 여기는 보이기만 하고, 정하는 것은 덱 주인이다 */
+export function poolOf(c: Pick<C, "shareClaude" | "members" | "conn">, share: boolean): string | undefined {
+	if (!remote) return share ? undefined : "";
+	if (c.shareClaude) return undefined;
+	return appWindow ? c.members.find((m) => m.conn === c.conn)?.device ?? "?" : "";
+}
+export const usePool = () => {
+	const share = useSettings((x) => x.s.collab.shareClaude);
+	return useCollab((c) => poolOf(c, share));
+};
+
+/** 덱 주인: 세션 공유를 켜고 끈다 — 팀원 화면에도 바로 알린다 */
+export function setShareClaude(on: boolean) {
+	useSettings.getState().set((x) => ({ ...x, collab: { ...x.collab, shareClaude: on } }));
+	if (useCollab.getState().info) flush();
+}
 
 /** 따라가기 — 그 사람의 쪽으로 가고, 그 뒤로 그 사람이 넘기는 대로 넘어간다 (2026.11.26) */
 export function follow(conn: number | null) {
@@ -87,6 +107,9 @@ function flush(full = false) {
 	const st = useDeck.getState() as any;
 	const set: Record<string, unknown> = {};
 	for (const k of SHARED) if (full || st[k] !== lastSet[k]) { set[k] = st[k]; lastSet[k] = st[k]; }
+	// 덱 주인의 세션 공유 — 팀원 화면이 세션 목록 · 「내 Claude」 고르기를 이것으로 그린다
+	const share = useSettings.getState().s.collab.shareClaude;
+	if (full || share !== lastShare) { set.shareClaude = share; lastShare = share; }
 	const turns: Turn[] = st.turns;
 	const order = turns.map((t) => t.id).join(",");
 	const put = turns.filter((t) => full || !lastTurns.has(t));
@@ -98,6 +121,8 @@ function flush(full = false) {
 	lastOrder = order;
 	if (Object.keys(patch).length) call("collab_publish", { patch }).catch(() => {});
 }
+
+let lastShare: boolean | undefined;
 
 /** 글자가 흐르는 동안 매 글자마다 보내지 않게 묶는다 (30ms) */
 const schedule = () => { flushTimer ??= setTimeout(() => flush(), 30); };
@@ -225,6 +250,24 @@ async function handleIntent(p: { id: string; from: From; name: string; args: any
 /** 첨부 한 파일의 가장 큰 크기 — 큰 파일은 바깥 길에서 오래 걸리고 Claude 도 다 읽지 못한다 */
 const UPLOAD_MAX = 10 * 1024 * 1024;
 
+/** 팀원 요청을 돌릴 Claude 와 세션 묶음 (2026.11.27) — 서버가 정한 기기(from.device)로 고르므로 남의 PC · 남의 세션을 고를 수 없다.
+ *    세션 공유 켬     묶음 없이 모두가 이어 쓴다. Claude 는 그 팀원이 「내 Claude」를 골랐고 붙어 있으면 그 PC, 아니면 덱 주인 PC (전과 같다)
+ *    세션 공유 끔     앱 팀원 — 자기 PC 의 Claude · 자기 세션 묶음. 내 Claude 가 안 붙어 있으면 덱 주인 Claude 로 넘기지 않고 막는다
+ *    (기본)          브라우저 팀원 — 자기 Claude 가 없으니 덱 주인 Claude · 덱 주인 묶음 */
+function claudeFor(from: From, wantsMine: boolean): { runner?: string; pool?: string } {
+	const members = useCollab.getState().members;
+	const m = members.find((x) => x.conn === from.conn);
+	const hasRunner = !!from.device && members.some((x) => x.device === from.device && x.runner);
+	if (useSettings.getState().s.collab.shareClaude) {
+		if (!wantsMine) return {};
+		if (!hasRunner) throw new Error(tNow("runnerOff"));
+		return { runner: from.device };
+	}
+	if (!m?.app) return { pool: "" };
+	if (!hasRunner || !from.device) throw new Error(tNow("runnerNeed"));
+	return { runner: from.device, pool: from.device };
+}
+
 onIntent("send", (from, a) => new Promise((ok, no) => {
 	const d = useDeck.getState();
 	if (!d.deck) return no(new Error(tNow("collabWaiting")));
@@ -233,14 +276,10 @@ onIntent("send", (from, a) => new Promise((ok, no) => {
 	const pins = d.pins.filter((p) => Array.isArray(a.pins) && a.pins.includes(p.id) && isMine(p, from.name));
 	// 첨부는 그 팀원이 올린 것(.claudeppt/attach/)만 — 다른 곳의 경로를 적어 보내 Claude 가 읽게 하지 못하게
 	const atts: string[] = (Array.isArray(a.attachments) ? a.attachments : []).filter((x: unknown) => typeof x === "string" && /^\.claudeppt\/attach\/[^\\/]+$/.test(x));
-	// 「내 PC 의 Claude」 — 그 기기가 지금 붙어 있을 때만. 서버가 정한 기기(from.device)라 남의 PC 를 고를 수 없다
-	let runner: string | undefined;
-	if (a.runner === "mine") {
-		if (!from.device || !useCollab.getState().members.some((m) => m.device === from.device && m.runner)) return no(new Error(tNow("runnerOff")));
-		runner = from.device;
-	}
+	let who: { runner?: string; pool?: string };
+	try { who = claudeFor(from, a.runner === "mine"); } catch (e) { return no(e); }
 	let started = false;
-	d.send(String(a.text ?? ""), atts, true, { by: from.name || tNow("collabNoName"), current: typeof a.current === "string" ? a.current : null, talkKey: typeof a.talkKey === "string" ? a.talkKey : null, pins, runner, onStart: (r) => { started = true; ok(r); } })
+	d.send(String(a.text ?? ""), atts, true, { by: from.name || tNow("collabNoName"), current: typeof a.current === "string" ? a.current : null, talkKey: typeof a.talkKey === "string" ? a.talkKey : null, pins, ...who, onStart: (r) => { started = true; ok(r); } })
 		.then(() => { if (!started) ok(null); }, no);
 }));
 
@@ -252,12 +291,15 @@ onIntent("stop", async (_from, a) => {
 });
 
 /** 새 대화 — 호스트가 보는 대화는 그대로 두고 새 세션만 만든다. 그 팀원의 지금 대화가 아직 빈 세션이면 그것을 쓴다 */
-onIntent("newTalk", async (_from, a) => {
+onIntent("newTalk", async (from, a) => {
 	const st = useDeck.getState();
 	if (!st.dir) throw new Error(tNow("collabWaiting"));
+	// 그 팀원의 묶음에 — 세션 공유가 꺼져 있으면 앱 팀원 것은 그 사람 세션 (내 Claude 가 아직 안 붙었어도 세션은 만든다)
+	const m = useCollab.getState().members.find((x) => x.conn === from.conn);
+	const pool = useSettings.getState().s.collab.shareClaude ? undefined : m?.app && from.device ? from.device : "";
 	const cur = st.sessions.find((x) => x.key === a.talkKey);
-	if (cur && !cur.claude && !st.turns.some((t) => t.session === cur.key)) return { key: cur.key };
-	const ns = nextSession(st.sessions);
+	if (cur && inPool(cur, pool) && !cur.claude && !st.turns.some((t) => t.session === cur.key)) return { key: cur.key };
+	const ns = nextSession(st.sessions, pool);
 	useDeck.setState({ sessions: [...st.sessions, ns] });
 	persistTalk(st.dir, useDeck.getState());
 	return { key: ns.key };
@@ -300,7 +342,8 @@ onIntent("pinSend", async (from, a) => {
 	const p = pinOf(a.id);
 	if (!p) return;
 	// 끝날 때까지 기다리지 않는다 — 턴이 서면 답한다
-	useDeck.getState().sendPin(p.id, { by: from.name || tNow("collabNoName"), talkKey: typeof a.talkKey === "string" ? a.talkKey : null });
+	const who = claudeFor(from, a.runner === "mine");
+	useDeck.getState().sendPin(p.id, { by: from.name || tNow("collabNoName"), talkKey: typeof a.talkKey === "string" ? a.talkKey : null, ...who });
 });
 
 onIntent("undo", async (from) => useDeck.getState().undo(from.name || tNow("collabNoName")));
@@ -360,7 +403,7 @@ export function intent<T = unknown>(name: string, args: unknown = {}): Promise<T
 let lastHello = "";
 function hello(force = false) {
 	const d = useDeck.getState();
-	const m = { t: "hello", name: useSettings.getState().s.me.trim(), slide: d.deck?.slides[d.current]?.id ?? null };
+	const m = { t: "hello", name: useSettings.getState().s.me.trim(), slide: d.deck?.slides[d.current]?.id ?? null, app: appWindow };
 	const k = JSON.stringify(m);
 	if (!force && k === lastHello) return;
 	lastHello = k;
@@ -372,6 +415,7 @@ function apply(patch: any, full: boolean) {
 	const next: Record<string, unknown> = {};
 	if (full || patch.reset) turnMap.clear();
 	for (const [k, v] of Object.entries(patch.set ?? {})) {
+		if (k === "shareClaude") { useCollab.setState({ shareClaude: !!v }); continue; }
 		// 지금 대화는 보는 사람 몫 — 처음 받을 때와, 보던 세션이 없어졌을 때만 호스트 것을 따른다
 		if (k === "talkKey") {
 			const sessions = (patch.set.sessions ?? st.sessions) as { key: string }[];
@@ -511,6 +555,6 @@ function remoteActions() {
 		updatePin: (id: string, text: string) => { intent("pinUpdate", { id, text }).catch(fail); },
 		removePin: (id: string) => { intent("pinRemove", { id }).catch(fail); },
 		resolvePin: (id: string, done: boolean) => { intent("pinResolve", { id, done }).catch(fail); },
-		sendPin: async (id: string) => { await intent("pinSend", { id, talkKey: useDeck.getState().talkKey }).catch(fail); },
+		sendPin: async (id: string) => { await intent("pinSend", { id, talkKey: useDeck.getState().talkKey, runner: useMine.getState().use && myRunner() ? "mine" : undefined }).catch(fail); },
 	};
 }

@@ -17,7 +17,12 @@ export async function joinShared(raw: string) {
 	try {
 		const canon = await call<string>("collab_join", { url });
 		const at = canon.startsWith("claudeppt:") ? canon : canon + "/";
-		useSettings.getState().set((s) => ({ ...s, shared: [{ url: at, at: Date.now() }, ...s.shared.filter((x) => x.url !== at)].slice(0, 12) }));
+		// 내 PC 의 Claude 를 처음부터 붙인다 (2026.11.27) — 덱 주인이 세션 공유를 켜지 않으면(기본) 앱 팀원 요청은 자기 PC 의 Claude 로만 돈다.
+		// 한 번 끈 덱 주인은 그대로 둔다 (shared[].mine 이 false 로 남아 있다)
+		const was = useSettings.getState().s.shared.find((x) => x.url === at);
+		const mine = was ? was.mine !== false : true;
+		useSettings.getState().set((s) => ({ ...s, shared: [{ ...was, url: at, at: Date.now(), mine }, ...s.shared.filter((x) => x.url !== at)].slice(0, 12) }));
+		if (mine) call("runner_start", { origin: at }).catch(() => {});
 		return true;
 	} catch (e) {
 		useDeck.getState().notify(String(e), "err");

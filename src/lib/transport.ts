@@ -8,6 +8,8 @@ import { invoke, type InvokeArgs, type InvokeOptions } from "@tauri-apps/api/cor
 /** 협업 브라우저인가 — Tauri 가 아닌 곳에서 열린 화면, 또는 앱의 「공유 덱」 창(collab.rs collab_join 이 __CPPT_REMOTE__ 를 심는다).
  *  공유 덱 창도 Tauri 창이라 __TAURI_INTERNALS__ 가 있지만, 권한이 없어 명령을 부르지 못한다 — 브라우저처럼 호스트 서버로만 간다 */
 export const remote = typeof window !== "undefined" && (!(window as any).__TAURI_INTERNALS__ || !!(window as any).__CPPT_REMOTE__);
+/** 앱의 「공유 덱」 창인가 (브라우저가 아니라) — 덱 주인에게 알려, 세션 공유가 꺼져 있으면 이 사람 PC 의 Claude · 세션을 쓰게 한다 (collab.ts claudeFor) */
+export const appWindow = typeof window !== "undefined" && !!(window as any).__CPPT_REMOTE__ && !!(window as any).__TAURI_INTERNALS__;
 
 /** 원격에서 읽기를 허락하는 명령 → 서버 rpc 이름. 덱 폴더(root · dir)는 그 덱의 id 로 바꿔 보낸다 — 서버는 열린 덱 안만 읽는다 */
 const READS: Record<string, string> = { fs_read_text: "read", fs_exists: "exists", vcs_log: "log" };

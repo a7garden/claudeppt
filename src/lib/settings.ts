@@ -65,14 +65,15 @@ export interface Settings {
 	remote: { enabled: boolean };
 	/** 「설정 › 협업」(기본 꺼짐). on 이면 팀원 세션 — 쪽마다 처음 고친 세션을 이어 쓰고, 요청 · 판에 보낸 사람이 남는다.
 	 *  꺼져 있으면 전처럼 대화 세션 하나 · 이름 없이 돈다 */
-	/** via — 초대 링크를 어떻게 내줄지 (2026.11.27, 공유 창 맨 위). 다음 공유도 이것으로 연다 (collab.ts setVia) */
-	collab: { on: boolean; via: ShareVia };
+	/** via — 초대 링크를 어떻게 내줄지 (2026.11.27, 공유 창 맨 위). 다음 공유도 이것으로 연다 (collab.ts setVia).
+	 *  shareClaude — 덱 주인이 자기 Claude 와 세션을 팀원과 함께 쓴다 (2026.11.27, 기본 꺼짐). 끄면 앱 팀원은 자기 PC 의 Claude · 자기 세션 (store Session.owner) */
+	collab: { on: boolean; via: ShareVia; shareClaude: boolean };
 	/** 이 기기를 쓰는 팀원 이름 — 협업을 켰을 때 대화의 요청과 판(git 작성자)에 남는다. 기기마다 한 번 정한다 */
 	me: string;
 	/** 앱으로 들어간 공유 덱 — 호스트 주소(origin)와 마지막으로 연 때. 기기 쿠키가 앱에 남아 주소만으로 다시 들어간다 (collab.rs collab_join) */
 	shared: SharedDeck[];
 }
-/** mine — 이 덱 주인에게 내 PC 의 Claude 를 쓰게 한다 (runner.rs). 사람이 덱 주인마다 켠다 */
+/** mine — 이 덱 주인에게 내 PC 의 Claude 를 쓰게 한다 (runner.rs). 앱으로 들어가면 켜진다(2026.11.27, join.ts) · 사람이 끈 것(false)은 그대로. 없으면 아직 정하지 않았다 */
 export interface SharedDeck { url: string; at: number; mine?: boolean; title?: string }
 
 export const SCALE: Record<Level, TypeStep> = {
@@ -116,7 +117,7 @@ export const DEFAULTS: Settings = {
 	template: BASIC.id,
 	update: { auto: true, install: true },
 	remote: { enabled: true },
-	collab: { on: false, via: "app" },
+	collab: { on: false, via: "app", shareClaude: false },
 	me: "",
 	shared: [],
 };
@@ -146,9 +147,9 @@ const merge = (v: any): Settings => {
 		template: templates.some((x) => x.id === v?.template) ? v.template : templates[0].id,
 		update: { ...DEFAULTS.update, ...(v?.update || {}) },
 		remote: { ...DEFAULTS.remote, ...(v?.remote || {}) },
-		collab: { on: !!v?.collab?.on, via: (["app", "office", "internet"] as const).find((x) => x === v?.collab?.via) ?? "app" },
+		collab: { on: !!v?.collab?.on, via: (["app", "office", "internet"] as const).find((x) => x === v?.collab?.via) ?? "app", shareClaude: !!v?.collab?.shareClaude },
 		me: typeof v?.me === "string" ? v.me : "",
-		shared: Array.isArray(v?.shared) ? v.shared.filter((x: any) => typeof x?.url === "string" && /^(https?|claudeppt):\/\//.test(x.url)).map((x: any) => ({ url: x.url, at: +x.at || 0, mine: !!x.mine, title: typeof x.title === "string" ? x.title.slice(0, 120) : undefined })).slice(0, 12) : [],
+		shared: Array.isArray(v?.shared) ? v.shared.filter((x: any) => typeof x?.url === "string" && /^(https?|claudeppt):\/\//.test(x.url)).map((x: any) => ({ url: x.url, at: +x.at || 0, mine: typeof x.mine === "boolean" ? x.mine : undefined, title: typeof x.title === "string" ? x.title.slice(0, 120) : undefined })).slice(0, 12) : [],
 	};
 };
 
@@ -170,7 +171,7 @@ export const useSettings = create<Store>()((set, get) => ({
 			let raw: any = null;
 			try { raw = JSON.parse(localStorage.getItem(REMOTE_KEY) || "null"); } catch {}
 			const s = merge(raw);
-			s.collab = { on: true, via: "app" };
+			s.collab = { on: true, via: "app", shareClaude: false };
 			if (!raw?.lang && !navigator.language.startsWith("ko")) s.lang = "en";
 			return set({ s, loaded: true });
 		}

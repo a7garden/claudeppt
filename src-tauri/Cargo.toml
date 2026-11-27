@@ -1,6 +1,6 @@
 [package]
 name = "claudeppt"
-version = "0.13.2"
+version = "0.13.3"
 description = "Claude 와 대화하며 웹으로 PPT 를 짓고 PPTX 로 내보내는 작업대"
 authors = ["seesun"]
 license = "MIT"

@@ -20,10 +20,21 @@ import { CommentsButton } from "./Collab";
 import { copyText, openMenu } from "./ContextMenu";
 import { SLIDE_MIME, SlideFrame } from "./Workspace";
 import { useSettings } from "../lib/settings";
-import { isMine, routeOf, type Turn, useDeck } from "../lib/store";
+import { bindKey, inPool, isMine, routeOf, type Turn, useDeck } from "../lib/store";
 import { noteDraft } from "../lib/updater";
-import { remote } from "../lib/transport";
-import { useCollab, useMine } from "../lib/collab";
+import { appWindow, remote } from "../lib/transport";
+import { useCollab, useMine, usePool } from "../lib/collab";
+
+/** 이 화면의 세션 묶음 (2026.11.27) — 덱 주인이 세션 공유를 켜지 않았으면 내 묶음의 세션만 보이고, 지금 대화도 그 안에서.
+ *  지금 대화(talkKey)가 묶음 밖이면(덱 주인 것을 처음 받았을 때) 묶음의 마지막 세션으로 본다 */
+function usePoolSessions() {
+	const pool = usePool();
+	const all = useDeck((s) => s.sessions);
+	const raw = useDeck((s) => s.talkKey);
+	const sessions = useMemo(() => all.filter((x) => inPool(x, pool)), [all, pool]);
+	const talkKey = raw && sessions.some((x) => x.key === raw) ? raw : sessions.at(-1)?.key ?? null;
+	return { pool, sessions, talkKey, all };
+}
 
 /** 사이드바 접힘 — 보는 사람의 편의라 이 PC 에만 남긴다. seen 은 접을 때 본 마지막 턴(그 뒤 끝난 턴이 「새 답」) */
 interface Fold { folded: boolean; seen: string | null; draft: boolean; set: (v: boolean) => void }
@@ -48,8 +59,7 @@ export function openTalk(focus = true) {
 export default function Talk() {
 	const t = useT();
 	const all = useDeck((s) => s.turns);
-	const sessions = useDeck((s) => s.sessions);
-	const talkKey = useDeck((s) => s.talkKey);
+	const { pool, sessions, talkKey, all: allSessions } = usePoolSessions();
 	const versions = useDeck((s) => s.versions);
 	const folded = useTalkFold((s) => s.folded);
 	const [list, setList] = useState(false);
@@ -57,7 +67,8 @@ export default function Talk() {
 	const team = useSettings((x) => x.s.collab.on);
 	// 대화칸은 한 세션의 대화만 — 「새 대화」면 빈 대화가 열린다. 세션을 고르면 그 세션의 대화.
 	// 2026.11.26 : 협업을 꺼도 대화를 나눈다. 전에는 「새 대화」가 협업을 켜야만 보여, 새로 시작하는 길을 찾지 못했다
-	const turns = useMemo(() => (talkKey ? all.filter((x) => (x.session ?? sessions[0]?.key) === talkKey) : all), [all, sessions, talkKey]);
+	// 묶음에 세션이 아직 없으면 세션 없는 옛 턴만 (남의 묶음 대화를 내 대화처럼 보이지 않게)
+	const turns = useMemo(() => (talkKey ? all.filter((x) => (x.session ?? allSessions[0]?.key) === talkKey) : pool === undefined ? all : all.filter((x) => !x.session)), [all, allSessions, talkKey, pool]);
 	// 지금 대화가 비었으면 새 대화를 열 까닭이 없다 (store.newTalk 도 빈 세션을 다시 쓴다)
 	const fresh = turns.length === 0;
 	const logRef = useRef<HTMLDivElement>(null);
@@ -194,10 +205,9 @@ function EmptyTalk() {
  *  누르면 그 세션의 대화를 보고, 처음 고치는 쪽은 그 세션으로 간다 */
 function SessionList({ onClose }: { onClose: () => void }) {
 	const t = useT();
-	const sessions = useDeck((s) => s.sessions);
+	const { pool, sessions, talkKey, all: allSessions } = usePoolSessions();
 	const turns = useDeck((s) => s.turns);
 	const bind = useDeck((s) => s.bind);
-	const talkKey = useDeck((s) => s.talkKey);
 	const deck = useDeck((s) => s.deck)!;
 	const team = useSettings((x) => x.s.collab.on);
 	const ref = useRef<HTMLDivElement>(null);
@@ -213,9 +223,9 @@ function SessionList({ onClose }: { onClose: () => void }) {
 	return (
 		<div className="pop sessions" ref={ref} role="listbox" aria-label={t("sessionList")}>
 			{[...sessions].reverse().map((s) => {
-				const mine = turns.filter((x) => (x.session ?? sessions[0]?.key) === s.key);
+				const mine = turns.filter((x) => (x.session ?? allSessions[0]?.key) === s.key);
 				const last = mine.at(-1);
-				const nos = team ? deck.slides.map((x, i) => (bind[x.id] === s.key ? i + 1 : 0)).filter((n) => n > 0) : [];
+				const nos = team ? deck.slides.map((x, i) => (bind[bindKey(pool, x.id)] === s.key ? i + 1 : 0)).filter((n) => n > 0) : [];
 				// 대화는 번호보다 무엇을 시켰는지로 알아본다 — 첫 요청 한 줄
 				const first = mine.find((x) => x.request)?.request.replace(/\s+/g, " ");
 				const on = s.key === talkKey;
@@ -360,8 +370,7 @@ function Composer() {
 	const saveName = (v: string) => { if (v.trim()) useSettings.getState().set((x) => ({ ...x, me: v.trim() })); };
 	// 보낼 곳 — 보내기와 같은 규칙(routeOf). 보고 있는 대화와 다른 세션으로 가면 그 까닭(그 쪽을 처음 고친 세션)을 보인다
 	const bind = useDeck((s) => s.bind);
-	const sessions = useDeck((s) => s.sessions);
-	const talkKey = useDeck((s) => s.talkKey);
+	const { pool, sessions, talkKey } = usePoolSessions();
 	// 쪽 목록 · 이어 보기에서 쪽을 끌어 요청칸 위에 올린 동안 — 놓으면 @쪽 이 들어간다
 	const [dropping, setDropping] = useState(false);
 	const mentionSlide = useDeck((s) => s.mentionSlide);
@@ -463,7 +472,7 @@ function Composer() {
 
 	// 보낼 글 — 범위를 앞에 붙인다. 세션 고르기(routeOf) · 보내기 모두 이 글로
 	const full = scope.length ? `${scope.join(" ")} ${text}` : text;
-	const route = useMemo(() => routeOf({ deck, current, pins, bind, sessions, talkKey }, full), [deck, current, pins, bind, sessions, talkKey, full, team]);
+	const route = useMemo(() => routeOf({ deck, current, pins, bind, sessions, talkKey }, full, pool), [deck, current, pins, bind, sessions, talkKey, full, team, pool]);
 	const routeText = !route.key ? t("routeNew") : (route.via ? t("routeVia").replace("{no}", String(route.via)) : t("routeTalk")).replace("{n}", route.key.slice(1));
 	// 협업을 켜면 세션마다 줄을 서므로 도는 중에도 보낼 수 있다. 꺼져 있으면 전처럼 도는 동안은 막는다
 	// 브라우저 팀원이 호스트와 끊겼으면 보내지 않는다 — 보낸 글이 어디에도 닿지 않고 사라졌다
@@ -472,9 +481,13 @@ function Composer() {
 	const hasRunner = useCollab((c) => remote && !!c.members.find((m) => m.conn === c.conn)?.runner);
 	const mine = useMine();
 	useEffect(() => { if (hasRunner && !mine.seen) useMine.setState({ seen: true }); }, [hasRunner]);
+	// 세션 공유가 꺼진 공유 덱의 앱 창 — 늘 내 PC 의 Claude 로 보낸다(고르기 없음). 아직 안 붙었으면 보내기를 막는다 (collab.ts claudeFor)
+	const shareOn = useCollab((c) => c.shareClaude);
+	const ownOnly = remote && appWindow && !shareOn;
+	const needRunner = ownOnly && !hasRunner;
 	// 내 Claude 를 쓰던 중 끊겼다 — 덱 주인 Claude 로 넘기지 않고 보내기를 막는다. 단추를 누르면 덱 주인 Claude 로 바꾼다
-	const runnerLost = remote && mine.use && mine.seen && !hasRunner;
-	const can = (team || !running) && !needName && !offline && !runnerLost && (text.trim() || pins.length || attach.length);
+	const runnerLost = remote && !ownOnly && mine.use && mine.seen && !hasRunner;
+	const can = (team || !running) && !needName && !offline && !runnerLost && !needRunner && (text.trim() || pins.length || attach.length);
 	const go = () => {
 		if (!can) return;
 		// 보내다 실패하면(그 사이 끊김 · 호스트 거절) 비웠던 글 · 첨부를 되살린다. 그새 새로 적은 글은 덮지 않는다
@@ -589,7 +602,9 @@ function Composer() {
 							{route.key ? `→ ${t("sessionN").replace("{n}", route.key.slice(1))}` : `→ ${t("newTalk")}`}
 						</span>
 					)}
-					{hasRunner ? (
+					{ownOnly ? (
+						<span className={"runner-pick" + (hasRunner ? " on" : " lost")} title={hasRunner ? t("runnerOwnHint") : t("runnerNeed")}>{hasRunner ? t("runnerMine") : t("runnerLost")}</span>
+					) : hasRunner ? (
 						<button className={"runner-pick" + (mine.use ? " on" : "")} aria-pressed={mine.use} onClick={() => mine.set(!mine.use)} title={mine.use ? t("runnerMineOnHint") : t("runnerMineOffHint")}>
 							{mine.use ? t("runnerMine") : t("runnerHost")}
 						</button>
