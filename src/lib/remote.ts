@@ -293,8 +293,10 @@ const handlers: Record<string, (a: Args) => Promise<unknown>> = {
 				const { runAudit, auditFixPrompt } = await import("./audit");
 				const tpl = deckTemplate(useSettings.getState().s, deck);
 				const r = await runAudit(dir, id, deck, tpl, step, { margins: pageMargins(deck, tpl) });
-				// 바깥 세션은 fix 줄(영어 · 어느 요소인지)로 고친다. 화면 글(msg)은 사람이 읽는 요약
-				return { ...r, slides: r.slides.filter((x) => x.findings.length), prompt: auditFixPrompt(r) };
+				// 바깥 세션은 fix 줄(영어 · 어느 요소인지)로 고친다. 화면 글(msg)은 사람이 읽는 요약.
+				// guide — 앱의 「Claude 검토」와 같은 지침. 바깥 세션은 그 자신이 Claude 라 앱이 또 띄우지 않고, 쪽 그림(shot)을 보며 이 지침으로 직접 검토한다
+				const { REVIEW_GUIDE } = await import("./review");
+				return { ...r, slides: r.slides.filter((x) => x.findings.length), prompt: auditFixPrompt(r), guide: REVIEW_GUIDE };
 			}),
 		),
 

@@ -7,6 +7,7 @@ vi.mock("./frames", () => ({ ask: vi.fn(), offscreen: vi.fn() }));
 import { auditFixPrompt, type AuditReport, auditSlide, type Node } from "./audit";
 import { type Deck, repageCss, rethemeCss, templateBlock } from "./deck";
 import { houseStyle, pageMargins } from "./prompt";
+import { mergeReview, quoteBoxes, reviewPrompt } from "./review";
 import { BASIC, DEFAULTS } from "./settings";
 
 const deck = (extra: Partial<Deck> = {}): Deck => ({ format: "1", title: "t", size: { w: 1280, h: 720 }, slides: [], theme: "theme.css", created: "", updated: "", ...extra });
@@ -100,5 +101,67 @@ describe("점검 규칙 (auditSlide)", () => {
 	it("걸린 요소의 자리를 남긴다 (무대 표시)", () => {
 		const f = auditSlide([node({ x: 1200, w: 300, text: "잘린 글" })], 1280, 720, null, null).find((x) => x.rule === "overflow")!;
 		expect(f.boxes).toEqual([{ x: 1200, y: 100, w: 300, h: 40 }]);
+	});
+});
+
+describe("Claude 검토 (review.ts)", () => {
+	const node = (over: Partial<Node>): Node => ({
+		path: [0, 1], tag: "div", cls: "", x: 0, y: 0, w: 100, h: 20, text: "", tbox: null,
+		font: "", size: 20, weight: 400, color: null, fill: null, border: null,
+		radius: 0, shadow: false, tshadow: false, gradient: false, clip: false, upper: false, ls: 0, li: false, ...over,
+	});
+	const per = [
+		[node({ text: "야간 신고 추이", y: 40 }), node({ text: "3월 이후 야간 신고가 두 배로 늘었다", x: 80, y: 200, w: 600, h: 40, tbox: { x: 90, y: 205, w: 400, h: 30 } }), node({ path: [0], text: "야간 신고 추이 3월 이후 야간 신고가 두 배로 늘었다", w: 1280, h: 720 })],
+		[node({ text: "합계 120건" })],
+	];
+	const report = (): AuditReport => ({
+		at: "", template: "기본", kinds: ["template", "layout", "slop", "review"], note: "출처를 아래에", margins: null,
+		slides: [
+			{ id: "s1", no: 1, title: "추이", findings: [{ rule: "cards", kind: "slop", msg: "카드", fix: "3 look-alike cards." }, { rule: "overflow", kind: "layout", msg: "넘침", fix: "1 element runs past." }] },
+			{ id: "s2", no: 2, findings: [] },
+		],
+	});
+	const d = deck({ slides: [{ id: "s1", file: "slides/s1.html" }, { id: "s2", file: "slides/s2.html" }] as Deck["slides"] });
+
+	it("요청에 쪽 그림 · 파일 · 글 · 규칙 결과 · 추가 지시를 싣는다", () => {
+		const p = reviewPrompt(d, report(), per, "");
+		expect(p).toContain("Picture: .claudeppt/audit/shots/1.png · HTML: slides/s1.html");
+		expect(p).toContain("[cards] 3 look-alike cards.");
+		expect(p).toContain("Rule findings: none");
+		expect(p).toContain("출처를 아래에");
+	});
+
+	it("짚은 글을 품은 가장 안쪽 요소의 글 자리에 상자를 둔다", () => {
+		expect(quoteBoxes(per[0], "두 배로  늘었다")).toEqual([{ x: 90, y: 205, w: 400, h: 30 }]);
+		expect(quoteBoxes(per[0], "")).toEqual([]);
+		expect(quoteBoxes(per[0], "없는 글")).toEqual([]);
+	});
+
+	it("답을 합친다: 쪽 검토 · 무게 순서 · 의도로 본 규칙 결과 · 여러 쪽에 걸친 것", () => {
+		const answer = "검토했습니다.\n" + JSON.stringify({
+			slides: [{ no: 1, findings: [
+				{ topic: "wording", severity: "low", msg: "어투", fix: "Use one ending.", quote: "" },
+				{ topic: "message", severity: "high", msg: "제목이 주제만 말한다", fix: "Retitle \"야간 신고 추이\".", quote: "두 배로 늘었다" },
+				{ topic: "visual", msg: "", fix: "빈 msg 는 버린다" },
+			], dismiss: [{ rule: "cards", reason: "내용에 맞는 나열" }] }, { no: 9, findings: [{ msg: "없는 쪽", fix: "x" }] }],
+			deck: [{ topic: "facts", severity: "high", slides: [1, 2], msg: "합계가 다르다", fix: "Totals differ." }],
+		});
+		const r = mergeReview(report(), per, answer);
+		const f = r.slides[0].findings;
+		expect(f.find((x) => x.rule === "cards")!.ok).toBe("내용에 맞는 나열");
+		expect(f.find((x) => x.rule === "overflow")!.ok).toBeUndefined();
+		const own = f.filter((x) => x.kind === "review");
+		expect(own.map((x) => x.rule)).toEqual(["review:message", "review:wording", "review:facts"]);
+		expect(own[0].boxes).toEqual([{ x: 90, y: 205, w: 400, h: 30 }]);
+		expect(own[2].fix).toBe("(across slides 1, 2) Totals differ.");
+		// 의도로 본 것은 고치기에 실리지 않는다
+		const fix = auditFixPrompt(r);
+		expect(fix).not.toContain("look-alike");
+		expect(fix).toContain("Retitle");
+		expect(fix).toContain("1 element runs past.");
+	});
+
+	it("JSON 이 없는 답은 오류로 알린다", () => {
+		expect(() => mergeReview(report(), per, "검토할 수 없습니다")).toThrow();
 	});
 });

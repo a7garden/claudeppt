@@ -8,16 +8,18 @@
 //   템플릿        글꼴 · 색 · 글자 위계 · 모서리 · 그림자 · 여백 — 덱의 템플릿 값과 견준다. 가져온 PPTX 덱은 템플릿이 없어 건너뛴다
 //   표현          긴 대시 · 장식 이모지 · 상투어 · 그라데이션 · 글자 그림자 · 긴 글 · 글머리 과다 · 강조색 남발 · 같은 꼴 카드 나열 · 작은 대문자 머리표
 //   배치          쪽 밖으로 넘친 것 · 쪽 제목 자리가 쪽마다 조금씩 다른 것 (덱 전체를 보고 정한다)
+//   Claude 검토   고르면 쪽 그림을 함께 찍어 review.ts 에 넘긴다 — 규칙이 못 보는 것을 짚고, 규칙 결과 가운데 의도한 것을 가린다
 //
 // 짚는 기준은 prompt.ts templateRules 가 Claude 에게 말한 규칙과 같아야 한다 — 말하지 않은 것으로 짚으면 고쳐도 다시 걸린다.
 // 2026.11.26 : 처음 만들었다. 문턱(글 300자 · 글머리 6줄 · 강조색 3곳 · 크기 4가지 · 제목 자리 12~80px)은 실제 덱을 돌려 보며 조정한다
-import { api } from "./api";
+import { api, bytesFromB64, join } from "./api";
 import type { Deck, Margins } from "./deck";
 import { ask, offscreen } from "./frames";
 import { type Key, tNow } from "./i18n";
 import type { Template } from "./settings";
 
-export type AuditKind = "template" | "slop" | "layout";
+/** review — Claude 검토 (review.ts). 규칙 갈래가 아니라 고를 때만 돈다 */
+export type AuditKind = "template" | "slop" | "layout" | "review";
 export interface Box { x: number; y: number; w: number; h: number }
 export interface Finding {
 	rule: string;
@@ -28,10 +30,16 @@ export interface Finding {
 	fix: string;
 	/** 걸린 요소의 자리 (쪽 px) — 무대에 겹쳐 그린다. 쪽 전체에 걸린 것(글 양 · 크기 가짓수)은 비어 있다 */
 	boxes?: Box[];
+	/** Claude 검토가 짚은 것의 무게 */
+	sev?: "high" | "medium" | "low";
+	/** Claude 검토가 의도한 것으로 본 규칙 결과 — 그 까닭. 목록에는 흐리게 남고, 건수 · 고치기 요청에서는 빠진다 */
+	ok?: string;
 }
 export interface SlideAudit { id: string; no: number; title?: string; findings: Finding[] }
 /** kinds: 고른 갈래 · note: 사람이 적은 추가 지시 · margins: 쪽 여백 */
-export interface AuditReport { at: string; template: string | null; kinds: AuditKind[]; note: string; margins: Margins | null; slides: SlideAudit[] }
+/** reviewError: Claude 검토를 골랐는데 돌지 못했을 때 그 까닭 (규칙 점검 결과는 그대로 쓴다) */
+export interface AuditReport { at: string; template: string | null; kinds: AuditKind[]; note: string; margins: Margins | null; slides: SlideAudit[]; reviewError?: string }
+/** 규칙 갈래 — 갈래를 주지 않으면 이것만 본다 (Claude 검토는 시간이 들어 고를 때만) */
 export const AUDIT_KINDS: AuditKind[] = ["template", "layout", "slop"];
 
 /** 추가 지시 — 덱 안(.claudeppt/audit/note.md)에 두어 팀원 · 바깥 CLI 도 같은 지시를 쓴다 */
@@ -51,6 +59,9 @@ export interface Node {
 }
 
 const BASE = ".claudeppt/audit";
+/** Claude 검토가 볼 쪽 그림 자리 · 너비 — 쪽이 많아도 그림 값이 커지지 않게 1280px 까지 줄인다 */
+export const SHOTS = `${BASE}/shots`;
+export const SHOT_W = 1280;
 
 // ── 색 ──
 type RGB = [number, number, number];
@@ -213,9 +224,11 @@ function titleSpots(per: { nodes: Node[]; H: number }[], tpl: Template | null) {
 	});
 }
 
-/** kinds: 볼 갈래(없으면 모두) · margins: 쪽 여백(prompt.ts pageMargins). 쪽 설정 없이 템플릿 여백만 있으면 위아래는 머리글 · 쪽 번호 자리라 24px 로 넉넉히 본다 */
-export async function runAudit(dir: string, id: string, deck: Deck, tpl: Template | null, step: (i: number, n: number) => void, opt: { kinds?: AuditKind[]; margins?: Margins | null } = {}): Promise<AuditReport> {
+/** kinds: 볼 갈래(없으면 규칙 갈래 모두) · margins: 쪽 여백(prompt.ts pageMargins). 쪽 설정 없이 템플릿 여백만 있으면 위아래는 머리글 · 쪽 번호 자리라 24px 로 넉넉히 본다.
+ *  step 의 note 는 Claude 검토 중의 한 줄 (그때 i · n 은 쪽 수 그대로) */
+export async function runAudit(dir: string, id: string, deck: Deck, tpl: Template | null, step: (i: number, n: number, note?: string) => void, opt: { kinds?: AuditKind[]; margins?: Margins | null } = {}): Promise<AuditReport> {
 	const kinds = opt.kinds?.length ? opt.kinds : AUDIT_KINDS;
+	const review = kinds.includes("review");
 	const pm = opt.margins ?? null;
 	const margins = deck.page || !pm ? pm : { ...pm, t: 24, b: 24 };
 	const { w, h } = deck.size;
@@ -226,8 +239,15 @@ export async function runAudit(dir: string, id: string, deck: Deck, tpl: Templat
 		step(i, deck.slides.length);
 		const { win, dispose } = await offscreen(id, ref.file, w, h);
 		let res: any;
-		try { res = await ask(win, { t: "audit" }, 20000); } finally { dispose(); }
+		let shot: any = null;
+		try {
+			res = await ask(win, { t: "audit" }, 20000);
+			// Claude 검토가 볼 쪽 그림 — 같은 창에서 찍어 잰 자리와 그림이 어긋나지 않는다
+			if (review && !res.error) shot = await ask(win, { t: "snapshot", scale: Math.min(1, SHOT_W / w) }, 60000);
+		} finally { dispose(); }
 		if (res.error) throw new Error(`${i + 1}: ${res.error}`);
+		if (shot?.error) throw new Error(`${i + 1}: ${shot.error}`);
+		if (shot) await api.absWriteBytes(join(dir, `${SHOTS}/${i + 1}.png`), bytesFromB64(shot.data.split(",")[1]));
 		const nodes: Node[] = res.data.nodes;
 		per.push({ nodes, H: res.data.h });
 		slides.push({ id: ref.id, no: i + 1, title: ref.title, findings: auditSlide(nodes, res.data.w, res.data.h, tpl, margins) });
@@ -247,16 +267,22 @@ export async function runAudit(dir: string, id: string, deck: Deck, tpl: Templat
 		});
 	}
 	for (const s of slides) s.findings = s.findings.filter((f) => kinds.includes(f.kind));
-	const report: AuditReport = { at: new Date().toISOString(), template: tpl?.name ?? null, kinds, note: await readAuditNote(dir), margins: pm, slides };
+	let report: AuditReport = { at: new Date().toISOString(), template: tpl?.name ?? null, kinds, note: await readAuditNote(dir), margins: pm, slides };
+	if (review) {
+		const { runReview } = await import("./review");
+		const n = deck.slides.length;
+		try { report = (await runReview(dir, deck, report, per.map((p) => p.nodes), (t) => step(n, n, t))) ?? { ...report, reviewError: tNow("reviewStopped") }; }
+		catch (e) { report = { ...report, reviewError: String(e instanceof Error ? e.message : e) }; }
+	}
 	await api.writeText(dir, `${BASE}/report.json`, JSON.stringify(report, null, 1)).catch(() => {});
 	return report;
 }
 
-export const findingCount = (r: AuditReport) => r.slides.reduce((n, s) => n + s.findings.length, 0);
+export const findingCount = (r: AuditReport) => r.slides.reduce((n, s) => n + s.findings.filter((f) => !f.ok).length, 0);
 
 /** Claude 에게 보낼 요청 — 짚은 쪽만, 쪽마다 한 줄씩. kinds 를 주면 그 갈래만. 추가 지시(note)가 있으면 모든 쪽을 그 지시로도 보게 한다 */
 export function auditFixPrompt(r: AuditReport, kinds?: AuditKind[]) {
-	const bad = r.slides.map((s) => ({ ...s, findings: s.findings.filter((f) => !kinds || kinds.includes(f.kind)) })).filter((s) => s.findings.length);
+	const bad = r.slides.map((s) => ({ ...s, findings: s.findings.filter((f) => !f.ok && (!kinds || kinds.includes(f.kind))) })).filter((s) => s.findings.length);
 	const note = r.note?.trim();
 	if (!bad.length && !note) return "";
 	return [

@@ -120,7 +120,7 @@ export const api = {
 	restore: (dir: string, hash: string, message: string, author?: string) => invoke<Commit | null>("vcs_restore", { dir, hash, message, author: author || null }),
 
 	claudeDetect: (path: string) => invoke<{ path: string; version: string } | null>("claude_detect", { path }),
-	claudeRun: (spec: { turn: string; dir: string; cwd?: string; prompt: string; system: string; claudePath: string; model: string; effort: string; resume?: string | null; sessionId?: string | null; mode?: "fonts" }) => invoke<{ code: number; stderr: string }>("claude_run", { spec }),
+	claudeRun: (spec: { turn: string; dir: string; cwd?: string; prompt: string; system: string; claudePath: string; model: string; effort: string; resume?: string | null; sessionId?: string | null; mode?: "fonts" | "review" }) => invoke<{ code: number; stderr: string }>("claude_run", { spec }),
 	claudeStop: (turn: string) => invoke<void>("claude_stop", { turn }),
 	/** force 가 아니면 1분 안의 지난 답을 준다 */
 	claudeUsage: (force = false) => invoke<ClaudeUsage>("claude_usage", { force }),
