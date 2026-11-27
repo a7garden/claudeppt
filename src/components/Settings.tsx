@@ -4,7 +4,7 @@
 //              Claude 탭의 「프롬프트」 · 「추가 지침」 칸은 없앴다 (prompt.ts 머리말).
 import { getVersion } from "@tauri-apps/api/app";
 import { listen } from "@tauri-apps/api/event";
-import { open, save } from "@tauri-apps/plugin-dialog";
+import { ask, open, save } from "@tauri-apps/plugin-dialog";
 import { useEffect, useRef, useState } from "react";
 import { api, type RemoteInfo, type Tool } from "../lib/api";
 import { type Key, useT } from "../lib/i18n";
@@ -181,8 +181,10 @@ function Templates() {
 		set((x) => ({ ...x, templates: [...x.templates, n] }));
 		setEdit(n.id);
 	};
-	const remove = () => {
+	// 지우기 전에 묻는다 — 되살릴 길이 없다 (2026.11.27 : 한 번 누르면 바로 사라졌다)
+	const remove = async () => {
 		if (s.templates.length < 2) return;
+		if (!(await ask(t("tplDeleteAsk").replace("{name}", sh.name), { title: t("delete"), kind: "warning", okLabel: t("delete"), cancelLabel: t("cancel") }))) return;
 		const rest = s.templates.filter((x) => x.id !== sh.id);
 		set((x) => ({ ...x, templates: rest, template: x.template === sh.id ? rest[0].id : x.template }));
 		setEdit(rest[0].id);
