@@ -277,7 +277,7 @@ function refreshCompare(get: () => S, set: (p: Partial<S>) => void) {
  * 그 쪽 번호와 「차이 고치기」를 알린다. PowerPoint 가 없는 PC 에서는 확인하지 못했다고만 알린다.
  * 2026.11.24 : 무대의 「비교」(PowerPoint 대조 렌즈)를 걷고 여기로 옮겼다 — 사용자가 바라는 것은 늘 「완전히 같다」라서, 켜서 볼 화면보다 내보낼 때 저절로 확인하는 편이 맞다.
  */
-function verifyPptx(get: () => S, deck: Deck, built: Built) {
+function verifyPptx(get: () => S, deck: Deck, built: Built, reveal?: { label: string; run: () => void }) {
 	const { dir, id, versions } = get();
 	const job = "verify" + Date.now().toString(36);
 	const note = (n: string) => useDeck.setState((st) => ({
@@ -288,7 +288,8 @@ function verifyPptx(get: () => S, deck: Deck, built: Built) {
 		.then((report) => {
 			if (get().dir !== dir) return;
 			const bad = report.slides.filter(needsFix);
-			if (!bad.length) return get().notify(tNow("pptxSame"), "ok");
+			// 같으면 내보낸 파일로 가는 단추를 다시 단다 — 검사 결과가 앞 알림(폴더에서 보기)을 덮는다
+			if (!bad.length) return get().notify(tNow("pptxSame"), "ok", reveal ? { action: reveal, sticky: false } : {});
 			// 모양이 다른 쪽이 먼저다. 그림으로 굳은 곳만 있으면(돌린 배지처럼 일부러 쓴 효과일 수 있다) 알리기만 하고 붉게 칠하지 않는다
 			const differ = bad.filter((x) => x.score > SAME).map((x) => x.no);
 			const stiff = bad.filter((x) => x.locked?.length).map((x) => x.no);
@@ -1205,9 +1206,17 @@ export const useDeck = create<S>()((set, get) => ({
 		set({ busy: tNow("restore") });
 		clearUndo();
 		try {
+			const head0 = get().versions[0]?.hash;
 			await api.restore(dir, c.hash, `#${c.n} 때로 되돌림`, me());
 			set({ preview: null, vdiff: null, deck: await readDeck(dir) });
 			await get().refreshVersions();
+			// 되돌렸다고 알리고, 되돌리기 바로 전 판으로 돌아갈 단추를 단다 — 되돌리기는 손 편집 되돌리기(Ctrl+Z)를 비운다.
+			// 2026.11.27 : 전에는 아무 알림도 없었다
+			const vs = get().versions;
+			if (vs[0] && vs[0].hash !== head0 && vs[1]) {
+				const back = vs[1];
+				get().notify(tNow("restoredTo").replace("{n}", String(c.n)), "ok", { action: { label: tNow("restoreBack"), run: () => void get().restore(back) }, sticky: false });
+			}
 		} catch (e) {
 			get().notify(String(e), "err");
 		} finally {
@@ -1222,11 +1231,24 @@ export const useDeck = create<S>()((set, get) => ({
 		try {
 			const { buildPptx } = await import("./exportPptx");
 			const b = await buildPptx(deck, id, (i, n) => set({ busy: `${tNow("exporting")} ${i}/${n}` }), exact);
-			await api.absWriteBytes(path, b.data);
-			// 깔리지 않은 글꼴은 PowerPoint 에서 다른 글꼴로 보인다 — 알린다
-			get().notify(path.split(/[\\/]/).pop()! + (b.missingFonts.length ? ` · ${tNow("missingFont")}: ${b.missingFonts.join(", ")}` : ""), b.missingFonts.length ? "err" : "ok");
-			// 「모양 그대로」는 쪽 그림이라 견줄 것이 없다
-			if (!exact) verifyPptx(get, deck, b);
+			const name = path.split(/[\\/]/).pop()!;
+			const reveal = { label: tNow("showInFolder"), run: () => void api.reveal(path).catch(() => {}) };
+			// PowerPoint 에서 같은 파일을 열어 두면 쓰기가 막힌다(os error 32) — 다 구운 것을 버리지 않고, 닫은 뒤 「다시 쓰기」로 그대로 쓴다.
+			// 2026.11.27 : 전에는 끝까지 구운 뒤 「os error 32」만 보이고, 처음부터 다시 내보내야 했다
+			const write = async () => {
+				try {
+					await api.absWriteBytes(path, b.data);
+				} catch (e) {
+					if (!/os error 3[23]\b/.test(String(e))) throw e;
+					get().notify(tNow("pptxLocked").replace("{name}", name), "err", { action: { label: tNow("writeAgain"), run: () => void write().catch((e) => get().notify(String(e), "err")) } });
+					return;
+				}
+				// 깔리지 않은 글꼴은 PowerPoint 에서 다른 글꼴로 보인다 — 알린다
+				get().notify(name + (b.missingFonts.length ? ` · ${tNow("missingFont")}: ${b.missingFonts.join(", ")}` : ""), b.missingFonts.length ? "err" : "ok", { action: reveal, sticky: false });
+				// 「모양 그대로」는 쪽 그림이라 견줄 것이 없다
+				if (!exact) verifyPptx(get, deck, b, reveal);
+			};
+			await write();
 		} catch (e) {
 			get().notify(String(e), "err");
 		} finally {
@@ -1253,10 +1275,11 @@ export const useDeck = create<S>()((set, get) => ({
 	},
 
 	notify: (text, kind = "ok", opt = {}) => {
-		const sticky = !!(opt.action || opt.sticky);
+		const sticky = opt.sticky ?? !!opt.action;
 		set({ toast: { text, kind, action: opt.action, sticky } });
-		// 누를 단추가 있거나 꼭 읽어야 할 글이면 사용자가 닫을 때까지 둔다 — 다른 일을 하다 돌아와도 놓치지 않게
-		if (!sticky) setTimeout(() => { if (get().toast?.text === text) set({ toast: null }); }, kind === "err" ? 7000 : 3500);
+		// 누를 단추가 있거나 꼭 읽어야 할 글이면 사용자가 닫을 때까지 둔다 — 다른 일을 하다 돌아와도 놓치지 않게.
+		// 단추가 있어도 sticky: false 면(「폴더에서 보기」 같은 덤) 조금 길게 두고 스스로 닫는다
+		if (!sticky) setTimeout(() => { if (get().toast?.text === text) set({ toast: null }); }, kind === "err" ? 7000 : opt.action ? 8000 : 3500);
 	},
 
 	fixFonts: async (missing) => {
