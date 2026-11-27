@@ -1230,7 +1230,7 @@
 		if (e.target === spin) {
 			if (sel && e.button === 0) {
 				const r = sel.getBoundingClientRect();
-				turn = { el: sel, cx: r.left + r.width / 2, cy: r.top + r.height / 2, tf: tfOf(sel), moved: false };
+				turn = { el: sel, cx: r.left + r.width / 2, cy: r.top + r.height / 2, tf: tfOf(sel), moved: false, style0: sel.getAttribute("style") };
 				spin.setPointerCapture(e.pointerId);
 			}
 			e.preventDefault();
@@ -1241,7 +1241,7 @@
 		if (hd) {
 			if (sel && e.button === 0) {
 				const p = posOf(sel);
-				size = { el: sel, dir: hd.dataset.dir, x: e.clientX, y: e.clientY, l: p.l, t: p.t, rel: p.rel, w: sel.offsetWidth, h: sel.offsetHeight, img: sel.tagName === "IMG", props: new Set(), z: snapTargets(sel) };
+				size = { el: sel, dir: hd.dataset.dir, x: e.clientX, y: e.clientY, l: p.l, t: p.t, rel: p.rel, w: sel.offsetWidth, h: sel.offsetHeight, img: sel.tagName === "IMG", props: new Set(), z: snapTargets(sel), style0: sel.getAttribute("style"), tf: tfOf(sel), text: !!(sel.innerText || "").trim() };
 				hd.setPointerCapture(e.pointerId);
 			}
 			e.preventDefault();
@@ -1316,7 +1316,7 @@
 			let w = size.w + k2 * (d.includes("e") ? dx : d.includes("w") ? -dx : 0);
 			let h = size.h + k2 * (d.includes("s") ? dy : d.includes("n") ? -dy : 0);
 			const ratio = d.length === 2 && (e.shiftKey || size.img);
-			if (ratio) { const k = Math.max(w / size.w, h / size.h); w = size.w * k; h = size.h * k; }
+			if (ratio) { const kx = w / size.w, ky = h / size.h, k = Math.abs(kx) >= Math.abs(ky) ? kx : ky; w = size.w * k; h = size.h * k; }
 			// 움직이는 변을 쪽 · 이웃 요소의 가장자리 · 가운데에 붙인다 (PowerPoint 는 크기를 끌 때도 붙는다). Alt 면 붙지 않는다.
 			// 비율을 지키는 중이면 더 가까운 한 변만 붙이고 다른 변은 비율로 따라간다 — 둘 다 붙이면 비율이 깨진다
 			const g = !e.altKey && size.z ? snapSize(size, d, w, h, k2, ratio) : null;
@@ -1325,8 +1325,10 @@
 				else { if (g.w != null) w = g.w; if (g.h != null) h = g.h; }
 			}
 			showGuides(size.z, g);
-			w = Math.max(Math.min(8, size.w), w);
-			h = Math.max(Math.min(8, size.h), h);
+			// 맞은편 변 너머로 끌면 반대쪽으로 넘어간다 (PowerPoint 는 그 축을 뒤집는다). 너비 · 높이가 음수면 넘어간 것이다
+			const fx = /[ew]/.test(d) && w < 0, fy = /[ns]/.test(d) && h < 0;
+			w = Math.max(Math.min(8, size.w), Math.abs(w));
+			h = Math.max(Math.min(8, size.h), Math.abs(h));
 			const st = size.el.style;
 			if (/[ew]/.test(d)) { st.width = P(w); size.props.add("width"); }
 			if (/[ns]/.test(d)) { st.height = P(h); size.props.add("height"); }
@@ -1334,11 +1336,18 @@
 				if (/[ew]/.test(d)) { st.left = P(size.l - (w - size.w) / 2); size.props.add("left"); }
 				if (/[ns]/.test(d)) { st.top = P(size.t - (h - size.h) / 2); size.props.add("top"); }
 			} else {
-				// 끄는 중 Ctrl 을 떼면 맞은편 변을 제자리로
-				if (d.includes("w")) { st.left = P(size.l + size.w - w); size.props.add("left"); }
+				// 붙박인 맞은편 변을 기준으로 놓는다: w 손잡이면 오른쪽 변, e 손잡이면 왼쪽 변. 끄는 중 Ctrl 을 떼면 맞은편 변을 제자리로
+				const left = d.includes("w") ? (fx ? size.l + size.w : size.l + size.w - w) : d.includes("e") && fx ? size.l - w : null;
+				if (left != null) { st.left = P(left); size.props.add("left"); }
 				else if (size.props.has("left")) st.left = P(size.l);
-				if (d.includes("n")) { st.top = P(size.t + size.h - h); size.props.add("top"); }
+				const top = d.includes("n") ? (fy ? size.t + size.h : size.t + size.h - h) : d.includes("s") && fy ? size.t - h : null;
+				if (top != null) { st.top = P(top); size.props.add("top"); }
 				else if (size.props.has("top")) st.top = P(size.t);
+			}
+			// 글이 없는 도형 · 그림만 실제로 뒤집는다 — 글을 품은 상자를 HTML 로 뒤집으면 글자가 거울상이 된다(PowerPoint 는 글을 뒤집지 않는다)
+			if (!size.text && (fx || fy || size.props.has("transform"))) {
+				st.transform = tfText({ ...size.tf, x: size.tf.x !== fx, y: size.tf.y !== fy });
+				size.props.add("transform");
 			}
 			if (size.rel && (size.props.has("left") || size.props.has("top"))) st.position = "relative";
 			placeHandles();
@@ -1524,6 +1533,17 @@
 			drag = null;
 			showGuides(null, null);
 			placeHandles();
+			e.preventDefault();
+			return;
+		}
+		// 크기 · 회전을 끄는 중 Esc — 끌기 전 style 그대로 돌린다 (PowerPoint 와 같다)
+		if (e.key === "Escape" && (size || turn)) {
+			const o = size || turn;
+			if (o.style0 == null) o.el.removeAttribute("style"); else o.el.setAttribute("style", o.style0);
+			size = turn = null;
+			showGuides(null, null);
+			placeHandles();
+			announce();
 			e.preventDefault();
 			return;
 		}
