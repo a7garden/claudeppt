@@ -37,11 +37,13 @@ export async function watchJoinLinks() {
 	await take();
 }
 
-/** 클립보드에 있는 앱 초대 링크 — 없으면 null. 열쇠 · 초대 열쇠 꼴만 본다(아무 글이나 링크로 읽지 않게).
- *  내 공유의 링크(팀원에게 보내려고 복사한 것)는 빼고 */
+/** 초대 링크 꼴인가 — 앱 링크(claudeppt://<열쇠>/j/<초대>) · 브라우저 링크(http://<주소>/j/<초대>). 아무 글이나 링크로 읽지 않게 이 꼴만 본다 */
+export const isInvite = (s: string) => /^(claudeppt:\/\/[a-z0-9]{40,}|https?:\/\/[^\s/]+)\/j\/[A-Za-z0-9_-]+\/?$/i.test(s.trim());
+
+/** 클립보드에 있는 앱 초대 링크 — 없으면 null. 내 공유의 링크(팀원에게 보내려고 복사한 것)는 빼고 */
 export async function inviteInClip(): Promise<string | null> {
 	const s = (await api.clipText().catch(() => "")).trim();
-	if (!/^claudeppt:\/\/[a-z0-9]{40,}\/j\/[A-Za-z0-9_-]+\/?$/i.test(s)) return null;
+	if (!s.startsWith("claudeppt:") || !isInvite(s)) return null;
 	const mine = useCollab.getState().info?.app;
 	return mine && s.toLowerCase().startsWith(mine.toLowerCase() + "/") ? null : s;
 }

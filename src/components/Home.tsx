@@ -11,7 +11,7 @@ import { openAny, startNew } from "../lib/flows";
 import { useT } from "../lib/i18n";
 import { useSettings } from "../lib/settings";
 import { useDeck } from "../lib/store";
-import { inviteInClip, joinShared } from "../lib/join";
+import { inviteInClip, isInvite, joinShared } from "../lib/join";
 import { originOf, type RunnerState, setMine, useRunners } from "../lib/runner";
 import { openMenu } from "./ContextMenu";
 
@@ -30,18 +30,35 @@ export default function Home() {
 	// 이번에 만들 덱의 템플릿 — 처음엔 설정의 「새 덱」 템플릿. 여기서 바꿔도 설정은 그대로 둔다
 	const [tpl, setTpl] = useState(s.template);
 	// 공유 덱 열기 — 초대 링크 칸
+	// 2026.11.27 : 링크 넣는 일을 줄였다. 전에는 단추 → 칸이 펴짐 → 붙여 넣기 → 「들어가기」 네 번이었고, 복사해 둔 링크를 묻는 줄이 따로 떴다.
+	//   복사해 둔 초대 링크가 있으면 「공유 덱 열기」가 곧 그 링크로 들어가기 · 칸에 붙여 넣으면 바로 들어간다 · 처음 화면 어디서든 Ctrl+V 도 된다
 	const [joining, setJoining] = useState(false);
 	const [link, setLink] = useState("");
-	// 복사해 둔 초대 링크 (2026.11.27) — 메신저에서 링크를 복사하고 앱으로 오면 한 번 눌러 들어가게. 「아니요」 한 링크는 다시 묻지 않는다
+	const [entering, setEntering] = useState(false);
 	const [clip, setClip] = useState<string | null>(null);
-	const asked = useRef(new Set<string>());
 	useEffect(() => {
-		const look = () => inviteInClip().then((u) => setClip(u && !asked.current.has(u) ? u : null));
+		const look = () => inviteInClip().then(setClip);
 		look();
 		addEventListener("focus", look);
 		return () => removeEventListener("focus", look);
 	}, []);
-	const joinClip = async (u: string) => { asked.current.add(u); setClip(null); await joinShared(u); };
+	const enter = async (u: string) => {
+		if (entering) return;
+		setEntering(true);
+		try {
+			if (await joinShared(u)) { setLink(""); setJoining(false); setClip(null); }
+		} finally { setEntering(false); }
+	};
+	// 입력칸 밖에서 붙여 넣은 초대 링크 — 칸을 열 것 없이 들어간다 (덱 이름 · 요청 칸에 붙여 넣은 것은 그 칸의 글이다)
+	useEffect(() => {
+		const k = (e: ClipboardEvent) => {
+			if ((e.target as Element).closest?.("input, textarea, [contenteditable]")) return;
+			const s = e.clipboardData?.getData("text") ?? "";
+			if (isInvite(s)) { e.preventDefault(); enter(s.trim()); }
+		};
+		addEventListener("paste", k);
+		return () => removeEventListener("paste", k);
+	});
 	// 공유 덱 목록의 덱 주인 — 앱 링크는 열쇠 대신 「앱끼리 연결」, 브라우저 링크는 주소
 	const where = (u: string) => (u.startsWith("claudeppt:") ? t("sharedViaApp") : u.replace(/^https?:\/\//, "").replace(/\/$/, ""));
 
@@ -155,20 +172,19 @@ export default function Home() {
 					)}
 					<button onClick={pickPptx}>{t("openPptx")}<kbd>Ctrl O</kbd></button>
 					<button onClick={pickDeck}>{t("openDeck")}<kbd>Ctrl ⇧ O</kbd></button>
-					<button onClick={() => { if (!joining) inviteInClip().then((u) => u && setLink((v) => v || u)); setJoining(!joining); }} aria-expanded={joining}>{t("joinShared")}</button>
+					{/* 복사해 둔 초대 링크가 있으면 칸을 펴지 않고 바로 그 링크로 들어간다 */}
+					{clip && !joining ? (
+						<button className="join-clip" onClick={() => enter(clip)} disabled={entering} title={t("joinClipHint")}>{entering ? t("joinBusy") : t("joinClipGo")}</button>
+					) : (
+						<button onClick={() => setJoining(!joining)} aria-expanded={joining}>{t("joinShared")}</button>
+					)}
 				</div>
-				{clip && !joining && (
-					<div className="join-clip" role="status">
-						<span>{t("joinClip")}</span>
-						<button className="send" onClick={() => joinClip(clip)}>{t("joinGo")}</button>
-						<button onClick={() => { asked.current.add(clip); setClip(null); }}>{t("joinClipNo")}</button>
-					</div>
-				)}
 				{joining && (
-					<form className="join-row" onSubmit={async (e) => { e.preventDefault(); if (await joinShared(link)) { setLink(""); setJoining(false); } }}>
-						<input className="field" autoFocus value={link} onChange={(e) => setLink(e.target.value)} placeholder={t("joinPh")} aria-label={t("joinShared")}
+					<form className="join-row" onSubmit={(e) => { e.preventDefault(); enter(link); }}>
+						<input className="field" autoFocus value={link} disabled={entering} placeholder={t("joinPh")} aria-label={t("joinShared")}
+							onChange={(e) => { setLink(e.target.value); if (isInvite(e.target.value)) enter(e.target.value.trim()); }}
 							onKeyDown={(e) => { if (e.key === "Escape") setJoining(false); }} />
-						<button className="send" disabled={!link.trim()}>{t("joinGo")}</button>
+						<button className="send" disabled={!link.trim() || entering}>{entering ? t("joinBusy") : t("joinGo")}</button>
 						<span className="dim">{t("joinNote")}</span>
 					</form>
 				)}

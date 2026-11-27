@@ -706,7 +706,7 @@ dependencies = [
 
 [[package]]
 name = "claudeppt"
-version = "0.14.3"
+version = "0.14.4"
 dependencies = [
  "arboard",
  "axum",
