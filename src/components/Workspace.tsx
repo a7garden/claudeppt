@@ -19,12 +19,18 @@ import { type MenuItem, openMenu } from "./ContextMenu";
 import { VersionBar, VersionLens } from "./VersionLens";
 import { Ribbon, type SelInfo, useRibbon } from "./Ribbon";
 import { SketchBoard } from "./Sketch";
-import { AssignTag, EditingNote, SlideFaces, StageFaces, assignItems } from "./Collab";
-import { useFrameMode, useRole } from "../lib/collab";
+import { AssignBoard, AssignTag, EditingNote, SlideFaces, StageFaces, assignItems } from "./Collab";
+import { useCollab, useFrameMode, useRole } from "../lib/collab";
 import { CheckBar, CheckMarks, PageGuides } from "./CheckMarks";
 import { remote } from "../lib/transport";
 import { useSettings } from "../lib/settings";
 import Talk, { useTalkFold } from "./Talk";
+
+/** 담당이 아니라 내용 없이 자리만 받은 쪽 (2026.11.27 collab.rs limit_view) — 쪽 그림 대신. 덱 주인이 「담당 쪽만 보이기」를 켠 사람에게만 생긴다 */
+function LockedSlide({ width, height }: { width: number; height: number }) {
+	const t = useT();
+	return <div className="slide-locked" style={{ width, height }}><span>{t("slideLocked")}</span></div>;
+}
 
 export function SlideFrame({ file, rev, width, height, w, h, onWin, revHash }: { file: string; rev: number; width: number; height?: number; w: number; h: number; onWin?: (win: Window | null) => void; revHash?: string }) {
 	const id = useDeck((s) => s.id);
@@ -47,6 +53,7 @@ export function SlideFrame({ file, rev, width, height, w, h, onWin, revHash }: {
 			onWin?.(null);
 		};
 	}, [src]);
+	if (!file) return <LockedSlide width={width} height={height ?? (width * h) / w} />;
 	return (
 		<iframe
 			ref={ref}
@@ -79,6 +86,8 @@ function SwapFrame({ file, rev, revHash, onWin, ...size }: { file: string; rev: 
 	const latest = useRef(cur.k);
 	latest.current = cur.k;
 	const layers = shown && shown.k !== cur.k ? [cur, shown] : [cur];
+	// 잠긴 쪽은 읽을 창이 없어 「다 그려지면 갈아 끼우기」가 끝나지 않는다 — 바로 보인다
+	if (!file) return <LockedSlide width={size.width} height={(size.width * size.h) / size.w} />;
 	return (
 		<>
 			{layers.map((l) => {
@@ -294,33 +303,50 @@ function Rail() {
 	const lastFiles = useMemo(() => new Set(lastTools?.map((x) => x.file).filter(Boolean)), [lastTools]);
 	const listRef = useRef<HTMLDivElement>(null);
 	useEffect(() => { listRef.current?.querySelectorAll(".rail-item.on")[0]?.scrollIntoView({ block: "nearest" }); }, [current]);
-	// 쪽 담당 (2026.11.27) — 공유 덱 창에서 내가 맡은 쪽. 「담당 쪽만」 권한이면 맡지 않은 쪽을 흐리게, 「내 담당만」을 켜면 맡은 쪽만 늘어놓는다
+	// 쪽 담당 (2026.11.27) — 담당이 하나라도 있으면 목록 머리에 거르기(모든 쪽 · 내 담당 · 사람마다 · 담당 없음)와 「담당표」. 덱 주인 · 팀원 누구나.
+	// 「담당 쪽만」 권한이면 맡지 않은 쪽을 흐리게. 담당 쪽만 보는 사람에게 남의 쪽은 잠긴 자리로 온다(LockedSlide)
 	const assign = useDeck((s) => s.assign);
 	const me = useSettings((s) => s.s.me.trim());
 	const role = useRole();
-	const mine = remote ? deck.slides.filter((sl) => assign[sl.id]?.includes(me)).length : 0;
-	const [onlyMine, setOnlyMine] = useState(false);
-	const only = onlyMine && mine > 0;
+	const sharing = useCollab((c) => !!c.info);
+	const people = useMemo(() => [...new Set(Object.values(assign).flat())].sort((a, b) => a.localeCompare(b)), [assign]);
+	// null 모든 쪽 · "" 담당 없음 · 이름 그 사람 담당
+	const [only, setOnly] = useState<string | null>(null);
+	const [board, setBoard] = useState(false);
+	const shows = (id: string) => only === null || (only === "" ? !assign[id]?.length : !!assign[id]?.includes(only));
+	const label = only === null ? t("assignAll") : only === "" ? t("assignNobody") : only === me ? t("assignMineOpt") : t("assignOf").replace("{name}", only);
+	const pickWho = (e: React.MouseEvent) => openMenu(e, [
+		{ label: t("assignAll"), checked: only === null, run: () => setOnly(null) },
+		...(me && people.includes(me) ? [{ label: t("assignMineOpt"), checked: only === me, run: () => setOnly(me) }] : []),
+		...(people.some((p) => p !== me) ? ["-" as const] : []),
+		...people.filter((p) => p !== me).map((p) => ({ label: t("assignOf").replace("{name}", p), checked: only === p, run: () => setOnly(p) })),
+		"-" as const,
+		{ label: t("assignNobody"), checked: only === "", run: () => setOnly("") },
+	]);
 
 	return (
 		<nav className="rail" ref={listRef} aria-label={t("slides")}
 			onKeyDown={(e) => {
 				if (e.key === "Delete" && !preview) removeSlide(current);
 			}}>
-			{mine > 0 && (
-				<button className={"rail-mine" + (only ? " on" : "")} aria-pressed={only} onClick={() => setOnlyMine(!only)} title={t("assignOnlyHint")}>
-					{t("assignMine").replace("{n}", String(mine))}
-				</button>
+			{(people.length > 0 || (sharing && !remote)) && (
+				<div className="rail-filter">
+					<button className={"rail-mine" + (only !== null ? " on" : "")} onClick={pickWho} aria-haspopup="menu" title={t("assignFilterHint")}>
+						{label}{only !== null && <span className="n">{deck.slides.filter((s) => shows(s.id)).length}</span>}
+					</button>
+					<button className={"rail-board" + (board ? " on" : "")} onClick={() => setBoard(!board)} aria-expanded={board} title={t("assignBoardHint")}>{t("assignBoard")}</button>
+				</div>
 			)}
+			{board && <AssignBoard onClose={() => setBoard(false)} />}
 			{deck.slides.map((sl, i) => {
 				const isMine = !!assign[sl.id]?.includes(me);
-				if (only && !isMine) return null;
+				if (!shows(sl.id)) return null;
 				const n = pins.filter((p) => p.slide === sl.id && !p.done).length;
 				// 비교 차이는 숫자 대신 미리보기 테두리로 — 숫자는 비교 렌즈를 켰을 때만. 0.1% 차이에 모든 쪽이 빨간 글자로 칠해지면 무엇이 급한지 안 보인다
 				// 판 비교 중이면 고른 판과 다른 쪽에 점선 테두리 · 그 뒤에 생긴 쪽에 「새」 — 바뀐 쪽만 골라 넘겨 볼 수 있게
 				const vs = !preview ? vdiff?.slides[sl.id] : undefined;
 				return (
-					<div key={sl.id} className={"rail-item" + (i === current ? " on" : "") + (dropAt === i ? " drop-before" : "") + (vs ? " drift" : "") + (role === "assigned" && !isMine ? " notmine" : "")}
+					<div key={sl.id} className={"rail-item" + (i === current ? " on" : "") + (dropAt === i ? " drop-before" : "") + (vs ? " drift" : "") + (role === "assigned" && !isMine ? " notmine" : "") + (sl.hidden ? " locked" : "")}
 						onDragOver={(e) => { if (drag != null) { e.preventDefault(); setDropAt(i); } }}
 						onDrop={() => { if (drag != null) move(drag, i); setDrag(null); setDropAt(null); }}
 						// 누른 쪽을 지금 쪽으로 — PowerPoint 처럼 메뉴가 가리키는 쪽이 무대에 보인다

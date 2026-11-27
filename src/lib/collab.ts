@@ -20,10 +20,11 @@ import { inPool, isMine, me, type Mode, nextSession, persistTalk, type Turn, use
 export type Role = "edit" | "assigned" | "comment" | "view";
 export const ROLES: Role[] = ["edit", "assigned", "comment", "view"];
 /** runner — 이 기기가 「내 PC 의 Claude」를 붙여 두었다 (runner.rs) · app — 앱의 공유 덱 창으로 들어왔다 (화면이 알려 온 것, collab.rs Member) · role — 덱 주인이 정한 권한 */
-export interface Member { conn: number; device: string; name: string; slide: string | null; host: boolean; since: number; runner?: boolean; app?: boolean; role?: Role }
+/** limit — 담당 쪽만 보인다 (덱 주인이 켠다 · invite.rs Device.limit) */
+export interface Member { conn: number; device: string; name: string; slide: string | null; host: boolean; since: number; runner?: boolean; app?: boolean; role?: Role; limit?: boolean }
 /** app — 앱으로 여는 링크(claudeppt://…, 앱끼리 잇는 길이 없으면 null) · url — 브라우저로 여는 링크 */
 export interface InviteLink { id: string; app: string | null; url: string; name: string | null; expires: number | null; expired: boolean }
-export interface Device { id: string; name: string; seen: number; online: boolean; role: Role }
+export interface Device { id: string; name: string; seen: number; online: boolean; role: Role; limit: boolean }
 /** 서버 정보 — bases: 이 서버에 닿는 주소 · links: 초대 링크 · devices: 링크로 들어온 기기 · locked: 회의 잠금 */
 /** app — 앱끼리 잇는 주소(claudeppt://<열쇠>) · lan — 사무실 망에 열었나(브라우저 팀원용) */
 /** deck — 공유한 덱 (2026.11.27). 공유는 켤 때 연 덱 하나에 묶인다 */
@@ -53,6 +54,9 @@ export const useCollab = create<C>()(() => ({ info: null, members: [], conn: nul
  *  덱 주인 쪽 claudeFor 와 같은 규칙이다 — 여기는 보이기만 하고, 정하는 것은 덱 주인이다 */
 export function poolOf(c: Pick<C, "shareClaude" | "members" | "conn">, share: boolean): string | undefined {
 	if (!remote) return share ? undefined : "";
+	// 담당 쪽만 보는 사람은 늘 자기 몫 세션 (claudeFor · collab.rs pool_of)
+	const mine = c.members.find((m) => m.conn === c.conn);
+	if (mine?.limit) return mine.device;
 	if (c.shareClaude) return undefined;
 	return appWindow ? c.members.find((m) => m.conn === c.conn)?.device ?? "?" : "";
 }
@@ -197,6 +201,8 @@ export const collabKick = (device: string) => call<CollabInfo>("collab_kick", { 
 export const collabLock = (on: boolean) => call<CollabInfo>("collab_lock", { on }).then(setInfo);
 /** 팀원 권한 — 그 사람(같은 이름의 기기 모두)에게. 붙어 있으면 그 화면이 바로 바뀐다 */
 export const collabRole = (device: string, role: Role) => call<CollabInfo>("collab_role", { device, role }).then(setInfo);
+/** 담당 쪽만 보이게 한다 (2026.11.27) — 그 사람의 연결은 끊겼다가 새 범위로 다시 붙는다 */
+export const collabLimit = (device: string, on: boolean) => call<CollabInfo>("collab_limit", { device, on }).then(setInfo);
 
 /** 그 사람이 맡은 쪽 id — 덱 차례대로 */
 export function assignedTo(name: string): string[] {
@@ -264,8 +270,8 @@ export async function stopHost() {
 }
 
 /** 의도 처리기 — 이름 → (보낸 사람, 인자) → 값. 여기 없는 이름은 거절한다 (서버 INTENTS 와 함께 지킨다) */
-/** role — 서버가 장부에서 읽어 붙인 권한 (화면이 보낸 것이 아니다) */
-type From = { conn: number; name: string; device?: string; role?: Role };
+/** role · limit — 서버가 장부에서 읽어 붙인 권한 · 열람 제한 (화면이 보낸 것이 아니다) */
+type From = { conn: number; name: string; device?: string; role?: Role; limit?: boolean };
 const handlers: Record<string, (from: From, args: any) => Promise<unknown>> = {};
 export const onIntent = (name: string, fn: (from: From, args: any) => Promise<unknown>) => { handlers[name] = fn; };
 
@@ -295,7 +301,14 @@ function claudeFor(from: From, wantsMine: boolean): { runner?: string; pool?: st
 	const members = useCollab.getState().members;
 	const m = members.find((x) => x.conn === from.conn);
 	const hasRunner = !!from.device && members.some((x) => x.device === from.device && x.runner);
-	if (useSettings.getState().s.collab.shareClaude) {
+	const share = useSettings.getState().s.collab.shareClaude;
+	// 담당 쪽만 보는 사람 (2026.11.27) — 세션 공유를 켰어도 늘 자기 몫 세션. 함께 쓰는 세션의 기록에는 남의 쪽 내용이 있어 Claude 가 옮겨 말할 수 있다.
+	// 브라우저로 들어와 자기 Claude 가 없으면 덱 주인 Claude 로, 세션만 따로
+	if (from.limit && from.device) {
+		if (m?.app && !share && !hasRunner) throw new Error(tNow("runnerNeed"));
+		return { pool: from.device, ...(hasRunner && (m?.app || wantsMine) ? { runner: from.device } : {}) };
+	}
+	if (share) {
 		if (!wantsMine) return {};
 		if (!hasRunner) throw new Error(tNow("runnerOff"));
 		return { runner: from.device };
@@ -305,19 +318,27 @@ function claudeFor(from: From, wantsMine: boolean): { runner?: string; pool?: st
 	return { runner: from.device, pool: from.device };
 }
 
-/** 「담당 쪽만」 권한이면 그 쪽을 맡았나 — 다른 권한은 늘 된다 (의견만 · 보기만은 서버가 의도째 막는다) */
+/** 「담당 쪽만」 권한이거나 담당 쪽만 보는 사람이면 그 쪽을 맡았나 — 다른 사람은 늘 된다 (의견만 · 보기만은 서버가 의도째 막는다) */
 function slideOk(from: From, slideId: string) {
-	return from.role !== "assigned" || !!useDeck.getState().assign[slideId]?.includes(from.name);
+	return (from.role !== "assigned" && !from.limit) || !!useDeck.getState().assign[slideId]?.includes(from.name);
 }
 const mustOwn = (from: From, slideId: string) => { if (!slideOk(from, slideId)) throw new Error(tNow("roleNotYours")); };
 
 /** 「담당 쪽만」 권한이면 Claude 가 고쳐도 되는 쪽 파일 — 맡은 쪽이 없으면 요청을 받지 않는다. 다른 권한은 없음(막지 않는다) */
 function scopeFor(from: From): string[] | undefined {
-	if (from.role !== "assigned") return undefined;
+	// 2026.11.27 : 담당 쪽만 보는 사람은 권한이 「편집」이어도 맡은 쪽만 — 보지 못하는 쪽 · 덱 목차를 Claude 로 고치게 할 수는 없다
+	if (from.role !== "assigned" && !from.limit) return undefined;
 	const d = useDeck.getState();
 	const files = (d.deck?.slides ?? []).filter((s) => d.assign[s.id]?.includes(from.name)).map((s) => s.file);
 	if (!files.length) throw new Error(tNow("roleNoSlides"));
 	return files;
+}
+
+/** 담당 쪽만 보는 사람에게 보이지 않는 쪽 파일 — 그 사람의 Claude 턴은 이 파일들을 뺀 사본에서 돈다 (store sendTurn hide) */
+function hiddenFor(from: From): string[] | undefined {
+	if (!from.limit) return undefined;
+	const d = useDeck.getState();
+	return (d.deck?.slides ?? []).filter((s) => !d.assign[s.id]?.includes(from.name)).map((s) => s.file);
 }
 
 onIntent("send", (from, a) => new Promise((ok, no) => {
@@ -333,7 +354,7 @@ onIntent("send", (from, a) => new Promise((ok, no) => {
 	let who: { runner?: string; pool?: string };
 	try { who = claudeFor(from, a.runner === "mine"); } catch (e) { return no(e); }
 	let started = false;
-	d.send(String(a.text ?? ""), atts, true, { by: from.name || tNow("collabNoName"), current: typeof a.current === "string" ? a.current : null, talkKey: typeof a.talkKey === "string" ? a.talkKey : null, pins, ...who, scope, onStart: (r) => { started = true; ok(r); } })
+	d.send(String(a.text ?? ""), atts, true, { by: from.name || tNow("collabNoName"), current: typeof a.current === "string" ? a.current : null, talkKey: typeof a.talkKey === "string" ? a.talkKey : null, pins, ...who, scope, hide: hiddenFor(from), onStart: (r) => { started = true; ok(r); } })
 		.then(() => { if (!started) ok(null); }, no);
 }));
 
@@ -380,6 +401,7 @@ const pinOf = (id: unknown) => useDeck.getState().pins.find((p) => p.id === id);
 onIntent("pinAdd", async (from, a) => {
 	const ok = typeof a.slide === "string" && Number.isFinite(a.x) && Number.isFinite(a.y) && useDeck.getState().deck?.slides.some((s) => s.id === a.slide);
 	if (!ok) throw new Error("bad pin");
+	if (from.limit) mustOwn(from, a.slide);
 	return useDeck.getState().addPin({ slide: a.slide, x: a.x, y: a.y, text: String(a.text ?? "").slice(0, 2000), target: a.target, shape: a.shape }, from.name || tNow("collabNoName"), a.id);
 });
 onIntent("pinUpdate", async (from, a) => {
@@ -402,7 +424,7 @@ onIntent("pinSend", async (from, a) => {
 	const scope = scopeFor(from);
 	// 끝날 때까지 기다리지 않는다 — 턴이 서면 답한다
 	const who = claudeFor(from, a.runner === "mine");
-	useDeck.getState().sendPin(p.id, { by: from.name || tNow("collabNoName"), talkKey: typeof a.talkKey === "string" ? a.talkKey : null, ...who, scope });
+	useDeck.getState().sendPin(p.id, { by: from.name || tNow("collabNoName"), talkKey: typeof a.talkKey === "string" ? a.talkKey : null, ...who, scope, hide: hiddenFor(from) });
 });
 
 onIntent("undo", async (from) => useDeck.getState().undo(from.name || tNow("collabNoName")));

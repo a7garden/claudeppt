@@ -151,6 +151,7 @@ pub fn run() {
 			collab::collab_kick,
 			collab::collab_lock,
 			collab::collab_role,
+			collab::collab_limit,
 			collab::collab_tunnel,
 			collab::collab_tools,
 			collab::collab_join,
@@ -244,7 +245,7 @@ fn status(s: StatusCode) -> Response<Vec<u8>> {
 	Response::builder().status(s).body(Vec::new()).unwrap()
 }
 
-fn percent_decode(s: &str) -> String {
+pub(crate) fn percent_decode(s: &str) -> String {
 	let b = s.as_bytes();
 	let mut out = Vec::with_capacity(b.len());
 	let mut i = 0;

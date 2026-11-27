@@ -19,7 +19,8 @@ import { type Settings, type Template, templateOf } from "./settings";
 
 export const FORMAT = "claudeppt/1";
 
-export interface SlideRef { id: string; file: string; title?: string; notes?: string }
+/** hidden — 공유 덱 창에서 담당이 아니라 내용 없이 자리만 받은 쪽 (collab.rs limit_view). file 이 빈 글이다 */
+export interface SlideRef { id: string; file: string; title?: string; notes?: string; hidden?: boolean }
 export interface Deck {
 	format: string;
 	title: string;

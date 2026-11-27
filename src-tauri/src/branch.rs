@@ -420,9 +420,9 @@ mod tests {
 		dir
 	}
 	fn wipe(dir: &str, ids: &[&str]) {
-		for id in ids {
-			let _ = std::fs::remove_dir_all(sian_dir(Path::new(dir), id).unwrap());
-		}
+		// 이 시험 덱의 시안 자리째 — 앱 데이터에 빈 폴더가 쌓이지 않게
+		let _ = ids;
+		let _ = std::fs::remove_dir_all(sian_dir(Path::new(dir), "x").unwrap().parent().unwrap());
 		let _ = std::fs::remove_dir_all(dir);
 	}
 	fn put(dir: &str, text: &str) {

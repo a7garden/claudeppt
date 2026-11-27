@@ -45,6 +45,10 @@ pub struct Device {
 	/// 덱 주인이 정한 권한 (2026.11.27) — 없는 장부(옛 collab.json)는 「편집」이라 지금까지처럼 다 한다
 	#[serde(default)]
 	pub role: Role,
+	/// 담당 쪽만 보인다 (2026.11.27) — 덱 주인이 켜면 맡지 않은 쪽은 내용 없이 자리만 간다(collab.rs limit_view).
+	/// 권한(무엇을 하나)과 따로다 — 「편집」이면서 남의 쪽은 못 볼 수도, 「보기만」이면서 맡은 쪽만 볼 수도 있다
+	#[serde(default)]
+	pub limit: bool,
 }
 
 /// 팀원 권한 — 덱 주인이 공유 창 「들어온 사람」에서 사람마다 고른다. 막는 곳은 collab.rs(의도 이름) · collab.ts(어느 쪽인가)
@@ -150,7 +154,9 @@ impl Book {
 		let name = link.name.clone().unwrap_or_else(|| self.unique(&clean_name(name), reserved));
 		// 같은 이름(개인 링크로 두 기기)으로 이미 들어온 사람이면 그 권한을 잇는다 — 휴대폰으로 들어왔다고 보기만이 편집이 되지 않게
 		let role = self.devices.iter().find(|d| d.name == name).map(|d| d.role).unwrap_or_default();
-		let d = Device { id: uuid::Uuid::new_v4().simple().to_string()[..10].to_string(), hash: hash(&secret), name, link: link.id.clone(), created: now, seen: now, runner: None, role };
+		// 열람 제한도 사람을 따른다 — 휴대폰으로 다시 들어와 남의 쪽이 보이지 않게
+		let limit = self.devices.iter().any(|d| d.name == name && d.limit);
+		let d = Device { id: uuid::Uuid::new_v4().simple().to_string()[..10].to_string(), hash: hash(&secret), name, link: link.id.clone(), created: now, seen: now, runner: None, role, limit };
 		self.devices.push(d.clone());
 		(d, secret)
 	}
@@ -200,6 +206,20 @@ impl Book {
 
 	pub fn role_of(&self, id: &str) -> Role {
 		self.devices.iter().find(|d| d.id == id).map(|d| d.role).unwrap_or_default()
+	}
+
+	/// 담당 쪽만 보이게 한다 — 그 사람(같은 이름의 기기 모두)에게
+	pub fn set_limit(&mut self, id: &str, on: bool) -> bool {
+		let Some(name) = self.devices.iter().find(|d| d.id == id).map(|d| d.name.clone()) else { return false };
+		for d in self.devices.iter_mut().filter(|d| d.name == name) {
+			d.limit = on;
+		}
+		true
+	}
+
+	/// 그 기기가 담당 쪽만 보면 그 사람 이름
+	pub fn limited(&self, id: &str) -> Option<String> {
+		self.devices.iter().find(|d| d.id == id && d.limit).map(|d| d.name.clone())
 	}
 
 	pub fn remove_device(&mut self, id: &str) -> bool {
@@ -309,6 +329,21 @@ mod tests {
 		b.remove_device(&d.id);
 		assert!(b.device_by_runner(&k2, 1).is_none(), "내보내면 열쇠도 사라진다");
 		assert!(b.runner_key("없는 기기").is_none());
+	}
+
+	#[test]
+	fn limit_follows_the_person() {
+		let mut b = Book::default();
+		let p = b.new_link(Some("민수".into()), None, 0);
+		let (phone, _) = b.join(&p, "", &[], 0);
+		assert_eq!(b.limited(&phone.id), None, "처음은 모두 보인다");
+		assert!(b.set_limit(&phone.id, true));
+		let (laptop, _) = b.join(&p, "", &[], 0);
+		assert_eq!(b.limited(&laptop.id).as_deref(), Some("민수"), "같은 사람의 새 기기도 제한된다");
+		b.set_limit(&laptop.id, false);
+		assert_eq!(b.limited(&phone.id), None);
+		let old: Device = serde_json::from_str(r#"{"id":"a","hash":"h","name":"n","link":"l","created":0,"seen":0}"#).unwrap();
+		assert!(!old.limit, "옛 장부는 제한 없음");
 	}
 
 	#[test]

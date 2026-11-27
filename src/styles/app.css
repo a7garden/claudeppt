@@ -774,7 +774,36 @@ textarea.field { height: auto; padding: 8px 10px; line-height: 1.5; resize: vert
 .assign-tag.mine i { box-shadow: 0 0 0 1.5px var(--text); }
 .rail-item.notmine .thumb { opacity: 0.45; }
 .rail-item.notmine:hover .thumb, .rail-item.notmine.on .thumb { opacity: 0.8; }
-.rail-mine { display: block; margin: 0 0 10px 24px; padding: 3px 10px; border-radius: 12px; font-size: 11.5px; color: var(--dim); outline: 1px solid var(--hair-2); outline-offset: -1px; }
+/* 담당 거르기 · 담당표 (2026.11.27) — 쪽 목록 머리. 담당이 있거나 덱 주인이 공유 중일 때만 */
+.rail-filter { display: flex; flex-wrap: wrap; gap: 4px; margin: 0 0 10px 24px; }
+.rail-board { padding: 3px 8px; border-radius: 12px; font-size: 11.5px; color: var(--dim); }
+.rail-board:hover, .rail-board.on { color: var(--text); background: var(--raise-2); }
+.rail-mine { display: inline-flex; gap: 4px; align-items: center; max-width: 100%; padding: 3px 10px; border-radius: 12px; font-size: 11.5px; color: var(--dim); outline: 1px solid var(--hair-2); outline-offset: -1px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.rail-mine .n { font: 10.5px var(--mono); color: var(--faint); }
+.rail-item.locked .no span:first-child { color: var(--faint); }
+.slide-locked { display: grid; place-items: center; background: var(--raise); color: var(--faint); font-size: 12px; border-radius: 2px; outline: 1px dashed var(--hair-2); outline-offset: -1px; }
+.pop.assign-board { position: fixed; top: 84px; left: 160px; right: auto; width: auto; max-width: min(720px, calc(100vw - 180px)); max-height: 70vh; display: flex; flex-direction: column; }
+.assign-board .head { display: flex; gap: 8px; align-items: baseline; }
+.assign-board .head .dim { font-size: 11.5px; }
+.assign-board .grid-wrap { overflow: auto; }
+.assign-board table { border-collapse: collapse; font-size: 12px; }
+.assign-board thead th { position: sticky; top: 0; background: var(--raise-2); padding: 4px 6px; font-weight: 500; vertical-align: bottom; }
+.assign-board thead th > * { display: block; text-align: center; margin: 0 auto; }
+.assign-board thead th span { max-width: 8ch; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 11px; color: var(--dim); }
+.assign-board thead th small { font: 10px var(--mono); color: var(--faint); }
+.assign-board thead i, .assign-board td i { display: inline-block; width: 18px; height: 18px; border-radius: 4px; font: 600 10px/18px var(--ui); font-style: normal; color: #fff; background: hsl(var(--h, 0) 55% 48%); }
+.assign-board tbody th { text-align: left; padding: 2px 8px 2px 0; white-space: nowrap; font-weight: 400; }
+.assign-board tbody th button { width: 26px; color: var(--dim); }
+.assign-board tbody th .ttl { display: inline-block; max-width: 18ch; overflow: hidden; text-overflow: ellipsis; vertical-align: middle; color: var(--dim); }
+.assign-board tbody tr.on th button { color: var(--accent); font-weight: 600; }
+.assign-board tbody tr.none th .ttl { color: var(--faint); }
+.assign-board td { padding: 2px 6px; text-align: center; border-left: 1px solid var(--hair); }
+.assign-board td button { width: 24px; height: 22px; border-radius: 5px; display: grid; place-items: center; }
+.assign-board td button:hover { background: var(--hair); }
+.assign-board td button i { width: 12px; height: 12px; border-radius: 3px; }
+.assign-board td button[aria-pressed="false"] i { display: none; }
+.assign-board td > i { width: 12px; height: 12px; border-radius: 3px; }
+.perm .limit { font-size: 11.5px; }
 .rail-mine:hover { color: var(--text); }
 .rail-mine.on { color: var(--text); outline: 1.5px solid var(--accent); outline-offset: -1.5px; }
 .collab-members .row { flex-wrap: wrap; }

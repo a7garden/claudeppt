@@ -1,7 +1,7 @@
 // 팀 협업 화면 조각 — 제목 줄 「공유」(공유 창) · 쪽 목록 · 무대의 「보는 사람」 표시 (상태: lib/collab.ts)
 //   2026.11.27 : 쪽 담당 · 권한 — 쪽 목록의 담당 표시(AssignTag) · 쪽 우클릭 「담당」(assignItems) · 공유 창 사람마다 권한 고르기 · 팀원 창 「내 담당」
-import { useEffect, useRef, useState } from "react";
-import { assignedTo, collabKick, collabLinkNew, collabLinkRemove, collabLock, collabRole, collabTools, follow, ROLES, type Role, setShareClaude, setVia, type InviteLink, type TunnelTools, type Member, startHost, stopHost, useCollab, useRole } from "../lib/collab";
+import { useEffect, useMemo, useRef, useState } from "react";
+import { assignedTo, collabKick, collabLimit, collabLinkNew, collabLinkRemove, collabLock, collabRole, collabTools, follow, ROLES, type Role, setShareClaude, setVia, type InviteLink, type TunnelTools, type Member, startHost, stopHost, useCollab, useRole } from "../lib/collab";
 import { useT } from "../lib/i18n";
 import { useSettings } from "../lib/settings";
 import { useDeck } from "../lib/store";
@@ -70,6 +70,74 @@ export function assignItems(slideId: string, t: ReturnType<typeof useT>): MenuIt
 		...names.map((n): MenuItem => ({ label: `${t("assignBy")} · ${n}`, checked: cur.includes(n), run: () => st.setAssign(slideId, cur.includes(n) ? cur.filter((x) => x !== n) : [...cur, n]) })),
 		...(cur.length ? [{ label: t("assignClear"), run: () => st.setAssign(slideId, []) }] : []),
 	];
+}
+
+/** 담당표 (2026.11.27) — 쪽마다 맡은 사람을 한 표로. 덱 주인 앱(공유 중)은 칸을 눌러 맡기고 풀고, 팀원 화면은 보기만.
+ *  쪽 번호를 누르면 그 쪽으로. 사람은 들어온 적 있는 사람(덱 주인 앱) · 맡은 쪽이 있는 사람 */
+export function AssignBoard({ onClose }: { onClose: () => void }) {
+	const t = useT();
+	const deck = useDeck((s) => s.deck);
+	const assign = useDeck((s) => s.assign);
+	const current = useDeck((s) => s.current);
+	const info = useCollab((c) => c.info);
+	const host = !remote && !!info;
+	const names = useMemo(() => [...new Set([...(host ? info!.devices.map((d) => d.name) : []), ...Object.values(assign).flat()])].sort((a, b) => a.localeCompare(b)), [host, info, assign]);
+	const ref = useRef<HTMLDivElement>(null);
+	useEffect(() => {
+		const k = (e: MouseEvent) => { if (!ref.current?.contains(e.target as Node) && !(e.target as Element).closest?.(".rail-board")) onClose(); };
+		const esc = (e: KeyboardEvent) => { if (e.key === "Escape") onClose(); };
+		addEventListener("mousedown", k);
+		addEventListener("keydown", esc);
+		return () => { removeEventListener("mousedown", k); removeEventListener("keydown", esc); };
+	}, [onClose]);
+	if (!deck) return null;
+	const st = useDeck.getState();
+	return (
+		<div className="pop assign-board" ref={ref} role="dialog" aria-label={t("assignBoard")}>
+			<div className="head"><b>{t("assignBoard")}</b><span className="dim">{t(host ? "assignBoardHost" : "assignBoardView")}</span></div>
+			{names.length === 0 ? <p className="dim">{t("assignBoardEmpty")}</p> : (
+				<div className="grid-wrap">
+					<table>
+						<thead>
+							<tr>
+								<th />
+								{names.map((n) => (
+									<th key={n} title={n}>
+										<i style={{ "--h": hue(n) } as React.CSSProperties}>{initial(n)}</i>
+										<span>{n}</span>
+										<small>{deck.slides.filter((s) => assign[s.id]?.includes(n)).length}</small>
+									</th>
+								))}
+							</tr>
+						</thead>
+						<tbody>
+							{deck.slides.map((sl, i) => {
+								const cur = assign[sl.id] ?? [];
+								return (
+									<tr key={sl.id} className={(i === current ? "on" : "") + (cur.length ? "" : " none")}>
+										<th>
+											<button className="mono" onClick={() => st.setCurrent(i)}>{i + 1}</button>
+											<span className="ttl">{sl.hidden ? t("slideLocked") : sl.title || ""}</span>
+										</th>
+										{names.map((n) => {
+											const on = cur.includes(n);
+											return (
+												<td key={n}>
+													{host
+														? <button aria-pressed={on} aria-label={`${i + 1} · ${n}`} onClick={() => st.setAssign(sl.id, on ? cur.filter((x) => x !== n) : [...cur, n])}><i style={on ? ({ "--h": hue(n) } as React.CSSProperties) : undefined} /></button>
+														: on && <i style={{ "--h": hue(n) } as React.CSSProperties} />}
+												</td>
+											);
+										})}
+									</tr>
+								);
+							})}
+						</tbody>
+					</table>
+				</div>
+			)}
+		</div>
+	);
 }
 
 /** 권한 이름 — 고르기 · 팀원 창 */
@@ -182,6 +250,7 @@ function MembersPop() {
 				<div className="row"><span className="lbl">{t("roleMine")}</span><b>{t(roleKey(role))}</b></div>
 				<p className="note">{t((roleKey(role) + "Note") as "roleEditNote")}</p>
 				<div className="row"><span className="lbl">{t("assignMineH")}</span><AssignedSlides name={me} /></div>
+				{members.find((m) => m.conn === useCollab.getState().conn)?.limit && <p className="note">{t("limitMine")}</p>}
 			</section>
 			{members.length === 0 && <p className="dim">{t("collabNobody")}</p>}
 			{members.map((m) => {
@@ -325,6 +394,11 @@ export function SharePanel({ bare }: { bare?: boolean }) {
 									onChange={(e) => run(() => collabRole(d.id, e.target.value as Role))}>
 									{ROLES.map((r) => <option key={r} value={r}>{t(roleKey(r))}</option>)}
 								</select>
+								{/* 담당 쪽만 보이기 (2026.11.27) — 권한과 따로. 켜면 그 사람에게 남의 쪽은 잠긴 자리로만 간다(서버가 막는다) */}
+								<label className="check limit" title={t("limitHint")}>
+									<input type="checkbox" checked={d.limit} disabled={busy} onChange={() => run(() => collabLimit(d.id, !d.limit))} />
+									<span>{t("limitLabel")}</span>
+								</label>
 								{deck && <AssignedSlides name={d.name} />}
 							</div>
 						</div>

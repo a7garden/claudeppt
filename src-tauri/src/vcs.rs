@@ -501,9 +501,8 @@ mod tests {
 		dir
 	}
 	fn wipe(dir: &str) {
-		for k in ["s1", "s2"] {
-			let _ = std::fs::remove_dir_all(work_dir(Path::new(dir), k).unwrap());
-		}
+		// 이 시험 덱의 사본 자리째 — 앱 데이터에 빈 폴더가 쌓이지 않게
+		let _ = std::fs::remove_dir_all(work_dir(Path::new(dir), "s1").unwrap().parent().unwrap());
 		let _ = std::fs::remove_dir_all(dir);
 	}
 	fn put(w: &Work, rel: &str, text: &str) {

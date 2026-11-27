@@ -84,7 +84,9 @@ export interface SendFrom { by: string; current: string | null; talkKey: string 
 	/** 세션 묶음 (Session.owner) — "" 은 덱 주인 묶음, 없으면 묶음 없이(세션 공유). 정하는 곳은 collab.ts claudeFor */
 	pool?: string;
 	/** 이 사람이 고쳐도 되는 쪽 파일 (2026.11.27 「담당 쪽만」 권한) — 있으면 Claude 에게 그 쪽만 고치라 이르고, 턴이 그 밖을 고쳤으면 턴 앞 내용으로 되돌린다 */
-	scope?: string[] }
+	scope?: string[];
+	/** 이 사람에게 보이지 않는 쪽 파일 (2026.11.27 담당 쪽만 보기) — 사본에서 빼고 돌린 뒤 되돌려 놓는다. Claude 가 읽고 답에 옮기지 못하게 */
+	hide?: string[] }
 /** 화면 뒤에서 도는 긴 일(PPTX 가져오기) 하나. n 이 0 이면 아직 전체 양을 모른다 */
 export interface Job { id: string; label: string; i: number; n: number; note?: string }
 export interface Release { name: string; tag: string; n: number; hash: string; file: string; notes: string; at: string }
@@ -166,7 +168,7 @@ interface S {
 	/** 쪽 담당을 정한다 — 덱 주인만 (공유 덱 창에서는 막힌다) */
 	setAssign: (slideId: string, names: string[]) => void;
 	/** 의견 하나를 그 쪽의 세션에 보낸다 — 「○○ 님 의견을 반영해 줘」. from 이 없으면 이 기기 사람이 보낸다 */
-	sendPin: (id: string, from?: { by: string; talkKey: string | null; runner?: string; pool?: string; scope?: string[] }) => Promise<void>;
+	sendPin: (id: string, from?: { by: string; talkKey: string | null; runner?: string; pool?: string; scope?: string[]; hide?: string[] }) => Promise<void>;
 	/** force — 앱 밖 Claude Code 가 방금 이 덱을 다뤘어도 보낸다 (알림의 「그래도 보내기」).
 	 *  from — 협업 브라우저 팀원이 보낸 요청 (collab.ts). 보낸 사람 · 그 사람이 보던 쪽 · 그 사람의 지금 대화로 처리하고, 호스트 화면(보는 대화 · 핀)은 건드리지 않는다 */
 	send: (text: string, attachments?: string[], force?: boolean, from?: SendFrom) => Promise<void>;
@@ -543,6 +545,30 @@ async function unfence(dir: string, fence: Map<string, string>, tools: ToolUse[]
 	return undone;
 }
 
+/** 사본에서 비워 둔 남의 쪽 — 이 내용으로 덮는다. 쪽 틀은 남겨 덱이 깨지지 않는다 */
+const HIDDEN_SLIDE = `<section class="slide"><!-- This slide is hidden from the teammate who sent this request. It exists, but do not read, edit or describe it. --></section>\n`;
+const HIDDEN_NOTE = "Some slides are hidden from this teammate: their files are blanked and they have no title in the slide list. Do not try to read, recreate, reorder or describe them.\n\n";
+type Hidden = { deck: Deck; restore: () => Promise<void> };
+/** 담당 쪽만 보는 사람의 턴 — 사본의 남의 쪽을 비우고 덱 목차의 그 쪽 제목을 지운다. restore 는 몇 번 불러도 같다 */
+async function hideIn(work: string, deck: Deck, files: string[]): Promise<Hidden> {
+	const kept = new Map<string, string>();
+	for (const f of [...files, "deck.json"]) {
+		const t = await api.readText(work, f).catch(() => null);
+		if (t != null) kept.set(f, t);
+	}
+	for (const f of files) if (kept.has(f)) await api.writeText(work, f, HIDDEN_SLIDE);
+	const masked: Deck = { ...deck, slides: deck.slides.map((s) => (files.includes(s.file) ? { ...s, title: "" } : s)) };
+	const raw = kept.get("deck.json");
+	if (raw) {
+		try {
+			const j = JSON.parse(raw);
+			j.slides = (j.slides ?? []).map((s: { file?: string; title?: string }) => (s.file && files.includes(s.file) ? { ...s, title: "" } : s));
+			await api.writeText(work, "deck.json", JSON.stringify(j, null, 1));
+		} catch { /* 목차를 못 읽으면 제목은 그대로 — 쪽 내용은 이미 비웠다 */ }
+	}
+	return { deck: masked, restore: async () => { for (const [f, t] of kept) await api.writeText(work, f, t); } };
+}
+
 /** Claude 에게 담당 쪽만 고치라 이른다 */
 const scopeNote = (scope: string[]) =>
 	`This teammate may change only these slide files: ${scope.join(", ")}. Do not edit deck.json, theme.css or any other slide — such edits are undone after the turn. If the request needs changes elsewhere, say so in the reply instead.\n\n`;
@@ -619,11 +645,16 @@ async function sendTurn(get: () => S, set: (p: Partial<S>) => void, text: string
 		const deck = get().deck ?? deck0;
 		// 작업 사본 (2026.11.27 vcs.rs) — 이 턴은 덱이 아니라 이 세션의 사본에서 돈다. 손 편집이 남았으면 먼저 판으로 남겨 사본에 넣는다
 		let work = "";
+		let hidden: Hidden | null = null;
 		try {
 			work = await serial(async () => { await flushDirect(dir); return (await api.workPrepare(dir, key)).path; });
 			workOf.set(turn.id, work);
 			// 「담당 쪽만」 — 담당 밖 파일을 턴 앞에 떠 둔다. 이르는 것만으로는 Claude 가 덱 목차 · 다른 쪽을 고칠 수 있다
 			const fence = from?.scope ? await fenceOf(work, deck, from.scope) : null;
+			// 담당 쪽만 보는 사람 (2026.11.27) — 보이지 않는 쪽은 사본에서 내용을 비우고 덱 목차의 제목도 지운다. 그대로 두면 Claude 가 읽고 답에 옮긴다.
+			// 끝나면 그대로 되돌려 놓는다(hidden.restore) — 빈 내용이 덱에 얹히면 남의 쪽이 지워진다
+			hidden = from?.hide?.length ? await hideIn(work, deck, from.hide) : null;
+			const seen = hidden?.deck ?? deck;
 			// 표시가 있으면 그 쪽 그림 위에 그려 붙인다. 못 만들어도 좌표 글은 가므로 턴은 그대로 돈다
 			if (notes.some((n) => n.shape)) {
 				patch((t) => ({ ...t, phase: tNow("marking") }));
@@ -636,16 +667,18 @@ async function sendTurn(get: () => S, set: (p: Partial<S>) => void, text: string
 			const vlines: string[] = [];
 			for (const v of versionMentions) {
 				const c = get().versions.find((x) => x.hash === v.hash);
+				// 지난 변경은 모든 쪽의 옛 내용이다 — 담당 쪽만 보는 사람에게는 펼치지 않는다
+				if (hidden) { vlines.push(`- @v${v.n}: not available to this teammate`); continue; }
 				vlines.push(c ? await versionContext(work, get().id, deck, c).catch((e) => `- @v${v.n}: could not be read (${e})`) : `- @v${v.n}: not found`);
 			}
 			// 협업을 켜면 한 세션을 여러 팀원이 이어 쓰므로 누가 시킨 것인지 알린다 — 「아까 말한 것」이 누구 말인지 가린다
-			const prompt = (by ? `Request from teammate: ${by}\n\n` : "") + (fence ? scopeNote(from!.scope!) : "") + turnPrompt(text, notes, cur ? { id: cur.id, no: current + 1 } : null, attachments, mentions, vlines, deck);
+			const prompt = (by ? `Request from teammate: ${by}\n\n` : "") + (fence ? scopeNote(from!.scope!) : "") + (hidden ? HIDDEN_NOTE : "") + turnPrompt(text, notes, cur ? { id: cur.id, no: current + 1 } : null, attachments, mentions, vlines, seen);
 			// 새 세션은 앱이 id 를 정한다 — 턴이 멈춰도 그 세션의 기록을 찾아 덱에 남긴다 (claude.rs)
 			// 팀원 PC 의 Claude 로 보낸 턴이면 claude 만 그 PC 에서 돈다 — 줄 · 파일은 이 PC 로 와서 이 PC 에서 돈 턴과 똑같이 그려지고 판에 남는다.
 			// 모델 · 생각 깊이 · claude 경로는 그 PC 의 설정을 쓴다 (runner.rs)
 			const run = (p: string, resume: string | null) => turn.runner
-				? api.claudeRunRemote({ turn: turn.id, dir, work, device: turn.runner.device, prompt: p, system: systemPrompt(s, deck), resume, sessionId: resume ? null : uuid() })
-				: api.claudeRun({ turn: turn.id, dir, cwd: work, prompt: p, system: systemPrompt(s, deck), claudePath: s.claude.path, model: s.claude.model, effort: s.claude.effort, resume, sessionId: resume ? null : uuid() });
+				? api.claudeRunRemote({ turn: turn.id, dir, work, device: turn.runner.device, prompt: p, system: systemPrompt(s, seen), resume, sessionId: resume ? null : uuid() })
+				: api.claudeRun({ turn: turn.id, dir, cwd: work, prompt: p, system: systemPrompt(s, seen), claudePath: s.claude.path, model: s.claude.model, effort: s.claude.effort, resume, sessionId: resume ? null : uuid() });
 			let r = await run(prompt, session.claude);
 			flushText(get, set);
 			// 세션 기록을 claude 쪽에서도 덱에서도 찾지 못했다 (기록 없이 옮겨 온 덱 · 지운 기록 · UUID 가 아닌 옛 id). 그대로 두면 이 세션을 이을 때마다 실패하고
@@ -662,6 +695,8 @@ async function sendTurn(get: () => S, set: (p: Partial<S>) => void, text: string
 			const t0 = get().turns.find((t) => t.id === turn.id)!;
 			let status: Turn["status"] = t0.status === "stopped" ? "stopped" : r.code === 0 && !t0.error ? "done" : "failed";
 			if (status === "failed" && !t0.error) patch((t) => ({ ...t, error: r.stderr.trim().split("\n").slice(-3).join("\n") || `exit ${r.code}` }));
+			// 비워 둔 남의 쪽 · 덱 목차를 되돌린다 — 울타리(unfence)보다 먼저, 그래야 비운 것을 「고친 것」으로 알리지 않는다
+			await hidden?.restore();
 			// 담당 밖을 고쳤으면 턴 앞 내용으로 되돌리고 알린다
 			if (fence) {
 				const undone = await unfence(work, fence, get().turns.find((t) => t.id === turn.id)!.tools);
@@ -694,6 +729,8 @@ async function sendTurn(get: () => S, set: (p: Partial<S>) => void, text: string
 		} catch (e) {
 			patch((t) => ({ ...t, status: "failed", error: String(e) }));
 		} finally {
+			// 도중에 멈췄어도 비워 둔 쪽은 되돌려 둔다 — 다음 턴이 사본을 맞출 때 남은 것을 보류로 옮기므로, 빈 쪽이 보류에 실려 남지 않게
+			await hidden?.restore().catch(() => {});
 			workOf.delete(turn.id);
 		}
 	};
@@ -983,7 +1020,7 @@ export const useDeck = create<S>()((set, get) => ({
 		const p = get().pins.find((x) => x.id === id);
 		if (!p) return;
 		const by = from?.by ?? me();
-		await get().send(tNow("pinSendText").replace("{name}", p.by || by), [], true, { by, current: p.slide, talkKey: from ? from.talkKey : get().talkKey, pins: [p], runner: from?.runner, pool: from ? from.pool : hostPool(), scope: from?.scope });
+		await get().send(tNow("pinSendText").replace("{name}", p.by || by), [], true, { by, current: p.slide, talkKey: from ? from.talkKey : get().talkKey, pins: [p], runner: from?.runner, pool: from ? from.pool : hostPool(), scope: from?.scope, hide: from?.hide });
 	},
 
 	send: async (text, attachments = [], force = false, from) => {
