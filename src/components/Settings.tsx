@@ -13,6 +13,7 @@ import { type ImageProvider, LEVELS, type Level, type Template, templateId, useS
 import { addTemplateFromPath, saveTemplateFile, TEMPLATE_EXT } from "../lib/templates";
 import { useDeck } from "../lib/store";
 import { stopHost } from "../lib/collab";
+import { SharePanel } from "./Collab";
 import { useUpdate } from "../lib/updater";
 
 type Tab = "general" | "templates" | "claude" | "image" | "connect" | "collab" | "update";
@@ -400,13 +401,11 @@ function Collab() {
 				// 끄면 열어 둔 같이 보기도 닫는다 — 꺼진 뒤에도 브라우저가 붙어 있으면 안 된다
 				if (!v) stopHost().catch(() => {});
 			}} /><span className="note" style={{ whiteSpace: "normal" }}>{t("collabUseHint")}</span></Row>
-			{s.collab.on && (
-				<>
-					<Row k={t("myName")}><input className="field" style={{ maxWidth: 200 }} placeholder={t("myNamePh")} value={s.me} onChange={(e) => set((x) => ({ ...x, me: e.target.value }))} /></Row>
-					<Row k=""><span className="note" style={{ whiteSpace: "normal" }}>{t("myNameNote")}</span></Row>
-					<Row k=""><span className="note" style={{ whiteSpace: "normal" }}>{t("shareWhere")}</span></Row>
-				</>
-			)}
+			<Row k={t("myName")}><input className="field" style={{ maxWidth: 200 }} placeholder={t("myNamePh")} value={s.me} onChange={(e) => set((x) => ({ ...x, me: e.target.value }))} /></Row>
+			<Row k=""><span className="note" style={{ whiteSpace: "normal" }}>{t("myNameNote")}</span></Row>
+			{/* 공유 — 제목 줄 「공유」와 같은 것. 덱이 없어도 켤 수 있다(켜 둔 뒤 연 덱이 공유된다) */}
+			<Row k={t("shareBtn")}><div className="share share-set"><SharePanel bare /></div></Row>
+			<Row k=""><span className="note" style={{ whiteSpace: "normal" }}>{t("shareWhere")}</span></Row>
 		</>
 	);
 }

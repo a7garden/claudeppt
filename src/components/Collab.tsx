@@ -139,8 +139,9 @@ function MembersPop() {
 	);
 }
 
-/** 공유 창 — 꺼져 있으면 시작 한 번, 켜져 있으면 초대 링크 하나가 맨 위. 링크 더 만들기 · 브라우저 팀원은 펼쳐서 */
-function SharePanel() {
+/** 공유 창 — 꺼져 있으면 시작 한 번, 켜져 있으면 초대 링크 하나가 맨 위. 링크 더 만들기 · 브라우저 팀원은 펼쳐서.
+ *  「설정 › 협업」도 같은 것을 쓴다(bare: 제목 · 이름 칸은 설정 쪽 줄이 맡는다) — 2026.11.27 : 공유를 제목 줄에만 두니 덱을 열기 전에는 공유를 만들 곳이 없었다 */
+export function SharePanel({ bare }: { bare?: boolean }) {
 	const t = useT();
 	const { info, members } = useCollab();
 	const me = useSettings((s) => s.s.me);
@@ -162,12 +163,14 @@ function SharePanel() {
 	if (!info) {
 		return (
 			<>
-				<b className="share-h">{t("shareTitle")}</b>
+				{!bare && <b className="share-h">{t("shareTitle")}</b>}
 				<p className="note">{t("shareIntro")}</p>
-				<label className="share-name">
-					<span>{t("myName")}</span>
-					<input className="field" value={me} placeholder={t("myNamePh")} onChange={(e) => setMe(e.target.value)} />
-				</label>
+				{!bare && (
+					<label className="share-name">
+						<span>{t("myName")}</span>
+						<input className="field" value={me} placeholder={t("myNamePh")} onChange={(e) => setMe(e.target.value)} />
+					</label>
+				)}
 				<button className="send share-go" disabled={busy} onClick={() => run(async () => {
 					// 공유는 팀원 세션(요청 · 판에 보낸 사람)과 함께 간다 — 「설정 › 협업 쓰기」를 같이 켠다
 					useSettings.getState().set((x) => ({ ...x, collab: { ...x.collab, on: true } }));

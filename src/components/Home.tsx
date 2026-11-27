@@ -9,24 +9,8 @@ import { openAny, startNew } from "../lib/flows";
 import { useT } from "../lib/i18n";
 import { useSettings } from "../lib/settings";
 import { useDeck } from "../lib/store";
-import { call } from "../lib/transport";
+import { inviteInClip, joinShared } from "../lib/join";
 import { originOf, type RunnerState, setMine, useRunners } from "../lib/runner";
-
-/** 공유 덱에 앱으로 들어간다 — 새 창이 뜬다. 들어간 덱 주인을 남겨 다음에는 그것만으로 (기기 쿠키가 앱에 남는다).
- *  앱 링크(claudeppt://<열쇠>)면 열쇠를, 브라우저 링크면 주소를 남긴다 (p2p.rs canon) */
-async function joinShared(raw: string) {
-	const url = raw.trim();
-	if (!url) return false;
-	try {
-		const canon = await call<string>("collab_join", { url });
-		const at = canon.startsWith("claudeppt:") ? canon : canon + "/";
-		useSettings.getState().set((s) => ({ ...s, shared: [{ url: at, at: Date.now() }, ...s.shared.filter((x) => x.url !== at)].slice(0, 12) }));
-		return true;
-	} catch (e) {
-		useDeck.getState().notify(String(e), "err");
-		return false;
-	}
-}
 
 export default function Home() {
 	const t = useT();
@@ -40,6 +24,16 @@ export default function Home() {
 	// 공유 덱 열기 — 초대 링크 칸
 	const [joining, setJoining] = useState(false);
 	const [link, setLink] = useState("");
+	// 복사해 둔 초대 링크 (2026.11.27) — 메신저에서 링크를 복사하고 앱으로 오면 한 번 눌러 들어가게. 「아니요」 한 링크는 다시 묻지 않는다
+	const [clip, setClip] = useState<string | null>(null);
+	const asked = useRef(new Set<string>());
+	useEffect(() => {
+		const look = () => inviteInClip().then((u) => setClip(u && !asked.current.has(u) ? u : null));
+		look();
+		addEventListener("focus", look);
+		return () => removeEventListener("focus", look);
+	}, []);
+	const joinClip = async (u: string) => { asked.current.add(u); setClip(null); await joinShared(u); };
 	// 공유 덱 목록의 덱 주인 — 앱 링크는 열쇠 대신 「앱끼리 연결」, 브라우저 링크는 주소
 	const where = (u: string) => (u.startsWith("claudeppt:") ? t("sharedViaApp") : u.replace(/^https?:\/\//, "").replace(/\/$/, ""));
 
@@ -112,8 +106,15 @@ export default function Home() {
 					)}
 					<button onClick={pickPptx}>{t("openPptx")}<kbd>Ctrl O</kbd></button>
 					<button onClick={pickDeck}>{t("openDeck")}<kbd>Ctrl ⇧ O</kbd></button>
-					<button onClick={() => setJoining(!joining)} aria-expanded={joining}>{t("joinShared")}</button>
+					<button onClick={() => { if (!joining) inviteInClip().then((u) => u && setLink((v) => v || u)); setJoining(!joining); }} aria-expanded={joining}>{t("joinShared")}</button>
 				</div>
+				{clip && !joining && (
+					<div className="join-clip" role="status">
+						<span>{t("joinClip")}</span>
+						<button className="send" onClick={() => joinClip(clip)}>{t("joinGo")}</button>
+						<button onClick={() => { asked.current.add(clip); setClip(null); }}>{t("joinClipNo")}</button>
+					</div>
+				)}
 				{joining && (
 					<form className="join-row" onSubmit={async (e) => { e.preventDefault(); if (await joinShared(link)) { setLink(""); setJoining(false); } }}>
 						<input className="field" autoFocus value={link} onChange={(e) => setLink(e.target.value)} placeholder={t("joinPh")} aria-label={t("joinShared")}

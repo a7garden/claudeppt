@@ -44,6 +44,14 @@ pub struct AppState {
 
 pub fn run() {
 	tauri::Builder::default()
+		// 맨 먼저 — 앱이 떠 있을 때 두 번째로 켜진 것(초대 링크를 눌렀을 때)은 링크만 떠 있는 앱에 넘기고 곧바로 꺼진다 (collab.rs links_opened)
+		.plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
+			if let Some(w) = app.get_webview_window("main") {
+				let _ = w.unminimize();
+				let _ = w.set_focus();
+			}
+		}))
+		.plugin(tauri_plugin_deep_link::init())
 		.plugin(tauri_plugin_opener::init())
 		.plugin(tauri_plugin_dialog::init())
 		.plugin(tauri_plugin_updater::Builder::new().build())
@@ -53,7 +61,17 @@ pub fn run() {
 		.manage(collab::Collab::default())
 		.manage(runner::Runners::default())
 		.manage(p2p::P2p::default())
+		.manage(collab::JoinLinks::default())
 		.setup(|app| {
+			// 초대 링크(claudeppt://…)로 켜졌거나, 떠 있는 동안 링크가 눌렸다 — 설치 프로그램이 Windows 에 claudeppt: 를 이 앱으로 적어 둔다 (tauri.conf.json)
+			{
+				use tauri_plugin_deep_link::DeepLinkExt;
+				let h = app.handle().clone();
+				app.deep_link().on_open_url(move |e| collab::links_opened(&h, e.urls().into_iter().map(|u| u.to_string())));
+				if let Ok(Some(urls)) = app.deep_link().get_current() {
+					collab::links_opened(app.handle(), urls.into_iter().map(|u| u.to_string()));
+				}
+			}
 			// 통로를 못 열어도 앱은 그대로 쓴다 — 바깥 제어만 안 된다
 			if let Err(e) = control::start(app.handle()) {
 				eprintln!("제어 통로를 열지 못했다: {e}");
@@ -117,6 +135,7 @@ pub fn run() {
 			collab::collab_tools,
 			collab::collab_join,
 			collab::collab_lan,
+			collab::join_links_take,
 			collab::claude_run_remote,
 			runner::runner_start,
 			runner::runner_stop,

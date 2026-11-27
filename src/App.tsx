@@ -46,6 +46,8 @@ export default function App() {
 	// 협업 브라우저 — 호스트 서버에 붙어 덱 · 대화를 받는다 (collab.ts)
 	useEffect(() => { if (loaded && remote) connect(); }, [loaded]);
 	useEffect(() => { if (loaded && !remote) resumeHost().catch(() => {}); }, [loaded]);
+	// 누른 초대 링크(claudeppt://…)로 공유 덱에 들어간다 (lib/join.ts)
+	useEffect(() => { if (loaded && !remote) import("./lib/join").then((j) => j.watchJoinLinks()).catch(() => {}); }, [loaded]);
 	// 내 PC 의 Claude 를 켜 둔 공유 덱에 다시 붙는다 (runner.ts)
 	useEffect(() => { if (loaded && !remote) import("./lib/runner").then((r) => r.initRunners()).catch(() => {}); }, [loaded]);
 	useEffect(() => {

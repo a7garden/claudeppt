@@ -479,6 +479,31 @@ pub fn join_label(origin: &str) -> String {
 	format!("join-{}", etag(origin.as_bytes()).trim_matches('"'))
 }
 
+/// 눌린 초대 링크 (2026.11.27) — 메신저 · 브라우저에서 claudeppt://… 를 누르면 Windows 가 이 앱을 그 링크와 함께 켠다.
+/// 앱이 떠 있으면 단일 실행(lib.rs)이 새로 켜지 않고 떠 있는 앱에 넘긴다. 들어가기는 주 창 화면이 한다(Home joinShared) —
+/// 들어간 덱을 「공유 덱」에 남기는 것도 거기라서. 화면이 아직 뜨기 전에 온 링크는 여기 쌓아 두었다가 화면이 가져간다
+#[derive(Default)]
+pub struct JoinLinks(Mutex<Vec<String>>);
+
+pub fn links_opened(app: &AppHandle, urls: impl IntoIterator<Item = String>) {
+	let urls: Vec<String> = urls.into_iter().filter(|u| crate::p2p::id_of(u).is_some()).collect();
+	if urls.is_empty() {
+		return;
+	}
+	app.state::<JoinLinks>().0.lock().unwrap().extend(urls);
+	if let Some(w) = app.get_webview_window("main") {
+		let _ = w.unminimize();
+		let _ = w.set_focus();
+		let _ = w.emit("join-links", ());
+	}
+}
+
+/// 쌓인 초대 링크를 가져간다 — 주 창 화면이 뜰 때와 「join-links」 를 받을 때
+#[tauri::command]
+pub fn join_links_take(state: State<JoinLinks>) -> Vec<String> {
+	std::mem::take(&mut *state.0.lock().unwrap())
+}
+
 /// 바깥 길에 쓸 수 있는 도구 — 화면이 안내 글을 고른다
 #[tauri::command]
 pub async fn collab_tools() -> crate::tunnel::Tools {

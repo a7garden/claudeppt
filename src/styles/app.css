@@ -405,6 +405,9 @@ span.node.head:hover { color: var(--bg); background: var(--text); box-shadow: no
 /* 공유 덱 열기 — 초대 링크 칸 한 줄과 안내 */
 .join-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 8px 10px; margin-top: 14px; max-width: 720px; }
 .join-row .dim { grid-column: 1 / -1; font-size: 12px; color: var(--faint); }
+.join-clip { display: flex; align-items: center; gap: 10px; margin-top: 14px; max-width: 720px; padding: 8px 8px 8px 14px; border-radius: var(--r-ctl); background: var(--raise); font-size: 13px; }
+.join-clip span { flex: 1; min-width: 0; }
+.join-clip button:not(.send) { color: var(--dim); font-size: 12.5px; }
 /* 공유 덱 — 들어간 적 있는 호스트. 미리보기가 없어(남의 PC 덱) 카드 대신 한 줄 칩 */
 .shared { padding-bottom: 28px; }
 .shared-list { display: flex; flex-wrap: wrap; gap: 8px; }
@@ -745,21 +748,22 @@ textarea.field { height: auto; padding: 8px 10px; line-height: 1.5; resize: vert
 .collab-members .st.on { color: var(--ok); }
 /* 공유 창 (Collab.tsx SharePanel) — 제목 줄 「공유」. 맨 위 초대 링크 하나가 주인공이고, 링크 더 만들기 · 브라우저 팀원은 펼쳐서 본다 */
 .pop.share { width: 400px; gap: 12px; padding: 14px; max-height: calc(100vh - 80px); overflow-y: auto; }
+.share-set { flex: 1; display: grid; gap: 12px; max-width: 460px; padding: 12px; border-radius: 8px; outline: 1px solid var(--hair-2); outline-offset: -1px; }
 .share-h { font-size: 14px; }
 .share-name { display: flex; align-items: center; gap: 8px; font-size: 12px; color: var(--dim); }
 .share-name .field { flex: 1; min-width: 0; }
 .share-go { justify-self: start; height: 32px; padding: 0 16px; }
-.pop.share .lbl { font-size: 12px; color: var(--dim); }
-.pop.share section { display: grid; gap: 6px; }
-.pop.share .field-row { display: flex; align-items: center; gap: 8px; }
-.pop.share .field-row .field { flex: 1; min-width: 0; font-size: 12px; }
-.pop.share .field-row .tun { flex: 1; font-size: 12px; color: var(--faint); }
-.pop.share .field-row .tun.on { color: var(--ok); }
-.pop.share .note { font-size: 11.5px; color: var(--dim); line-height: 1.5; margin: 0; }
-.pop.share .collab-members { border-top: 1px solid var(--hair); padding-top: 10px; }
-.pop.share .collab-members .check { font-size: 12px; margin-top: 2px; }
-.pop.share .rm { font-size: 12px; color: var(--faint); }
-.pop.share .rm:hover { color: var(--err); }
+.share .lbl { font-size: 12px; color: var(--dim); }
+.share section { display: grid; gap: 6px; }
+.share .field-row { display: flex; align-items: center; gap: 8px; }
+.share .field-row .field { flex: 1; min-width: 0; font-size: 12px; }
+.share .field-row .tun { flex: 1; font-size: 12px; color: var(--faint); }
+.share .field-row .tun.on { color: var(--ok); }
+.share .note { font-size: 11.5px; color: var(--dim); line-height: 1.5; margin: 0; }
+.share .collab-members { border-top: 1px solid var(--hair); padding-top: 10px; }
+.share .collab-members .check { font-size: 12px; margin-top: 2px; }
+.share .rm { font-size: 12px; color: var(--faint); }
+.share .rm:hover { color: var(--err); }
 .share-more { display: flex; gap: 14px; border-top: 1px solid var(--hair); padding-top: 10px; }
 .share-more button { font-size: 12px; color: var(--dim); display: inline-flex; align-items: center; gap: 6px; }
 .share-more button::after { content: "▾"; font-size: 9px; color: var(--faint); }
