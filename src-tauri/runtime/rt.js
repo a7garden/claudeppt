@@ -85,6 +85,8 @@
 		[data-deck-edit] .slide *:hover { outline: 1px solid rgba(229,72,45,.32); outline-offset: 1px; cursor: default }
 		[data-deck-edit] [data-deck-sel] { outline: 1.5px solid #e5482d !important; outline-offset: 1px }
 		[data-deck-edit] [contenteditable=true] { outline: 1.5px solid #e5482d !important; cursor: text }
+		[data-deck-edit][data-deck-cur=text] .slide *:hover { cursor: text }
+		[data-deck-edit][data-deck-cur=move] .slide *:hover { cursor: move }
 		[data-deck-place], [data-deck-place] * { cursor: crosshair !important }
 		[data-deck-paint], [data-deck-paint] * { cursor: copy !important }
 		#deck-ui { position: absolute; left: 0; top: 0; width: 0; height: 0; z-index: 2147483647; pointer-events: none }
@@ -311,7 +313,9 @@
 		el.focus();
 		const s = getSelection();
 		// all: true 면 글 전체를 고르고, "end" 면 글 끝에 커서
-		const r = at ? document.caretRangeFromPoint(at.x, at.y) : all ? document.createRange() : null;
+		let r = at ? document.caretRangeFromPoint(at.x, at.y) : all ? document.createRange() : null;
+		// 누른 자리가 글 밖(상자 여백)이면 커서가 고치는 요소 밖에 서서 친 글이 엉뚱한 곳에 들어간다 — 글 끝에 둔다
+		if (at && (!r || !el.contains(r.startContainer))) { r = document.createRange(); r.selectNodeContents(el); r.collapse(false); }
 		if (r) {
 			if (all) r.selectNodeContents(el);
 			if (all === "end") r.collapse(false);
@@ -1204,6 +1208,20 @@
 		if (by) { out.h = by.h; out.gy = by.at; }
 		return out;
 	};
+	// 상자 가장자리 띠 — 이 안을 누르면 글이 아니라 상자를 잡는다 (PowerPoint 의 테두리 잡기)
+	const RIM = 6;
+	/** (x, y) 에서 누르면 고칠 글 요소 — 글 요소의 네모 안이고 상자 가장자리 띠 밖일 때만. 아직 고르지 않은 그룹 · 표는 빼고 지금처럼 고르기부터 한다 */
+	const textHit = (t, m, x, y) => {
+		// 그룹은 PowerPoint 처럼 그룹 → 안의 도형 → 글 차례로 들어간다: 그룹 안 도형을 이미 골라 둔 때만 글을 바로 고친다
+		if (!t || t === root || (m && m.hasAttribute("data-group") && !(sel && sel !== m && m.contains(sel) && sel.contains(t)))) return null;
+		const tt = textAt(t, null);
+		if (!tt || !root.contains(tt) || tt.closest("table") || !(tt.innerText || "").trim()) return null;
+		const r = tt.getBoundingClientRect();
+		if (x < r.left || x > r.right || y < r.top || y > r.bottom) return null;
+		const b = (m && m.contains(tt) ? m : tt).getBoundingClientRect();
+		if (x - b.left < RIM || b.right - x < RIM || y - b.top < RIM || b.bottom - y < RIM) return null;
+		return tt;
+	};
 	const showGuides = (z, g) => {
 		Object.assign(gx.style, g?.gx != null ? { display: "block", left: z.S.left + g.gx - 0.5 + "px", top: z.S.top + "px", width: "1px", height: z.S.height + "px" } : { display: "none" });
 		Object.assign(gy.style, g?.gy != null ? { display: "block", top: z.S.top + g.gy - 0.5 + "px", left: z.S.left + "px", height: "1px", width: z.S.width + "px" } : { display: "none" });
@@ -1279,6 +1297,14 @@
 				e.preventDefault();
 				return;
 			}
+		}
+		// 글 위를 누름 — 고르지 않은 상자라도 바로 그 자리에 커서를 두고 고친다. 끌면 글자를 고른다 (PowerPoint 와 같다).
+		// 누름의 기본 동작을 막지 않아야 웹뷰가 커서를 놓고 끌어 고르기를 이어 간다. 상자를 옮기려면 가장자리 띠 · 글 밖 여백을 잡는다.
+		// 2026.11.27 : 전에는 첫 누름은 상자 고르기, 450ms 뒤 한 번 더 눌러야 고쳤다
+		const tt = e.button === 0 && !e.shiftKey && !e.ctrlKey && !edit ? textHit(t, m, e.clientX, e.clientY) : null;
+		if (tt) {
+			picked = Date.now();
+			return startEdit(tt, { x: e.clientX, y: e.clientY });
 		}
 		// 고른 상자를 다시 누름 — 끌면 옮기고, 끌지 않고 떼면 누른 자리 글 고치기. 두 번 누르기의 둘째 누름과 가르려고 시간을 본다
 		if (m && m === sel && e.button === 0 && Date.now() - picked > 450) {
@@ -1371,7 +1397,15 @@
 			Object.assign(ghost.style, { display: "", left: S.left + band.r.x + "px", top: S.top + band.r.y + "px", width: band.r.w + "px", height: band.r.h + "px" });
 			return;
 		}
-		if (!drag) return;
+		if (!drag) {
+			// 손을 떼고 움직이는 중 — 누르면 무엇이 될지 커서로 보인다: 글 위는 I자(고치기), 상자 가장자리 띠는 이동
+			if (mode === "edit" && !edit && !e.buttons) {
+				const t = e.target, m = t && t !== root && root.contains(t) ? boxOf(t) : null;
+				const cur = textHit(t, m, e.clientX, e.clientY) ? "text" : m && canMove(m) && !(m.hasAttribute("data-group") && m !== sel) ? "move" : "";
+				if (document.documentElement.dataset.deckCur !== cur) document.documentElement.dataset.deckCur = cur;
+			}
+			return;
+		}
 		let dx = e.clientX - drag.x, dy = e.clientY - drag.y;
 		if (!drag.moved && Math.hypot(dx, dy) < 3) return;
 		// Shift 를 누르고 끌면 가로 · 세로 한쪽으로만 (PowerPoint 와 같다)
