@@ -386,10 +386,14 @@ onIntent("direct", async (from, a) => {
 	const op = a.op ?? {};
 	const path = a.path;
 	const okPath = path === null || (Array.isArray(path) && path.length < 64 && path.every((n: unknown) => Number.isInteger(n) && (n as number) >= 0));
-	const okOp =
-		(op.t === "edit" && typeof op.html === "string" && op.html.length < 200_000) ||
-		(op.t === "patch" && op.style && typeof op.style === "object" && Object.values(op.style).every((v) => typeof v === "string")) ||
-		op.t === "remove";
+	const okPathOf = (p: unknown) => p === null || (Array.isArray(p) && p.length < 64 && p.every((n: unknown) => Number.isInteger(n) && (n as number) >= 0));
+	const okOne = (o: { t?: unknown; html?: unknown; style?: unknown } | null | undefined) => !!o && (
+		(o.t === "edit" && typeof o.html === "string" && o.html.length < 200_000) ||
+		(o.t === "patch" && !!o.style && typeof o.style === "object" && Object.values(o.style).every((v) => typeof v === "string")) ||
+		o.t === "remove");
+	// 여러 개 고르고 옮기기 · 맞춤은 묶음 하나로 온다 (2026.11.27). 묶음 안도 팀원에게 허락한 세 가지(edit · patch · remove)뿐이다
+	const okOp = okOne(op) || (op.t === "batch" && Array.isArray(op.ops) && op.ops.length > 0 && op.ops.length <= 200 &&
+		op.ops.every((x: { path?: unknown; op?: { t?: unknown } } | null) => !!x && okPathOf(x.path) && okOne(x.op)));
 	if (typeof a.slideId !== "string" || !okPath || !okOp) throw new Error("bad edit");
 	mustOwn(from, a.slideId);
 	// base — 팀원이 본 쪽 그림의 표식. 그 뒤 남이 그 쪽을 바꿨으면 받지 않는다 (store applyDirect)

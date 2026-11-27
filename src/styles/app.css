@@ -208,7 +208,40 @@ input, textarea, select { font: inherit; color: inherit; }
 /* 무대 — 슬라이드가 화면을 갖는다 */
 .stage { position: relative; display: grid; grid-template-rows: auto 1fr; min-width: 0; min-height: 0; background: var(--well); }
 /* 무대 = 서식 띠(접으면 빈 칸) + 슬라이드 자리. 띠를 펴면 슬라이드 자리만 줄어든다 — 도구 띠 · 판 알림은 슬라이드 자리 기준으로 놓인다 */
-.stage-main { position: relative; display: grid; grid-template-rows: auto 1fr; min-width: 0; min-height: 0; }
+.stage-main { position: relative; display: grid; grid-template-rows: auto 1fr auto auto; min-width: 0; min-height: 0; }
+/* 상태 띠 — PowerPoint 아래쪽 표시줄: 쪽 번호 · 메모 · 슬라이드 쇼 · 확대/축소 */
+.stage-status { display: flex; align-items: center; gap: 2px; height: 28px; padding: 0 8px; font-size: 12px; color: var(--dim); border-top: 1px solid var(--hair); background: var(--raise); }
+.stage-status .grow { flex: 1; }
+.stage-status .sep { width: 1px; height: 14px; margin: 0 6px; background: var(--hair); }
+.stage-status button { display: inline-flex; align-items: center; gap: 5px; height: 22px; padding: 0 6px; border-radius: var(--r-ctl); color: var(--dim); font-size: 12px; }
+.stage-status button:hover { color: var(--text); background: var(--hair-2); }
+.stage-status button[aria-pressed="true"] { color: var(--text); }
+.stage-status button svg { fill: none; stroke: currentColor; stroke-width: 1.5; stroke-linecap: round; stroke-linejoin: round; }
+.stage-status .pct { min-width: 46px; justify-content: center; }
+/* 찾기 · 바꾸기 · 링크 — 무대 오른쪽 위에 뜨는 작은 창 */
+.findbar { position: absolute; z-index: 5; top: 8px; right: 12px; width: 340px; display: flex; flex-direction: column; gap: 6px; padding: 8px; border-radius: var(--r-float); background: var(--raise-2); outline: 1px solid var(--hair-2); box-shadow: var(--shadow); font-size: 12px; }
+.findbar .row { display: flex; align-items: center; gap: 4px; }
+.findbar input:not([type="checkbox"]) { flex: 1; min-width: 0; height: 28px; padding: 0 8px; font-size: 13px; color: var(--text); background: var(--bg); border: 1px solid var(--hair); border-radius: var(--r-ctl); }
+.findbar button { height: 26px; min-width: 26px; padding: 0 6px; border-radius: var(--r-ctl); color: var(--dim); }
+.findbar button:hover:not(:disabled) { color: var(--text); background: var(--hair-2); }
+.findbar button:disabled { opacity: 0.4; }
+.findbar button.wide { padding: 0 10px; outline: 1px solid var(--hair); }
+.findbar button.link { color: var(--accent); }
+.findbar .meta { color: var(--dim); }
+.findbar .meta label { display: inline-flex; align-items: center; gap: 5px; }
+.findbar .grow { flex: 1; }
+/* 발표자 메모 — 슬라이드 아래 칸 (PowerPoint 「메모」) */
+.notes-pane { border-top: 1px solid var(--hair); background: var(--raise); }
+.notes-pane textarea { display: block; width: 100%; height: 96px; padding: 10px 14px; resize: vertical; border: 0; outline: 0; background: transparent; color: var(--text); font: 13px/1.55 inherit; }
+.notes-pane textarea::placeholder { color: var(--faint); }
+/* 슬라이드 쇼 — 창을 가득 채운 검은 바탕 */
+.show { position: fixed; inset: 0; z-index: 1000; background: #000; cursor: none; }
+.show:hover { cursor: default; }
+.show-sheet { position: absolute; }
+.show-sheet iframe { display: block; border: 0; background: #fff; }
+.show-cover { position: absolute; inset: 0; }
+.show-end { position: absolute; left: 0; right: 0; top: 24px; text-align: center; color: #bbb; font-size: 14px; }
+.show-no { position: absolute; right: 14px; bottom: 10px; color: rgba(255, 255, 255, 0.35); font-size: 12px; }
 .stage-banner { height: 0; overflow: visible; z-index: 3; }
 .canvas { position: relative; min-height: 0; overflow: hidden; }
 .sheet { position: absolute; transform-origin: 0 0; box-shadow: 0 1px 0 var(--hair), var(--shadow); }
@@ -799,6 +832,9 @@ textarea.field { height: auto; padding: 8px 10px; line-height: 1.5; resize: vert
 .assign-tag i.more { color: var(--dim); background: var(--hair); }
 .assign-tag.mine i { box-shadow: 0 0 0 1.5px var(--text); }
 .rail-item.notmine .thumb { opacity: 0.45; }
+/* 숨긴 슬라이드 — 흐리게, 번호에 빗금 */
+.rail-item.skip .thumb { opacity: 0.4; }
+.rail-item.skip .no > span:first-child { text-decoration: line-through; }
 .rail-item.notmine:hover .thumb, .rail-item.notmine.on .thumb { opacity: 0.8; }
 /* 담당 거르기 · 담당표 (2026.11.27) — 쪽 목록 머리. 담당이 있거나 덱 주인이 공유 중일 때만 */
 .rail-filter { display: flex; flex-wrap: wrap; gap: 4px; margin: 0 0 10px 24px; }
@@ -963,6 +999,10 @@ textarea.field { height: auto; padding: 8px 10px; line-height: 1.5; resize: vert
 .ribbon .rb-grid button[aria-pressed="true"] { background: color-mix(in srgb, var(--accent) 30%, transparent); outline-color: var(--accent); }
 .rb-sym { display: grid; grid-template-columns: repeat(8, 1fr); gap: 2px; }
 .ribbon .rb-sym button { height: 26px; min-width: 0; padding: 0; font-size: 14px; color: var(--text); }
+/* 도형 갤러리: 색 칸(rb-grid)보다 큰 단추에 선 그림 */
+.rb-shapes { grid-template-columns: repeat(6, 1fr); gap: 2px; margin-bottom: 10px; }
+.ribbon .rb-shapes button { height: 30px; outline: none; color: var(--text); }
+.ribbon .rb-shapes button svg { width: 18px; height: 18px; }
 .rb-pop { position: relative; display: inline-flex; }
 .rb-chip { position: relative; }
 .rb-bar { position: absolute; left: 7px; right: 16px; bottom: 3px; height: 3px; border-radius: 1px; outline: 1px solid var(--hair); }

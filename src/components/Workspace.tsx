@@ -11,6 +11,7 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { deckUrl } from "../lib/api";
 import { type Deck } from "../lib/deck";
+import { type Op } from "../lib/edits";
 import { SLIDE_SANDBOX, ask, onFrame, tell } from "../lib/frames";
 import { useT } from "../lib/i18n";
 import { anchor, bbox, MARK, type Shape, shapePath, tiny, type Tool } from "../lib/markup";
@@ -25,6 +26,8 @@ import { CheckBar, CheckMarks, PageGuides } from "./CheckMarks";
 import { remote } from "../lib/transport";
 import { useSettings } from "../lib/settings";
 import Talk, { openTalk, useTalkFold } from "./Talk";
+import { NotesPane, SlideShow, StageStatus, startShow, useView, zoomStep } from "./Show";
+import { FindBar, useFind } from "./Find";
 import { useSync } from "./Trust";
 
 /** 담당이 아니라 내용 없이 자리만 받은 쪽 (2026.11.27 collab.rs limit_view) — 쪽 그림 대신. 덱 주인이 「담당 쪽만 보이기」를 켠 사람에게만 생긴다 */
@@ -144,6 +147,22 @@ function toolKey(raw: string): boolean {
 	return true;
 }
 
+/** Ctrl+F 찾기 · Ctrl+H 바꾸기 · Ctrl+K 링크 · Ctrl+M 새 슬라이드 (PowerPoint 와 같다). 앱 화면에서 누른 것도 슬라이드 창이 넘겨준 것도. 처리했으면 true */
+function barKey(raw: string): boolean {
+	const k = raw.toLowerCase();
+	// Ctrl+M 새 슬라이드 (지금 쪽 다음)
+	if (k === "m" || k === "newslide") { const st = useDeck.getState(); void st.addSlide(st.current + 1); return true; }
+	const mode = k === "f" || k === "find" ? "find" : k === "h" || k === "replace" ? "replace" : k === "k" || k === "link" ? "link" : null;
+	if (!mode) return false;
+	useFind.getState().show(mode);
+	return true;
+}
+
+/** F5 처음부터 · Shift+F5 지금 쪽부터 슬라이드 쇼 (PowerPoint 와 같다). 웹뷰의 새로 고침 대신 */
+function showKey(here: boolean) {
+	startShow(here ? undefined : 0);
+}
+
 /** Esc — 비교를 닫고, 지난 판을 보는 중이면 지금으로 돌아오고, 아니면 고르기 도구로. 앱 화면에서 누른 것도 슬라이드 창이 넘겨준 것도 */
 function escKey() {
 	const st = useDeck.getState();
@@ -185,6 +204,7 @@ function slideItems(i: number, n: number, t: ReturnType<typeof useT>): MenuItem[
 		{ label: t("insertAbove"), run: () => st.addSlide(i) },
 		{ label: t("insertBelow"), run: () => st.addSlide(i + 1) },
 		{ label: t("duplicate"), run: () => st.duplicateSlide(i) },
+		{ label: t("skipSlide"), checked: !!st.deck?.slides[i]?.skip, run: () => st.toggleSkip(i) },
 		"-",
 		{ label: t("moveUp"), run: () => st.moveSlide(i, i - 1), disabled: i === 0 },
 		{ label: t("moveDown"), run: () => st.moveSlide(i, i + 2), disabled: i >= n - 1 },
@@ -260,6 +280,8 @@ export default function Workspace() {
 	useEffect(() => {
 		const k = (e: KeyboardEvent) => {
 			const tgt = e.target as Element;
+			if (e.key === "F5") { showKey(e.shiftKey); e.preventDefault(); return; }
+			if (e.ctrlKey && !e.altKey && barKey(e.key)) { e.preventDefault(); return; }
 			if (tgt.closest?.("input, textarea, [contenteditable]") || e.ctrlKey || e.altKey || e.metaKey) return;
 			if (!toolKey(e.key) && !navKey(e.key)) {
 				if (e.key === "Escape") escKey();
@@ -276,8 +298,10 @@ export default function Workspace() {
 	// 대화를 접으면 등뼈 폭만 남는다 — 무대가 그만큼 넓어진다. 펼 때는 접기 전 너비로
 	const folded = useTalkFold((s) => s.folded);
 	const sideW = folded ? 44 : talkW;
+	const show = useView((s) => s.show);
 	return (
 		<main className="work" style={{ gridTemplateColumns: `${railW}px minmax(0, 1fr) ${sideW}px` }}>
+			{show && <SlideShow />}
 			<Rail />
 			<Stage />
 			<Talk />
@@ -365,13 +389,14 @@ function Rail() {
 				// 판 비교 중이면 고른 판과 다른 쪽에 점선 테두리 · 그 뒤에 생긴 쪽에 「새」 — 바뀐 쪽만 골라 넘겨 볼 수 있게
 				const vs = !preview ? vdiff?.slides[sl.id] : undefined;
 				return (
-					<div key={sl.id} className={"rail-item" + (i === current ? " on" : "") + (dropAt === i ? " drop-before" : "") + (vs ? " drift" : "") + (role === "assigned" && !isMine ? " notmine" : "") + (sl.hidden ? " locked" : "")}
+					<div key={sl.id} className={"rail-item" + (i === current ? " on" : "") + (dropAt === i ? " drop-before" : "") + (vs ? " drift" : "") + (role === "assigned" && !isMine ? " notmine" : "") + (sl.hidden ? " locked" : "") + (sl.skip ? " skip" : "")}
 						onDragOver={(e) => { if (drag != null) { e.preventDefault(); setDropAt(i); } }}
 						onDrop={() => { if (drag != null) move(drag, i); setDrag(null); setDropAt(null); }}
 						// 누른 쪽을 지금 쪽으로 — PowerPoint 처럼 메뉴가 가리키는 쪽이 무대에 보인다
 						onContextMenu={(e) => { setCurrent(i); openMenu(e, preview ? previewItems(t) : [...slideItems(i, live.slides.length, t), ...assignItems(sl.id, t)]); }}>
 						<div className="no">
-							<span>{i + 1}</span>
+							{/* 숨긴 슬라이드는 PowerPoint 처럼 번호에 빗금 */}
+							<span title={sl.skip ? t("skipSlide") : undefined}>{i + 1}</span>
 							{n > 0 && <span className="pins" title={`${t("pins")} ${n}`} />}
 							{vs && <span className="drift">{vs === "added" ? t("vsAdded") : t("vsChangedOne")}</span>}
 							<AssignTag slideId={sl.id} />
@@ -450,6 +475,7 @@ function Stage() {
 	selNow.current = selInfo;
 	const [placing, setPlacing] = useState<string | null>(null);
 	const ribbon = useRibbon((s) => s.shown);
+	const notesOpen = useView((s) => s.notes);
 	const slide = deck.slides[Math.min(current, deck.slides.length - 1)];
 
 	useLayoutEffect(() => {
@@ -459,8 +485,17 @@ function Stage() {
 		return () => ro.disconnect();
 	}, []);
 	const pad = 36;
-	const scale = Math.max(0.05, Math.min((box.w - pad * 2) / deck.size.w, (box.h - pad * 2) / deck.size.h));
-	const left = (box.w - deck.size.w * scale) / 2, top = (box.h - deck.size.h * scale) / 2;
+	// 맞춤 배율 · 지금 배율. 확대해서 쪽이 무대보다 크면 무대를 굴려 본다 (scrolls)
+	const fit = Math.max(0.05, Math.min((box.w - pad * 2) / deck.size.w, (box.h - pad * 2) / deck.size.h));
+	const zoom = useView((s) => s.zoom);
+	const scale = flow ? fit : zoom ?? fit;
+	const fitRef = useRef(fit);
+	fitRef.current = fit;
+	const W = deck.size.w * scale, H = deck.size.h * scale;
+	const scrollX = W + pad * 2 > box.w, scrollY = H + pad * 2 > box.h;
+	const scrolls = useRef(false);
+	scrolls.current = !flow && (scrollX || scrollY);
+	const left = scrollX ? pad : (box.w - W) / 2, top = scrollY ? pad : (box.h - H) / 2;
 
 	// 직접 편집 — 무대 iframe 이 보낸 것만 받는다
 	useEffect(() => onFrame((m, src) => {
@@ -470,8 +505,13 @@ function Stage() {
 		const edit = (path: number[] | null, op: Parameters<typeof applyDirect>[2]) => applyDirect(sid, path, op, undefined, seen.rev);
 		const now = src === win.current;
 		// 슬라이드 창 위에서 굴린 휠 · 누른 넘김 키 (rt.js 가 넘겨준다) · 고른 것의 서식 · 넣는 중인 것
-		if (now && m.t === "wheel") return wheel(m.dy);
-		if (now && m.t === "key") return void (m.key === "Escape" ? escKey() : navKey(m.key) || toolKey(m.key));
+		// 휠: Ctrl 이면 확대/축소, 확대해서 쪽이 무대보다 크면 무대를 굴린다, 아니면 쪽 넘기기
+		if (now && m.t === "wheel") {
+			if (m.ctrl) return zoomStep(m.dy < 0 ? 1 : -1, fitRef.current);
+			if (scrolls.current && canvas.current) return void canvas.current.scrollBy({ left: m.dx || 0, top: m.dy });
+			return wheel(m.dy);
+		}
+		if (now && m.t === "key") return void (m.key === "Escape" ? escKey() : m.key === "F5" ? showKey(!!m.shift) : m.bar ? barKey(m.key) : navKey(m.key) || toolKey(m.key));
 		if (now && m.t === "sel") { selNow.current = m.info; return setSelInfo(m.info); }
 		if (now && m.t === "placing") return setPlacing(m.kind);
 		// 고치는 중 띠의 잘라내기 · 복사: 고른 글자를 클립보드에 쓴다. 단추를 누른 직후라 사용자 활성이 남아 있어 쓸 수 있다
@@ -481,12 +521,14 @@ function Stage() {
 		if (m.t === "redo") return void useDeck.getState().redo();
 		if (m.t === "copy") clip = { html: m.html, slide: sid, n: 0 };
 		else if (m.t === "pasteReq") { if (now) paste(sid); }
-		else if (m.t === "edit") edit(m.path, { t: "edit", html: m.html });
-		else if (m.t === "patch") edit(m.path, { t: "patch", style: m.style });
-		else if (m.t === "remove") edit(m.path, { t: "remove" });
-		else if (m.t === "append") edit([], { t: "append", html: m.html });
-		else if (m.t === "after") edit(m.path, { t: "after", html: m.html });
-		else if (m.t === "order") edit(m.path, { t: "order", to: m.to });
+		// 여러 요소를 한 번에 고친 것 (여러 개 고르기 · 묶기) — 파일 한 번 쓰기 · 되돌리기 한 칸
+		else if (m.t === "batch" && Array.isArray(m.ops)) {
+			const ops = m.ops.map((o: FrameEdit) => opOf(o)).filter((x: ReturnType<typeof opOf>): x is NonNullable<typeof x> => !!x);
+			if (ops.length === m.ops.length) edit([], { t: "batch", ops });
+		} else {
+			const one = opOf(m as FrameEdit);
+			if (one) edit(one.path, one.op);
+		}
 	}), [preview]);
 	// 쪽을 넘기거나 지난 판을 보면 옛 쪽의 고른 것을 내려놓는다 — 새 창이 다시 알린다
 	useEffect(() => { setSelInfo(null); setPlacing(null); }, [slide?.id, preview]);
@@ -554,7 +596,12 @@ function Stage() {
 				{ label: t("rbCopy"), kbd: "Ctrl+C", run: () => cmd("copy") },
 				{ label: t("rbDup"), kbd: "Ctrl+D", run: () => cmd("dup") },
 				...(selNow.current?.abs ? [{ label: t("rbFront"), run: () => cmd("arrange", "front") }, { label: t("rbBack"), run: () => cmd("arrange", "back") }] : []),
-				{ label: `${t("removeEl")} <${hit.tag}>`, kbd: "Delete", danger: true, run: () => applyDirect(slide.id, hit.path, { t: "remove" }, undefined, win.current ? owner.current.get(win.current)?.rev : undefined) },
+				...(selNow.current?.groupable ? [{ label: t("rbGroup"), kbd: "Ctrl+G", run: () => cmd("group") }] : []),
+				...(selNow.current?.grouped ? [{ label: t("rbUngroup"), kbd: "Ctrl+Shift+G", run: () => cmd("ungroup") }] : []),
+				// 여러 개를 골랐으면 고른 것 모두를 지운다 (Delete 와 같다)
+				(selNow.current?.count ?? 0) > 1
+					? { label: t("rbDelete"), kbd: "Delete", danger: true, run: () => cmd("remove") }
+					: { label: `${t("removeEl")} <${hit.tag}>`, kbd: "Delete", danger: true, run: () => applyDirect(slide.id, hit.path, { t: "remove" }, undefined, win.current ? owner.current.get(win.current)?.rev : undefined) },
 			] : []),
 			...(mode === "edit" && clip && !flow && !compare ? [{ label: t("rbPaste"), kbd: "Ctrl+V", run: () => paste(slide.id) }] : []),
 			"-",
@@ -602,7 +649,10 @@ function Stage() {
 					</div>
 				)}
 			</div>
-			<div className="canvas" ref={canvas} onWheel={flow ? undefined : (e) => wheel(e.deltaY)} onContextMenu={stageMenu}>
+			<div className="canvas" ref={canvas} style={scrolls.current ? { overflow: "auto" } : undefined} onContextMenu={stageMenu}
+				onWheel={flow ? undefined : (e) => { if (e.ctrlKey) zoomStep(e.deltaY < 0 ? 1 : -1, fit); else if (!scrolls.current) wheel(e.deltaY); }}>
+				{/* 굴려 볼 때 오른쪽 · 아래 여백까지 닿게 하는 자리 */}
+				{scrolls.current && <div aria-hidden style={{ position: "absolute", left: 0, top: 0, width: W + pad * 2, height: H + pad * 2, pointerEvents: "none" }} />}
 				{flow ? <Flow deck={deck} revHash={preview?.hash} /> : box.w > 0 && (
 					<div className="sheet" style={{ left, top, width: deck.size.w * scale, height: deck.size.h * scale }}>
 						<div style={{ width: deck.size.w * scale, height: deck.size.h * scale, overflow: "hidden", position: "relative" }}>
@@ -624,7 +674,10 @@ function Stage() {
 			{!preview && box.w > 0 && (flow
 				// 이어 보기에서는 띠를 무대 위쪽에 띄워 둔다 — 첫 쪽 위 여백(FLOW_PAD)에 들어가고, 스크롤해도 그 자리에 남는다
 				? <StageTools left={(box.w - flowWidth(box.w, deck)) / 2} top={52} right={(box.w + flowWidth(box.w, deck)) / 2} onUndo={undoMark} canUndo={mine.length > 0} />
-				: <StageTools left={left} top={top} right={left + deck.size.w * scale} onUndo={undoMark} canUndo={mine.length > 0} onAsk={selInfo && !preview && !compare ? askSelected : undefined} />)}
+				: <StageTools left={scrolls.current ? 12 : left} top={scrolls.current ? 0 : top} right={scrolls.current ? box.w - 12 : left + deck.size.w * scale} onUndo={undoMark} canUndo={mine.length > 0} onAsk={selInfo && !preview && !compare ? askSelected : undefined} />)}
+			{!preview && !flow && <FindBar win={win} />}
+			{notesOpen && !flow && <NotesPane slideId={slide.id} />}
+			<StageStatus fit={fit} scale={scale} />
 			</div>
 		</section>
 	);
@@ -632,6 +685,20 @@ function Stage() {
 
 /** 복사한 요소 (Ctrl+C · 우클릭 복사) — 앱을 켠 동안만. 다른 쪽에도 붙인다. n 은 같은 쪽에 붙인 횟수 */
 let clip: { html: string; slide: string; n: number } | null = null;
+
+/** 슬라이드 창이 보낸 손 편집 한 가지 (rt.js 의 edit · patch · remove · append · after · order) */
+type FrameEdit = { t: string; path?: number[] | null; html?: string; style?: Record<string, string>; to?: number };
+/** 편집 메시지 → 원본에 쓸 op. 편집이 아니면 null */
+function opOf(m: FrameEdit): { path: number[] | null; op: Op } | null {
+	const path = m.path ?? null;
+	if (m.t === "edit") return { path, op: { t: "edit", html: String(m.html ?? "") } };
+	if (m.t === "patch") return { path, op: { t: "patch", style: m.style ?? {} } };
+	if (m.t === "remove") return { path, op: { t: "remove" } };
+	if (m.t === "append") return { path: [], op: { t: "append", html: String(m.html ?? "") } };
+	if (m.t === "after") return { path, op: { t: "after", html: String(m.html ?? "") } };
+	if (m.t === "order") return { path, op: { t: "order", to: Number(m.to) } };
+	return null;
+}
 
 // ── 표시 ──
 /** 그 쪽 (x, y) 에 핀을 꽂고 id 를 돌려준다. 표시면 그 모양도 함께. 그 자리(표시면 가운데) 요소는 슬라이드 창에 물어 붙인다 */

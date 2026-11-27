@@ -34,6 +34,7 @@ import { tell } from "../lib/frames";
 import { type Key, useT } from "../lib/i18n";
 import { useDeck } from "../lib/store";
 import { openMenu } from "./ContextMenu";
+import { useFind } from "./Find";
 
 export interface SelInfo {
 	tag: string;
@@ -84,6 +85,22 @@ export interface SelInfo {
 	text: boolean;
 	/** 글자를 골랐다: 고치는 중 고른 글자, 또는 마치기 전에 골라 둔 글자 */
 	ranged: boolean;
+	/** 표 칸이 합쳐져 있다 (나누기) */
+	merged: boolean;
+	/** 모양 도형 이름 (data-shape) · 화살표 */
+	geom: string | null;
+	arrow: boolean;
+	/** 함께 고른 수 (Shift · Ctrl 누르기 · 범위 끌기 · Ctrl+A). 서식 띠에 보이는 값은 첫째 것 */
+	count: number;
+	/** 그룹으로 묶을 수 있다 · 그룹을 풀 수 있다 */
+	groupable: boolean;
+	grouped: boolean;
+	/** 돌리기 전 상자의 왼쪽 위 (쪽 px) · 돌린 각도 0~359 · 뒤집기 */
+	x: number;
+	y: number;
+	rot: number;
+	flipH: boolean;
+	flipV: boolean;
 }
 
 type Tab = "home" | "insert" | "shape" | "table";
@@ -103,6 +120,32 @@ const SPACINGS: [number, Key][] = [[-3, "rbSpVTight"], [-1.5, "rbSpTight"], [0, 
 const RADII: [string, Key][] = [["0", "rbRadius0"], ["6px", "rbRadiusS"], ["16px", "rbRadiusM"], ["32px", "rbRadiusL"], ["9999px", "rbRadiusFull"]];
 // 슬라이드에 자주 넣는 기호: 한글 문서에서 쓰는 원 번호 · 낫표 · 단위를 함께 둔다
 const SYMBOLS = "• · ※ → ← ↑ ↓ ↔ ⇒ ▶ ▷ ◀ ■ □ ● ○ ◆ ◇ ▲ △ ★ ☆ ✓ ✔ ✗ ① ② ③ ④ ⑤ ⑥ ㉠ ㉡ ㉢ ± × ÷ ≠ ≤ ≥ ° ℃ ㎡ ㎞ … 「 」 『 』".split(" ");
+// 도형 갤러리 — [넣을 것, 이름, 16×16 그림]. 모양 도형 이름은 PowerPoint 기본 도형 이름 그대로다 (rt.js GEOM · exportPptx GEOMS)
+const SHAPE_SETS: [Key, [string, Key, string][]][] = [
+	["rbShLines", [
+		["line", "rbLine", "M2 8h12"],
+		["arrow", "rbArrowLine", "M2 13L13 3M8 3h5v5"],
+	]],
+	["rbShBasic", [
+		["rect", "rbRect", "M2 3.5h12v9H2z"],
+		["round", "rbRound", "M5 3.5h6a3 3 0 0 1 3 3v3a3 3 0 0 1-3 3H5a3 3 0 0 1-3-3v-3a3 3 0 0 1 3-3z"],
+		["ellipse", "rbEllipse", "M8 3a6 5 0 1 1 0 10A6 5 0 1 1 8 3z"],
+		["triangle", "rbTriangle", "M8 2.5l6 11H2z"],
+		["rtTriangle", "rbRtTriangle", "M2.5 2.5v11h11z"],
+		["diamond", "rbDiamond", "M8 2l6 6-6 6-6-6z"],
+		["parallelogram", "rbParallelogram", "M5 3.5h9l-3 9H2z"],
+		["trapezoid", "rbTrapezoid", "M5 3.5h6l3 9H2z"],
+		["hexagon", "rbHexagon", "M2 8l3-5h6l3 5-3 5H5z"],
+	]],
+	["rbShArrows", [
+		["rightArrow", "rbRightArrow", "M2 6h7V3l5 5-5 5v-3H2z"],
+		["leftArrow", "rbLeftArrow", "M14 6H7V3L2 8l5 5v-3h7z"],
+		["upArrow", "rbUpArrow", "M6 14V7H3l5-5 5 5h-3v7z"],
+		["downArrow", "rbDownArrow", "M6 2v7H3l5 5 5-5h-3V2z"],
+		["homePlate", "rbHomePlate", "M2 4h8l4 4-4 4H2z"],
+		["chevron", "rbChevron", "M2 4h8l4 4-4 4H2l4-4z"],
+	]],
+];
 /** 쪽 1px → cm (96px = 1in = 2.54cm) */
 const CM = 2.54 / 96;
 const SHOWN_KEY = "claudeppt.ribbon";
@@ -221,7 +264,8 @@ export function Ribbon({ win, info, placing, off, onAsk }: { win: React.MutableR
 		document.getElementById(`rb-tab-${k}`)?.focus();
 		e.preventDefault();
 	};
-	const hint = placing ? t("rbPlaceHint") : info?.painter ? t("rbPaintHint") : mini ? "" : !info && tab !== "insert" ? t("rbPickHint") : tab === "table" && !info?.cell ? t("rbCellHint") : "";
+	const hint = placing ? t("rbPlaceHint") : info?.painter ? t("rbPaintHint") : mini ? "" : !info && tab !== "insert" ? t("rbPickHint") : tab === "table" && !info?.cell ? t("rbCellHint")
+		: (info?.count ?? 0) > 1 ? t("rbMany").replace("{n}", String(info!.count)) : "";
 
 	return (
 		<div className={"ribbon" + (off ? " off" : "") + (mini ? " mini" : "")} role="toolbar" aria-label={t("rbRibbon")} title={off ? t("rbOff") : undefined}>
@@ -303,7 +347,7 @@ function HomeTab({ t, info, send, vars, mark, setMark, onAsk }: Ctx) {
 				<button disabled={noClip} onMouseDown={hold} onClick={() => send("copy")} title={`${t("rbCopy")} (Ctrl+C)`} aria-label={t("rbCopy")}>
 					<Icon><rect x="5" y="5" width="8.5" height="8.5" rx="1" /><path d="M11 3V2.5H2.5V11H3" /></Icon>
 				</button>
-				<button disabled={none} aria-pressed={!!info?.painter} onMouseDown={hold} onClick={() => send("painter")} title={t("rbPainter")} aria-label={t("rbPainter")}>
+				<button disabled={none} aria-pressed={!!info?.painter} onMouseDown={hold} onClick={() => send("painter")} onDoubleClick={() => send("painter", "lock")} title={`${t("rbPainter")}. ${t("rbPainterLock")}`} aria-label={t("rbPainter")}>
 					<Icon d="M3 2.5h8v3.5H3zM11 4.2h2v3.3H7.5V10M6.5 10h2v4h-2z" />
 				</button>
 			</Grp>
@@ -416,16 +460,20 @@ function FontList({ t, disabled, current, pick }: { t: Ctx["t"]; disabled: boole
 	);
 }
 
-/** 정렬(앞뒤 순서) · 맞춤(쪽에 맞춤): 홈의 그리기와 도형 서식이 함께 쓴다 */
+/** 정렬(앞뒤 순서 · 그룹) · 맞춤(하나면 쪽에, 여럿이면 서로에게 · 간격 같게) · 회전: 홈의 그리기와 도형 서식이 함께 쓴다 (PowerPoint 「정렬」) */
 function Arrange({ t, info, send }: Pick<Ctx, "t" | "info" | "send">) {
+	const many = (info?.count ?? 0) > 1;
 	return (
 		<>
-			<button disabled={!info?.abs} title={t("rbArrange")} aria-label={t("rbArrange")}
+			<button disabled={!info?.abs && !info?.groupable && !info?.grouped} title={t("rbArrange")} aria-label={t("rbArrange")}
 				onClick={(e) => openMenu(e, [
-					{ label: t("rbFront"), run: () => send("arrange", "front") },
-					{ label: t("rbForward"), run: () => send("arrange", "forward") },
-					{ label: t("rbBackward"), run: () => send("arrange", "backward") },
-					{ label: t("rbBack"), run: () => send("arrange", "back") },
+					{ label: t("rbFront"), run: () => send("arrange", "front"), disabled: !info?.abs },
+					{ label: t("rbForward"), run: () => send("arrange", "forward"), disabled: !info?.abs },
+					{ label: t("rbBackward"), run: () => send("arrange", "backward"), disabled: !info?.abs },
+					{ label: t("rbBack"), run: () => send("arrange", "back"), disabled: !info?.abs },
+					"-",
+					{ label: t("rbGroup"), kbd: "Ctrl+G", run: () => send("group"), disabled: !info?.groupable },
+					{ label: t("rbUngroup"), kbd: "Ctrl+Shift+G", run: () => send("ungroup"), disabled: !info?.grouped },
 				])}>
 				<Icon><rect x="2" y="2" width="8" height="8" rx="1" /><path d="M12 6h2v8H6v-2" /></Icon><Caret />
 			</button>
@@ -438,8 +486,21 @@ function Arrange({ t, info, send }: Pick<Ctx, "t" | "info" | "send">) {
 					{ label: t("rbToTop"), run: () => send("alignTo", "top") },
 					{ label: t("rbToMiddle"), run: () => send("alignTo", "middle") },
 					{ label: t("rbToBottom"), run: () => send("alignTo", "bottom") },
+					"-",
+					{ label: t("rbDistH"), run: () => send("distribute", "h"), disabled: !many || (info?.count ?? 0) < 3 },
+					{ label: t("rbDistV"), run: () => send("distribute", "v"), disabled: !many || (info?.count ?? 0) < 3 },
 				])}>
 				<Icon d="M2.5 2v12M5 4.5h8v3H5zM5 9.5h5v3H5z" /><Caret />
+			</button>
+			<button disabled={!info?.abs} title={t("rbRotate")} aria-label={t("rbRotate")}
+				onClick={(e) => openMenu(e, [
+					{ label: t("rbRotR"), run: () => send("rotate", 90) },
+					{ label: t("rbRotL"), run: () => send("rotate", -90) },
+					"-",
+					{ label: t("rbFlipV"), checked: !!info?.flipV, run: () => send("flip", "y") },
+					{ label: t("rbFlipH"), checked: !!info?.flipH, run: () => send("flip", "x") },
+				])}>
+				<Icon d="M12.5 7.5A4.5 4.5 0 1 1 9.5 3.3M9 1.5l1 2-2 1" /><Caret />
 			</button>
 		</>
 	);
@@ -485,14 +546,29 @@ function InsertTab({ t, info, send, insert, placing, win }: Ctx) {
 				<button className="wide" aria-pressed={placing === "text"} onClick={() => insert("text")} title={t("rbTextbox")}>
 					<Icon><rect x="2.5" y="3" width="11" height="10" rx="1" /><path d="M5.5 6h5M8 6v5" /></Icon>{t("rbTextbox")}
 				</button>
-				<button className="wide" aria-pressed={!!placing && placing !== "text"} title={t("rbShape")}
-					onClick={(e) => openMenu(e, [
-						{ label: t("rbRect"), checked: placing === "rect", run: () => insert("rect") },
-						{ label: t("rbRound"), checked: placing === "round", run: () => insert("round") },
-						{ label: t("rbEllipse"), checked: placing === "ellipse", run: () => insert("ellipse") },
-						{ label: t("rbLine"), checked: placing === "line", run: () => insert("line") },
-					])}>
-					<Icon><rect x="2" y="2.5" width="7" height="7" rx="1" /><circle cx="10.5" cy="10.5" r="3.5" /></Icon>{t("rbShape")}<Caret />
+				{/* 도형 갤러리 (PowerPoint 「도형」처럼 그림으로 고른다). 고른 뒤 쪽에서 끌어 그린다 */}
+				<Pop label={t("rbShape")} wide={<>{t("rbShape")}</>} current={null} icon={<Icon><rect x="2" y="2.5" width="7" height="7" rx="1" /><circle cx="10.5" cy="10.5" r="3.5" /></Icon>}>
+					{(close) => (
+						<>
+							{SHAPE_SETS.map(([head, list]) => (
+								<div key={head}>
+									<h4>{t(head)}</h4>
+									<div className="rb-grid rb-shapes">
+										{list.map(([k, name, d]) => (
+											<button key={k} aria-pressed={placing === k} onMouseDown={hold} onClick={() => { insert(k); close(); }} title={t(name)} aria-label={t(name)}>
+												<Icon d={d} />
+											</button>
+										))}
+									</div>
+								</div>
+							))}
+						</>
+					)}
+				</Pop>
+			</Grp>
+			<Grp label={t("linkInsert")}>
+				<button className="wide" onMouseDown={hold} onClick={() => useFind.getState().show("link")} disabled={!info?.text} title={`${t("linkInsert")} (Ctrl+K)`}>
+					<Icon d="M7 9a3 3 0 0 0 4.2 0l2-2a3 3 0 0 0-4.2-4.2l-.8.8M9 7a3 3 0 0 0-4.2 0l-2 2a3 3 0 0 0 4.2 4.2l.8-.8" />{t("linkInsert")}
 				</button>
 			</Grp>
 			<Grp label={t("rbSymbol")}>
@@ -527,6 +603,22 @@ function ShapeTab({ t, info, send, vars }: Ctx) {
 			<span className="unit">cm</span>
 		</label>
 	);
+	const pos = (k: "x" | "y", text: string) => {
+		const v = parseFloat(text.replace(",", "."));
+		const cur = info?.[k];
+		if (Number.isFinite(v) && v > -100 && v < 200 && cur != null && Math.abs(v / CM - cur) >= 0.5) send("pos", { [k]: v / CM });
+	};
+	const posField = (k: "x" | "y", label: Key) => (
+		<label className="rb-dim" title={t(label)}>
+			<span aria-hidden>{k === "x" ? "X" : "Y"}</span>
+			<Field value={cm(info?.[k])} commit={(v) => pos(k, v)} label={t(label)} disabled={none || !info?.box} mono />
+			<span className="unit">cm</span>
+		</label>
+	);
+	const angle = (text: string) => {
+		const v = parseFloat(text.replace(",", "."));
+		if (Number.isFinite(v) && info && Math.round(((v % 360) + 360) % 360) !== info.rot) send("rotateTo", Math.round(v * 10) / 10);
+	};
 	const transparency = info ? 100 - info.opacity : 0;
 	return (
 		<>
@@ -534,7 +626,8 @@ function ShapeTab({ t, info, send, vars }: Ctx) {
 				<ColorPop label={t("rbFill")} current={info?.fill} disabled={none} vars={vars} onPick={(v) => send("fill", v)} onNone={() => send("fill", "transparent")}>
 					<Icon d="M3 9l5-5 5 5-5 5zM12.5 11.5c0 1 .7 1.5 1 1.5" />
 				</ColorPop>
-				<ColorPop label={t("rbOutline")} current={info?.line?.hex} disabled={none} vars={vars} onPick={(v) => send("line", { color: v })} onNone={() => send("line", { none: true })}
+				{/* 모양 도형(삼각형 · 화살표 …)은 잘라 그려서 테두리를 그을 수 없다 */}
+				<ColorPop label={t("rbOutline")} current={info?.arrow ? info.color : info?.line?.hex} disabled={none || !!info?.geom} vars={vars} onPick={(v) => send("line", { color: v })} onNone={() => send("line", { none: true })}
 					extra={
 						<>
 							<h4>{t("rbWeight")}</h4>
@@ -576,6 +669,16 @@ function ShapeTab({ t, info, send, vars }: Ctx) {
 				{dimField("height", "rbHeight")}
 				{dimField("width", "rbWidth")}
 			</Grp>
+			{/* 위치 · 회전: PowerPoint 는 서식 창에 두지만, 따로 창이 없으니 띠에 둔다. 여러 개면 첫째의 자리를 옮긴 만큼 모두 민다 */}
+			<Grp label={t("rbPosGrp")}>
+				{posField("x", "rbPosX")}
+				{posField("y", "rbPosY")}
+				<label className="rb-dim" title={t("rbAngle")}>
+					<span aria-hidden>⟳</span>
+					<Field value={info ? String(info.rot) : ""} commit={angle} label={t("rbAngle")} disabled={none || !info?.abs} mono />
+					<span className="unit">°</span>
+				</label>
+			</Grp>
 		</>
 	);
 }
@@ -602,9 +705,30 @@ function TableTab({ t, info, send, vars }: Ctx) {
 					<Icon d="M3 4.5h10M6.5 4.5V3h3v1.5M4.5 4.5l.6 9h5.8l.6-9" />{t("rbTableDel")}
 				</button>
 			</Grp>
+			<Grp label={t("rbMerge")}>
+				{b("mergeRight", "rbMergeRight", "M2.5 4.5h11v7h-11zM6 8h4M8.5 6.5L10 8l-1.5 1.5")}
+				{b("mergeDown", "rbMergeDown", "M4.5 2.5h7v11h-7zM8 6v4M6.5 8.5L8 10l1.5-1.5")}
+				<button className="wide" disabled={!cell || !info?.merged} onMouseDown={hold} onClick={() => send("tbl", "split")} title={t("rbSplit")}>
+					<Icon d="M2.5 4.5h11v7h-11zM8 4.5v7" />{t("rbSplit")}
+				</button>
+			</Grp>
 			<Grp label={t("rbCellFill")}>
 				<ColorPop label={t("rbCellFill")} current={info?.fill} disabled={!cell} vars={vars} onPick={(v) => send("fill", v)} onNone={() => send("fill", "transparent")}>
 					<Icon d="M3 9l5-5 5 5-5 5zM12.5 11.5c0 1 .7 1.5 1 1.5" />
+				</ColorPop>
+				{/* 표 테두리 — 모든 칸의 네 변을 같게. 없음 · 색 · 두께 */}
+				<ColorPop label={t("rbTblBorder")} current={null} disabled={!cell} vars={vars} onPick={(v) => send("tbl", { border: { color: v } })} onNone={() => send("tbl", { border: { none: true } })}
+					extra={
+						<>
+							<h4>{t("rbWeight")}</h4>
+							<div className="rb-row">
+								{[1, 2, 3, 4].map((w) => (
+									<button key={w} className="rb-w" onMouseDown={hold} onClick={() => send("tbl", { border: { width: w } })} title={`${w}px`}><span style={{ height: w }} /></button>
+								))}
+							</div>
+						</>
+					}>
+					<Icon d="M2.5 2.5h11v11h-11zM2.5 8h11M8 2.5v11" />
 				</ColorPop>
 			</Grp>
 		</>
