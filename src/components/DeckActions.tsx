@@ -32,12 +32,14 @@ export default function DeckActions() {
 		return () => removeEventListener("keydown", k);
 	}, []);
 	const busy = useDeck((s) => !!s.busy || !!s.running);
+	// 왜 막혔는지 — 2026.11.27 : 팀원 요청이 돌 때도 이유 없이 회색이었다
+	const why = useDeck((s) => (!s.busy && s.running ? t("busyClaude") : undefined));
 	return (
 		<div ref={ref} className="deck-acts">
 			<button className={"tb-btn" + (open === "page" ? " on" : "")} onClick={() => setOpen(open === "page" ? "" : "page")} disabled={busy || remote}>{t("pageSetup")}</button>
 			<button className={"tb-btn" + (open === "audit" ? " on" : "")} onClick={() => setOpen(open === "audit" ? "" : "audit")} disabled={busy}>{t("audit")}</button>
-			<button className={"tb-btn" + (open === "export" ? " on" : "")} onClick={() => setOpen(open === "export" ? "" : "export")} disabled={busy}>{t("export")}</button>
-			<button className={"tb-btn" + (open === "release" ? " on" : "")} onClick={() => setOpen(open === "release" ? "" : "release")} disabled={busy}>{t("release")}</button>
+			<button className={"tb-btn" + (open === "export" ? " on" : "")} onClick={() => setOpen(open === "export" ? "" : "export")} disabled={busy} title={why}>{t("export")}</button>
+			<button className={"tb-btn" + (open === "release" ? " on" : "")} onClick={() => setOpen(open === "release" ? "" : "release")} disabled={busy} title={why}>{t("release")}</button>
 			{open === "audit" && <AuditPop onDone={() => setOpen("")} />}
 			{open === "page" && <PagePop onDone={() => setOpen("")} />}
 			{open === "export" && <ExportPop onDone={() => setOpen("")} />}
