@@ -243,6 +243,10 @@ cd src-tauri && cargo check
 
 - **판 번호 규칙 (2026.11.23)**: 기여 PR 은 판 번호를 올리지 않는다. 병합한 뒤 관리자가 올린다. 고칠 때마다 패치 번호를 하나 올린다(`0.1.2` → `0.1.3`). 사용자가 「릴리즈」라고 하면 마이너 번호를 올리고 패치는 0 으로(`0.1.3` → `0.2.0`) 그 판을 낸다.
   패치 판은 쌓아 두기만 하고 GitHub 릴리즈로 내지 않는다: 깔린 앱이 받는 것은 릴리즈한 마이너 판뿐이다.
+- **PR 자동 병합 · 패치 릴리즈 (2026.11.27)**: PR 에서 CI(`check`)가 통과하면 `.github/workflows/automerge.yml` 이 사람 승인 없이 squash 로 넣고,
+  태그 · `tauri.conf.json` 판 중 가장 큰 것의 패치 +1 을 병합 커밋에 태그(`v<판>`)로 달아 릴리즈를 부른다. 노트는 PR 제목 한 줄.
+  main 의 판 번호 파일은 고치지 않는다(로컬에서 올려 두고 아직 밀지 않은 판과 부딪히지 않게). 빌드할 때 `.github/scripts/set-version.mjs` 가 태그 판으로 맞춘다.
+  그래서 main 의 판 번호는 릴리즈한 판보다 뒤처질 수 있다. 다음 판을 올릴 때는 `gh release list` 의 최신 판보다 크게 올린다. 서명 키 비밀이 없으면 태그만 달리고 설치 파일은 나가지 않는다.
 - `package.json` · `src-tauri/Cargo.toml` · `src-tauri/tauri.conf.json` 의 버전과 `CHANGELOG.md` 구획을 함께 올리고 커밋한 뒤 `git tag v<버전> && git push origin v<버전>`.
   `.github/workflows/release.yml` 이 설치 파일 · 서명 · `latest.json` 을 GitHub 릴리즈에 올린다.
 - 설치된 앱은 켤 때와 1시간마다 `releases/latest/download/latest.json` 을 보고 새 판이면 제목 줄에 「업데이트 <번호>」 칩이 서고, 처음 찾은 판은 설명을 저절로 편다.

@@ -8,11 +8,13 @@ if (tag && tag !== `v${version}`) fail(`태그 ${tag} 와 tauri.conf.json 버전
 
 // 구획 머리는 「## 0.1.1」 또는 「## 0.1.1 — 날짜」. 0.1.10 이 0.1.1 로 잡히지 않게 버전 뒤를 끊어 본다.
 const lines = readFileSync("CHANGELOG.md", "utf8").split(/\r?\n/);
+// 2026.11.27 : automerge 가 낸 패치 판은 CHANGELOG 에 구획이 없다. 그때는 넘겨받은 노트(PR 제목)를 쓴다
 const start = lines.findIndex((l) => l === `## ${version}` || l.startsWith(`## ${version} `));
-if (start < 0) fail(`CHANGELOG.md 에 ## ${version} 구획이 없다`);
+const given = (process.env.NOTES || "").trim();
+if (start < 0 && !given) fail(`CHANGELOG.md 에 ## ${version} 구획이 없다`);
 let end = lines.findIndex((l, i) => i > start && l.startsWith("## "));
 if (end < 0) end = lines.length;
-const body = lines.slice(start + 1, end).join("\n").trim();
+const body = start < 0 ? given : lines.slice(start + 1, end).join("\n").trim();
 if (!body) fail(`CHANGELOG.md 의 ## ${version} 구획이 비었다`);
 
 console.log(body);
