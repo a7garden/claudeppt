@@ -3,6 +3,8 @@
 //   edit    글자를 고쳤다 (innerHTML)          patch   서식 · 자리 · 크기 (style 속성, 빈 값은 지운다)
 //   remove  지웠다                            append  쪽 맨 위(마지막 자식)에 새 요소 — 서식 띠의 삽입 · 붙여 넣기
 //   after   그 요소 바로 뒤에 새 요소 — 복제     order   같은 부모 안에서 자리(z 순서)를 바꾼다
+//   batch   여러 요소를 한 번에 (여러 개 고르고 옮기기 · 맞춤 · 묶기). 파일 한 번 쓰기 · 되돌리기 한 칸.
+//           ops 는 런타임이 한 것과 같은 차례로 적용한다. 길은 앞의 op 가 적용된 뒤의 문서에서 잰 것이라 차례가 맞으면 지우기 · 넣기가 섞여도 같은 요소를 찾는다
 import { api } from "./api";
 
 export type Op =
@@ -11,7 +13,8 @@ export type Op =
 	| { t: "remove" }
 	| { t: "append"; html: string }
 	| { t: "after"; html: string }
-	| { t: "order"; to: number };
+	| { t: "order"; to: number }
+	| { t: "batch"; ops: { path: number[] | null; op: Op }[] };
 
 /** 글 줄 안에 드는 꾸밈 요소 — 핀이 낱말 하나에 꽂혀도 그 낱말을 감싼 것이 아니라 그 문단 · 제목을 가리키게 */
 const INLINE = new Set(["SPAN", "B", "STRONG", "I", "EM", "U", "A", "BR", "SUP", "SUB", "CODE", "SMALL", "MARK", "S", "DEL", "INS", "LABEL", "ABBR", "Q"]);
@@ -45,10 +48,19 @@ export function locate(src: string, path: number[] | null, label = ""): { css: s
 }
 
 export async function applyOp(dir: string, file: string, p: number[] | null, op: Op) {
-	if (!p) return false;
 	const src = await api.readText(dir, file);
 	const doc = new DOMParser().parseFromString(src, "text/html");
 	const root = doc.querySelector(".slide") || doc.body;
+	const ok = op.t === "batch" ? op.ops.length > 0 && op.ops.every((x) => x.op.t !== "batch" && applyOne(root, x.path, x.op)) : applyOne(root, p, op);
+	// 묶음의 한 op 라도 길을 못 찾으면 쓰지 않는다: 반만 적용된 쪽은 화면과 원본이 어긋난다
+	if (!ok) return false;
+	const doctype = /^\s*<!doctype[^>]*>/i.exec(src)?.[0] ?? "<!doctype html>";
+	await api.writeText(dir, file, doctype + "\n" + doc.documentElement.outerHTML + "\n");
+	return true;
+}
+
+function applyOne(root: Element, p: number[] | null, op: Op) {
+	if (!p) return false;
 	let el: Element | null = root;
 	for (const i of p) el = el?.children[i] ?? null;
 	if (!el) return false;
@@ -62,8 +74,7 @@ export async function applyOp(dir: string, file: string, p: number[] | null, op:
 		const parent = el.parentElement!;
 		el.remove();
 		parent.insertBefore(el, parent.children[op.to] ?? null);
-	} else el.remove();
-	const doctype = /^\s*<!doctype[^>]*>/i.exec(src)?.[0] ?? "<!doctype html>";
-	await api.writeText(dir, file, doctype + "\n" + doc.documentElement.outerHTML + "\n");
+	} else if (op.t === "remove") el.remove();
+	else return false;
 	return true;
 }

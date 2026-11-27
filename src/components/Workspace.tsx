@@ -11,6 +11,7 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { deckUrl } from "../lib/api";
 import { type Deck } from "../lib/deck";
+import { type Op } from "../lib/edits";
 import { ask, onFrame, tell } from "../lib/frames";
 import { useT } from "../lib/i18n";
 import { anchor, bbox, MARK, type Shape, shapePath, tiny, type Tool } from "../lib/markup";
@@ -474,12 +475,14 @@ function Stage() {
 		if (m.t === "redo") return void useDeck.getState().redo();
 		if (m.t === "copy") clip = { html: m.html, slide: sid, n: 0 };
 		else if (m.t === "pasteReq") { if (now) paste(sid); }
-		else if (m.t === "edit") edit(m.path, { t: "edit", html: m.html });
-		else if (m.t === "patch") edit(m.path, { t: "patch", style: m.style });
-		else if (m.t === "remove") edit(m.path, { t: "remove" });
-		else if (m.t === "append") edit([], { t: "append", html: m.html });
-		else if (m.t === "after") edit(m.path, { t: "after", html: m.html });
-		else if (m.t === "order") edit(m.path, { t: "order", to: m.to });
+		// 여러 요소를 한 번에 고친 것 (여러 개 고르기 · 묶기) — 파일 한 번 쓰기 · 되돌리기 한 칸
+		else if (m.t === "batch" && Array.isArray(m.ops)) {
+			const ops = m.ops.map((o: FrameEdit) => opOf(o)).filter((x: ReturnType<typeof opOf>): x is NonNullable<typeof x> => !!x);
+			if (ops.length === m.ops.length) edit([], { t: "batch", ops });
+		} else {
+			const one = opOf(m as FrameEdit);
+			if (one) edit(one.path, one.op);
+		}
 	}), [preview]);
 	// 쪽을 넘기거나 지난 판을 보면 옛 쪽의 고른 것을 내려놓는다 — 새 창이 다시 알린다
 	useEffect(() => { setSelInfo(null); setPlacing(null); }, [slide?.id, preview]);
@@ -547,7 +550,12 @@ function Stage() {
 				{ label: t("rbCopy"), kbd: "Ctrl+C", run: () => cmd("copy") },
 				{ label: t("rbDup"), kbd: "Ctrl+D", run: () => cmd("dup") },
 				...(selNow.current?.abs ? [{ label: t("rbFront"), run: () => cmd("arrange", "front") }, { label: t("rbBack"), run: () => cmd("arrange", "back") }] : []),
-				{ label: `${t("removeEl")} <${hit.tag}>`, kbd: "Delete", danger: true, run: () => applyDirect(slide.id, hit.path, { t: "remove" }, undefined, win.current ? owner.current.get(win.current)?.rev : undefined) },
+				...(selNow.current?.groupable ? [{ label: t("rbGroup"), kbd: "Ctrl+G", run: () => cmd("group") }] : []),
+				...(selNow.current?.grouped ? [{ label: t("rbUngroup"), kbd: "Ctrl+Shift+G", run: () => cmd("ungroup") }] : []),
+				// 여러 개를 골랐으면 고른 것 모두를 지운다 (Delete 와 같다)
+				(selNow.current?.count ?? 0) > 1
+					? { label: t("rbDelete"), kbd: "Delete", danger: true, run: () => cmd("remove") }
+					: { label: `${t("removeEl")} <${hit.tag}>`, kbd: "Delete", danger: true, run: () => applyDirect(slide.id, hit.path, { t: "remove" }, undefined, win.current ? owner.current.get(win.current)?.rev : undefined) },
 			] : []),
 			...(mode === "edit" && clip && !flow && !compare ? [{ label: t("rbPaste"), kbd: "Ctrl+V", run: () => paste(slide.id) }] : []),
 			"-",
@@ -625,6 +633,20 @@ function Stage() {
 
 /** 복사한 요소 (Ctrl+C · 우클릭 복사) — 앱을 켠 동안만. 다른 쪽에도 붙인다. n 은 같은 쪽에 붙인 횟수 */
 let clip: { html: string; slide: string; n: number } | null = null;
+
+/** 슬라이드 창이 보낸 손 편집 한 가지 (rt.js 의 edit · patch · remove · append · after · order) */
+type FrameEdit = { t: string; path?: number[] | null; html?: string; style?: Record<string, string>; to?: number };
+/** 편집 메시지 → 원본에 쓸 op. 편집이 아니면 null */
+function opOf(m: FrameEdit): { path: number[] | null; op: Op } | null {
+	const path = m.path ?? null;
+	if (m.t === "edit") return { path, op: { t: "edit", html: String(m.html ?? "") } };
+	if (m.t === "patch") return { path, op: { t: "patch", style: m.style ?? {} } };
+	if (m.t === "remove") return { path, op: { t: "remove" } };
+	if (m.t === "append") return { path: [], op: { t: "append", html: String(m.html ?? "") } };
+	if (m.t === "after") return { path, op: { t: "after", html: String(m.html ?? "") } };
+	if (m.t === "order") return { path, op: { t: "order", to: Number(m.to) } };
+	return null;
+}
 
 // ── 표시 ──
 /** 그 쪽 (x, y) 에 핀을 꽂고 id 를 돌려준다. 표시면 그 모양도 함께. 그 자리(표시면 가운데) 요소는 슬라이드 창에 물어 붙인다 */
