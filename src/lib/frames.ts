@@ -1,7 +1,7 @@
 // 슬라이드 iframe(런타임 rt.js)과 주고받는 말. 슬라이드는 deck:// 의 다른 출처라 postMessage 로만 닿는다.
 import { deckUrl } from "./api";
 
-/** 슬라이드 iframe 의 sandbox — 스크립트만 허락하고 출처는 이름 없는 것으로. 앱 창의 쪽 · 화면 밖 쪽(내보내기 · 썸네일) 모두 같다 (Workspace.tsx SlideFrame) */
+/** 슬라이드 iframe 의 sandbox: 스크립트만 허락하고 출처는 이름 없는 것으로. 앱 창의 쪽 · 화면 밖 쪽(내보내기 · 썸네일) 모두 같다 (Workspace.tsx SlideFrame) */
 export const SLIDE_SANDBOX = "allow-scripts";
 
 type Msg = { __deck: 1; t: string; req?: string; [k: string]: any };

@@ -80,6 +80,9 @@ pub struct Sian {
 	behind: u32,
 	/// 열어 둔 작업 폴더 — 없으면 아직 열지 않았다(사본에서 보내 온 가지)
 	path: Option<String>,
+	/// 사본에서 가져온 때만: 사본의 서명 기록이 이 덱의 것과 어떤 사이인가 (trust.rs compare_copy)
+	#[serde(skip_serializing_if = "Option::is_none")]
+	chain: Option<&'static str>,
 }
 
 /// 갈래 → 그 갈래를 쥔 작업 폴더 (git worktree list)
@@ -112,6 +115,7 @@ fn sian_of(main: &Path, id: &str, wt: &[(String, String)]) -> Res<Sian> {
 		ahead,
 		behind,
 		path: wt.iter().find(|(x, _)| *x == b).map(|(_, p)| p.clone()),
+		chain: None,
 	})
 }
 
@@ -207,6 +211,8 @@ fn merge_into(into: &Path, other: &str, message: &str, author: Option<&str>, pre
 	let o = c.arg(other).output().map_err(err)?;
 	if o.status.success() {
 		let changed = run(into, &["rev-parse", "HEAD"])? != before;
+		// 덱 폴더(줄기)에 넣었으면 봉한다: 가지 폴더로 받은 것(줄기 받기)은 seal 이 본 작업 폴더가 아니라며 넘긴다
+		crate::trust::seal(into);
 		return Ok(Merged { ok: true, commit: if changed { head(into).ok() } else { None }, conflicts: vec![] });
 	}
 	let conflicts: Vec<String> = run(into, &["diff", "--name-only", "--diff-filter=U"]).unwrap_or_default().lines().map(String::from).collect();
@@ -353,7 +359,10 @@ pub fn vcs_fork(dir: String, dest: String) -> Res<()> {
 	let src = src.strip_prefix(r"\\?\").unwrap_or(&src).to_string();
 	let parent = to.parent().ok_or("사본 자리가 맞지 않다")?;
 	std::fs::create_dir_all(parent).map_err(err)?;
-	run(parent, &["clone", "-q", "--no-hardlinks", &src, &to.to_string_lossy()]).map(|_| ())
+	run(parent, &["clone", "-q", "--no-hardlinks", &src, &to.to_string_lossy()])?;
+	// 서명 기록도 함께: 없으면 사본이 첫 판에서 새 기록(다른 덱)을 시작해, 돌아올 때 원본과 견줄 수 없다. 기록이 없는 덱이면 그냥 둔다
+	let _ = run(to, &["fetch", "-q", "--no-tags", "origin", &format!("+{0}:{0}", crate::trust::CHAIN)]);
+	Ok(())
 }
 
 /// 사본의 변경을 원본 덱의 가지로 보낸다 — 같은 PC 에 원본 덱이 있을 때. 없으면 CPPT 로 보내 원본에서 가져온다
@@ -401,7 +410,9 @@ pub fn vcs_fork_fetch(dir: String, from: String, name: String, by: Option<String
 		return Err("이 덱과 이력이 이어지지 않은 덱이다 — 이 덱에서 떼어 간 사본만 가져온다".into());
 	}
 	name_sian(d, &b, &name, by.as_deref(), &id)?;
-	sian_of(d, &id, &worktrees(d))
+	let mut s = sian_of(d, &id, &worktrees(d))?;
+	s.chain = Some(crate::trust::compare_copy(d, f, &id));
+	Ok(s)
 }
 
 #[cfg(test)]

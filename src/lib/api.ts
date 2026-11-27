@@ -8,7 +8,12 @@ export interface Hold { name: string; hash: string; author: string; subject: str
 /** 턴의 변경을 덱 위에 얹은 결과 (vcs.rs Landed) */
 export type Landed = { kind: "none" } | { kind: "applied"; commit: Commit; files: string[] } | { kind: "held"; hold: Hold };
 /** 갈래 (branch.rs) — 가지 하나. ahead 는 줄기에 없는 변경 수 · behind 는 받지 않은 줄기의 변경 수 · path 는 열어 둔 작업 폴더 */
-export interface Sian { id: string; name: string; by: string; hash: string; date: string; ahead: number; behind: number; path: string | null }
+export interface Sian { id: string; name: string; by: string; hash: string; date: string; ahead: number; behind: number; path: string | null; chain?: ChainRelation }
+/** 사본에서 가져올 때 사본의 서명 기록이 이 덱의 것과 어떤 사이인가 (trust.rs compare_copy) */
+export type ChainRelation = "none" | "same" | "ahead" | "behind" | "diverged" | "foreign" | "invalid";
+/** 명부 · 승인 기록 (trust.rs View) */
+export interface TrustPerson { id: string; name: string; role: "approve" | "edit" | "assigned" | "comment" | "view"; keys: number; slides: string[]; me: boolean }
+export interface TrustView { deck: string; n: number; sealed: boolean; people: TrustPerson[]; review: boolean; me: string; approver: boolean; fragile: boolean }
 /** 이 폴더는 어느 덱의 어느 줄인가 — sian 이 있으면 가지 폴더, main 은 본 덱 폴더 */
 export interface Where { main: string; sian: string | null; name: string | null; origin: string | null }
 /** 합친 결과 — ok 가 아니면 겹친 파일 */
@@ -78,6 +83,10 @@ export const api = {
 	fork: (dir: string, dest: string) => invoke<void>("vcs_fork", { dir, dest }),
 	forkSend: (dir: string, name: string, by?: string) => invoke<string>("vcs_fork_send", { dir, name, by: by || null }),
 	forkFetch: (dir: string, from: string, name: string, by?: string) => invoke<Sian>("vcs_fork_fetch", { dir, from, name, by: by || null }),
+	trustState: (dir: string) => invoke<TrustView | null>("trust_state", { dir }),
+	trustRename: (dir: string, name: string) => invoke<TrustView>("trust_rename", { dir, name }),
+	trustRecovery: (dir: string) => invoke<string>("trust_recovery", { dir }),
+	trustRecover: (dir: string, secret: string) => invoke<TrustView>("trust_recover", { dir, secret }),
 	log: (dir: string, limit?: number) => invoke<Commit[]>("vcs_log", { dir, limit }),
 	tag: (dir: string, name: string) => invoke<void>("vcs_tag", { dir, name }),
 	restore: (dir: string, hash: string, message: string, author?: string) => invoke<Commit | null>("vcs_restore", { dir, hash, message, author: author || null }),

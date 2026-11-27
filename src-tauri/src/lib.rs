@@ -12,6 +12,7 @@ pub mod cli;
 mod claude;
 mod collab;
 mod control;
+mod deckmerge;
 mod fonts;
 mod fsx;
 mod imagegen;
@@ -22,6 +23,7 @@ mod project;
 mod pptsnap;
 mod runner;
 mod vcs;
+mod trust;
 mod tunnel;
 mod watch;
 
@@ -126,6 +128,10 @@ pub fn run() {
 			vcs::vcs_log,
 			vcs::vcs_tag,
 			vcs::vcs_restore,
+			trust::trust_state,
+			trust::trust_rename,
+			trust::trust_recovery,
+			trust::trust_recover,
 			claude::claude_detect,
 			claude::claude_run,
 			claude::claude_stop,

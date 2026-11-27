@@ -46,17 +46,24 @@ fn key_file() -> std::path::PathBuf {
 	crate::control::data_dir().join("p2p.key")
 }
 
-/// 이 앱의 열쇠 — 처음 한 번 만들어 남긴다. 못 남기면(보호 저장이 안 되는 곳) 이번 실행에만 쓴다
-fn secret() -> SecretKey {
+/// 이 앱의 열쇠: 처음 한 번 만들어 남긴다. 못 남기면(보호 저장이 안 되는 곳) 이번 실행에만 쓴다.
+/// 2026.11.27 : 덱의 서명 기록(trust.rs)도 이 열쇠로 서명한다. 앱과 앱 밖 CLI 가 처음에 같은 때 만들면 둘이 다른 열쇠를 쥐게 되므로,
+/// 새 파일로만 쓰고(create_new) 이미 생겼으면 그것을 읽는다
+pub(crate) fn secret() -> SecretKey {
 	let b64 = base64::engine::general_purpose::STANDARD;
-	let saved = std::fs::read_to_string(key_file()).ok().and_then(|t| b64.decode(t.trim()).ok()).and_then(|b| crate::runner::dpapi::unprotect(&b)).and_then(|b| <[u8; 32]>::try_from(b).ok());
-	if let Some(b) = saved {
+	let saved = || std::fs::read_to_string(key_file()).ok().and_then(|t| b64.decode(t.trim()).ok()).and_then(|b| crate::runner::dpapi::unprotect(&b)).and_then(|b| <[u8; 32]>::try_from(b).ok());
+	if let Some(b) = saved() {
 		return SecretKey::from_bytes(&b);
 	}
 	let k = SecretKey::generate();
 	if let Some(sealed) = crate::runner::dpapi::protect(&k.to_bytes()) {
 		let _ = std::fs::create_dir_all(crate::control::data_dir());
-		let _ = std::fs::write(key_file(), b64.encode(sealed));
+		let made = std::fs::OpenOptions::new().write(true).create_new(true).open(key_file()).and_then(|mut f| std::io::Write::write_all(&mut f, b64.encode(sealed).as_bytes()));
+		if made.is_err() {
+			if let Some(b) = saved() {
+				return SecretKey::from_bytes(&b);
+			}
+		}
 	}
 	k
 }

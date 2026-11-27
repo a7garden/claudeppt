@@ -1010,7 +1010,7 @@
 			const k = m.k;
 			const el = k && Date.now() - k.at < 5000 && k.path ? atPath(k.path) : null;
 			if (el && el !== root) { select(el); picked = Date.now(); window.focus(); }
-			// 다시 읽은 쪽이면 띠에 지금 고른 것(없으면 없음)을 알린다 — 띠가 옛 쪽의 고른 것을 들고 있지 않게
+			// 다시 읽은 쪽이면 띠에 지금 고른 것(없으면 없음)을 알린다: 띠가 옛 쪽의 고른 것을 들고 있지 않게
 			else announce();
 		} else if (m.t === "cmd") {
 			if (mode === "edit") command(m.cmd, m.v, m);
