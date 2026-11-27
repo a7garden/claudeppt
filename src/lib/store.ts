@@ -372,7 +372,8 @@ export const persistTalk = (dir: string, st: Pick<S, "turns" | "sessions" | "bin
 		bind: st.bind,
 		talkKey: st.talkKey,
 		sessionId: st.sessions.find((x) => x.key === st.talkKey)?.claude ?? null,
-		turns: st.turns.map((t) => (t.status === "running" ? { ...t, status: "stopped" } : t)),
+		// 기다리던 턴도 멈춘 것으로 — 다시 켜면 줄이 비어 있어 「대기 중」인 채 영영 돌지 않는다 (2026.11.27). 멈춘 턴은 「요청 다시 쓰기」로 되살린다
+		turns: st.turns.map((t) => (t.status === "running" || t.status === "queued" ? { ...t, status: "stopped" } : t)),
 	};
 	return api.writeText(dir, ".claudeppt/talk.json", JSON.stringify(file, null, 1)).catch(() => {});
 };
